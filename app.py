@@ -131,7 +131,8 @@ def get_helloasso_token(client_id, client_secret):
 def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
     url = f"https://api.helloasso.com/v5/organizations/echecs-cassis/forms/{form_type}/{form_slug}/items"
     try:
-        r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, params={"pageSize": 100})
+        # LE CŒUR DU CORRECTIF : L'ajout de withDetails=true oblige HelloAsso à cracher les réponses aux questions
+        r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, params={"pageSize": 100, "withDetails": "true"})
         items = r.json().get("data", [])
         rows = []
         for item in items:
@@ -147,7 +148,6 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
             ville_def = user.get("city", payer.get("city", ""))
             naissance_def = user.get("birthDate", user.get("dateOfBirth", payer.get("dateOfBirth", "")))
             
-            # --- STRUCTURE BLINDÉE : Les colonnes existent toujours ---
             row = {
                 "Campagne": nom_campagne,
                 "Nom": nom_propre,
@@ -175,24 +175,25 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
                 "J’autorise le club à utiliser des images de moi ou mon enfant pour des objets publicitaires (prospectus de présentation du club, oriflamme, kakemono) :": "",
                 "J’accepte de recevoir les informations sur l’actualité du club (soirée blitz, organisation de stages pendant les vacances…) ainsi que les annonces des prochains tournois par mail": "",
                 "J’autorise mon enfant à quitter le club seul": "-",
-                'e confirme avoir renseigné le questionnaire de santé "Sport" (mineurs) https://www.echecs.asso.fr/Actus/14098/questionnaire_mineur.pdf': ""
+                'e confirme avoir renseigné le questionnaire de santé "Sport" (mineurs) https://www.echecs.asso.fr/Actus/14098/questionnaire_mineur.pdf': "",
+                
+                "Sortie Seul": "-",
+                "Classe Déduite": "-"
             }
             
             if row["Date de naissance"] and len(str(row["Date de naissance"])) >= 10:
                 row["Date de naissance"] = str(row["Date de naissance"])[:10]
             
-            # --- ASPIRATION INTELLIGENTE PAR MOTS-CLÉS ---
             for field in item.get("customFields", []):
                 nom_champ = str(field.get("name", ""))
                 reponse = str(field.get("answer", "")).strip()
                 nom_lower = nom_champ.lower()
                 
-                # Injection brute au cas où 
                 row[nom_champ] = reponse
                 
-                # Détection par mot-clé (ignore la ponctuation et les espaces invisibles)
                 if "classe" in nom_lower or "niveau" in nom_lower: 
                     row["Classe"] = reponse
+                    row["Classe Déduite"] = reponse
                 if "portable 2" in nom_lower or "urgence" in nom_lower: 
                     row["N° Portable 2 (en cas d'urgence)"] = reponse
                 elif "portable" in nom_lower or "téléphone" in nom_lower or "telephone" in nom_lower or "tel" in nom_lower: 
@@ -221,15 +222,20 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
                 if "quitter" in nom_lower and "seul" in nom_lower:
                     if type_formule == "École":
                         row["J’autorise mon enfant à quitter le club seul"] = "N/A (École)"
+                        row["Sortie Seul"] = "N/A (École)"
                     else:
                         if "oui" in reponse.lower() or reponse.lower() == "true": 
                             row["J’autorise mon enfant à quitter le club seul"] = "✅ OUI"
+                            row["Sortie Seul"] = "✅ OUI"
                         elif "non" in reponse.lower() or reponse.lower() == "false": 
                             row["J’autorise mon enfant à quitter le club seul"] = "❌ NON"
+                            row["Sortie Seul"] = "❌ NON"
                         elif reponse == "": 
                             row["J’autorise mon enfant à quitter le club seul"] = "-"
+                            row["Sortie Seul"] = "-"
                         else: 
                             row["J’autorise mon enfant à quitter le club seul"] = f"❓ {reponse}"
+                            row["Sortie Seul"] = f"❓ {reponse}"
                             
             rows.append(row)
         return rows
@@ -369,7 +375,7 @@ else:
             ]
             
             colonnes_presentes = [c for c in colonnes_prioritaires if c in df_admin.columns]
-            colonnes_a_exclure = ["Identité", "Type", "Elo_FFE", "Elo Crevette 🦐"]
+            colonnes_a_exclure = ["Identité", "Type", "Elo_FFE", "Sortie Seul", "Classe Déduite", "Elo Crevette 🦐"]
             autres_colonnes = [c for c in df_admin.columns if c not in colonnes_presentes and c not in colonnes_a_exclure]
             
             colonnes_finales = colonnes_presentes + autres_colonnes + ["Elo Crevette 🦐"]
@@ -392,7 +398,7 @@ else:
                     c2.metric("♟️ Formule Club", f"{nb_club}", f"{(nb_club / total_eleves) * 100:.1f}%")
                     c3.metric("🏫 Formule Scolaire", total_eleves - nb_club)
                     
-                    colonnes_ecole = ["Nom", "Prénom", "Classe", "Formule", "J’autorise mon enfant à quitter le club seul", "N° Portable", "N° Portable 2 (en cas d'urgence)"]
+                    colonnes_ecole = ["Nom", "Prénom", "Classe Déduite", "Formule", "J’autorise mon enfant à quitter le club seul", "N° Portable", "N° Portable 2 (en cas d'urgence)"]
                     colonnes_ecole = [c for c in colonnes_ecole if c in df_ec.columns]
                     st.dataframe(df_ec[colonnes_ecole], use_container_width=True, hide_index=True)
 
