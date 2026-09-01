@@ -142,6 +142,7 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
             nom_propre = user.get("lastName", payer.get("lastName", "Inconnu")).replace("*", "").strip().upper()
             prenom_propre = user.get("firstName", payer.get("firstName", "Inconnu")).replace("*", "").strip().title()
             
+            # --- CRÉATION FORCÉE DE TOUTES LES COLONNES DEMANDÉES (Même si vides) ---
             row = {
                 "Campagne": nom_campagne,
                 "Nom": nom_propre,
@@ -155,47 +156,66 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
                 "Prénom payeur": payer.get("firstName", "").replace("*", "").strip(),
                 "Email payeur": payer.get("email", ""),
                 
-                # Extraction forcée des champs standards HelloAsso 
+                # Voici les colonnes que tu as listées (Générées systématiquement)
+                "N° Portable": "",
+                "N° Portable 2 (en cas d'urgence)": "",
+                "EMail": user.get("email", payer.get("email", "")),
                 "Adresse": user.get("address", payer.get("address", "")),
                 "Ville": user.get("city", payer.get("city", "")),
+                "Nom et prénom du responsable légal": "",
+                "Classe": "",
                 "Date de naissance": user.get("birthDate", user.get("dateOfBirth", "")),
-                "EMail": user.get("email", payer.get("email", "")),
-                
-                "Sortie Seul": "-",
-                "Classe Déduite": "-"
+                "Taille du t-shirt": "",
+                "Dans quel ville sera votre créneaux principale ": "",
+                "J'autorise le club à diffuser des photos de moi ou mon enfant en lien avec notre activité sur notre site et sur les réseaux sociaux (Facebook ; Instagram, Twitter):": "",
+                "J’autorise le club à utiliser des images de moi ou mon enfant pour des objets publicitaires (prospectus de présentation du club, oriflamme, kakemono) :": "",
+                "J’accepte de recevoir les informations sur l’actualité du club (soirée blitz, organisation de stages pendant les vacances…) ainsi que les annonces des prochains tournois par mail": "",
+                "J’autorise mon enfant à quitter le club seul": "-",
+                'e confirme avoir renseigné le questionnaire de santé "Sport" (mineurs) https://www.echecs.asso.fr/Actus/14098/questionnaire_mineur.pdf': ""
             }
             
-            # Formatage de la date de naissance
+            # Nettoyage de l'heure sur la date de naissance si elle existe
             if row["Date de naissance"] and len(str(row["Date de naissance"])) >= 10:
                 row["Date de naissance"] = str(row["Date de naissance"])[:10]
             
+            # --- REMPLISSAGE DES COLONNES SI HELLOASSO A LA RÉPONSE ---
             for field in item.get("customFields", []):
-                nom_champ = str(field.get("name", "")) # SANS le strip pour préserver les espaces cachés comme "principale "
+                nom_champ = str(field.get("name", ""))
                 reponse = str(field.get("answer", "")).strip()
                 nom_lower = nom_champ.lower()
                 
+                # Injection du nom brut (au cas où il soit très différent)
                 row[nom_champ] = reponse
                 
-                if any(mot in nom_lower for mot in ["classe", "niveau", "scolaire", "section"]): 
-                    row["Classe Déduite"] = reponse
+                # Mapping intelligent pour être sûr à 100% de remplir TES colonnes
+                if "classe" in nom_lower or "niveau" in nom_lower: row["Classe"] = reponse
+                if "portable 2" in nom_lower or "urgence" in nom_lower: row["N° Portable 2 (en cas d'urgence)"] = reponse
+                elif "portable" in nom_lower or "téléphone" in nom_lower or "telephone" in nom_lower: row["N° Portable"] = reponse
+                if "responsable" in nom_lower or "légal" in nom_lower: row["Nom et prénom du responsable légal"] = reponse
+                if "t-shirt" in nom_lower: row["Taille du t-shirt"] = reponse
+                if "créneaux principale" in nom_lower: row["Dans quel ville sera votre créneaux principale "] = reponse
+                
+                if "diffuser" in nom_lower and "photos" in nom_lower: 
+                    row["J'autorise le club à diffuser des photos de moi ou mon enfant en lien avec notre activité sur notre site et sur les réseaux sociaux (Facebook ; Instagram, Twitter):"] = reponse
+                if "publicitaires" in nom_lower and "prospectus" in nom_lower: 
+                    row["J’autorise le club à utiliser des images de moi ou mon enfant pour des objets publicitaires (prospectus de présentation du club, oriflamme, kakemono) :"] = reponse
+                if "actualité" in nom_lower and "mail" in nom_lower: 
+                    row["J’accepte de recevoir les informations sur l’actualité du club (soirée blitz, organisation de stages pendant les vacances…) ainsi que les annonces des prochains tournois par mail"] = reponse
+                if "questionnaire" in nom_lower and "mineurs" in nom_lower: 
+                    row['e confirme avoir renseigné le questionnaire de santé "Sport" (mineurs) https://www.echecs.asso.fr/Actus/14098/questionnaire_mineur.pdf'] = reponse
                 
                 if "quitter" in nom_lower and "seul" in nom_lower:
                     if type_formule == "École":
-                        row["Sortie Seul"] = "N/A (École)"
-                        row[nom_champ] = "N/A (École)"
+                        row["J’autorise mon enfant à quitter le club seul"] = "N/A (École)"
                     else:
                         if "oui" in reponse.lower() or reponse.lower() == "true": 
-                            row["Sortie Seul"] = "✅ OUI"
-                            row[nom_champ] = "✅ OUI"
+                            row["J’autorise mon enfant à quitter le club seul"] = "✅ OUI"
                         elif "non" in reponse.lower() or reponse.lower() == "false": 
-                            row["Sortie Seul"] = "❌ NON"
-                            row[nom_champ] = "❌ NON"
+                            row["J’autorise mon enfant à quitter le club seul"] = "❌ NON"
                         elif reponse == "": 
-                            row["Sortie Seul"] = "-"
-                            row[nom_champ] = "-"
+                            row["J’autorise mon enfant à quitter le club seul"] = "-"
                         else: 
-                            row["Sortie Seul"] = f"❓ {reponse}"
-                            row[nom_champ] = f"❓ {reponse}"
+                            row["J’autorise mon enfant à quitter le club seul"] = f"❓ {reponse}"
                             
             rows.append(row)
         return rows
@@ -308,7 +328,7 @@ else:
             if recherche_nom:
                 contact = df[df["Identité"] == recherche_nom].iloc[0]
                 tel = contact.get('N° Portable', contact.get('EMail', 'Non renseigné'))
-                st.write(f"📞 **Contact :** {tel} | 🚨 **Sortie :** {contact.get('Sortie Seul', '-')} | 🏫 **Campagne :** {contact.get('Campagne', '-')}")
+                st.write(f"📞 **Contact :** {tel} | 🚨 **Sortie :** {contact.get('J’autorise mon enfant à quitter le club seul', '-')} | 🏫 **Campagne :** {contact.get('Campagne', '-')}")
             st.markdown('</div>', unsafe_allow_html=True)
 
             col_ad1, col_ad2, col_ad3 = st.columns(3)
@@ -321,7 +341,7 @@ else:
 
             df_admin['Elo Crevette 🦐'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['elos_crevette'].get(x, 400))
             
-            # ORDONNANCEMENT PARFAIT CALQUÉ SUR L'EXCEL
+            # --- L'ORDRE EXACT QUE TU AS DEMANDÉ ---
             colonnes_prioritaires = [
                 "Nom", "Prénom", "Nom payeur", "Prénom payeur", "Email payeur", 
                 "Montant Payé", "Formule", "Licence_FFE", "Campagne",
@@ -336,11 +356,11 @@ else:
             ]
             
             colonnes_presentes = [c for c in colonnes_prioritaires if c in df_admin.columns]
-            colonnes_a_exclure = ["Identité", "Type", "Elo_FFE", "Sortie Seul", "Classe Déduite", "Elo Crevette 🦐"]
+            colonnes_a_exclure = ["Identité", "Type", "Elo_FFE", "Elo Crevette 🦐"]
             autres_colonnes = [c for c in df_admin.columns if c not in colonnes_presentes and c not in colonnes_a_exclure]
             
             colonnes_finales = colonnes_presentes + autres_colonnes + ["Elo Crevette 🦐"]
-            colonnes_finales = list(dict.fromkeys(colonnes_finales))
+            colonnes_finales = list(dict.fromkeys(colonnes_finales)) # Supprime les doublons éventuels
             
             st.metric("Dossiers affichés", len(df_admin))
             st.dataframe(df_admin[colonnes_finales], use_container_width=True, hide_index=True)
@@ -359,7 +379,7 @@ else:
                     c2.metric("♟️ Formule Club", f"{nb_club}", f"{(nb_club / total_eleves) * 100:.1f}%")
                     c3.metric("🏫 Formule Scolaire", total_eleves - nb_club)
                     
-                    colonnes_ecole = ["Nom", "Prénom", "Classe Déduite", "Formule", "Sortie Seul", "N° Portable", "N° Portable 2 (en cas d'urgence)"]
+                    colonnes_ecole = ["Nom", "Prénom", "Classe", "Formule", "J’autorise mon enfant à quitter le club seul", "N° Portable", "N° Portable 2 (en cas d'urgence)"]
                     colonnes_ecole = [c for c in colonnes_ecole if c in df_ec.columns]
                     st.dataframe(df_ec[colonnes_ecole], use_container_width=True, hide_index=True)
 
@@ -434,7 +454,7 @@ else:
                 st.markdown("---")
                 for idx, row in df_groupe.iterrows():
                     c1, c2 = st.columns([4, 1])
-                    c1.write(f"👤 **{row['Nom']}** {row['Prénom']} *(Sortie: {row.get('Sortie Seul', '-')})*")
+                    c1.write(f"👤 **{row['Nom']}** {row['Prénom']} *(Sortie: {row.get('J’autorise mon enfant à quitter le club seul', '-')})*")
                     presences[row['Identité']] = c2.checkbox("Présent", value=True, key=f"pres_{row['Identité']}")
 
                 if st.button(f"💾 Enregistrer l'appel pour {lieu_appel}"):
