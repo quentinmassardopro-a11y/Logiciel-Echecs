@@ -142,7 +142,6 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
             nom_propre = user.get("lastName", payer.get("lastName", "Inconnu")).replace("*", "").strip().upper()
             prenom_propre = user.get("firstName", payer.get("firstName", "Inconnu")).replace("*", "").strip().title()
             
-            # Initialisation stricte des colonnes pour garantir l'ordre d'affichage
             row = {
                 "Campagne": nom_campagne,
                 "Nom": nom_propre,
@@ -167,10 +166,8 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
                 reponse = str(field.get("answer", "")).strip()
                 nom_lower = nom_champ.lower()
                 
-                # Injection de la donnée brute
                 row[nom_champ] = reponse
                 
-                # Mapping intelligent vers les colonnes prioritaires fixes
                 if any(mot in nom_lower for mot in ["classe", "niveau", "scolaire", "section"]): 
                     row["Classe"] = reponse
                     
@@ -302,7 +299,8 @@ else:
             recherche_nom = st.selectbox("Taper un nom/prénom pour obtenir ses coordonnées :", options=[""] + sorted(df["Identité"].tolist()))
             if recherche_nom:
                 contact = df[df["Identité"] == recherche_nom].iloc[0]
-                st.write(f"📞 **Téléphone :** {contact['Téléphone / Portable']} | 🚨 **Sortie :** {contact['Sortie Seul']} | 🏫 **Campagne :** {contact['Campagne']}")
+                tel = contact.get('Téléphone / Portable', 'Non renseigné')
+                st.write(f"📞 **Téléphone :** {tel} | 🚨 **Sortie :** {contact.get('Sortie Seul', '-')} | 🏫 **Campagne :** {contact.get('Campagne', '-')}")
             st.markdown('</div>', unsafe_allow_html=True)
 
             col_ad1, col_ad2, col_ad3 = st.columns(3)
@@ -311,18 +309,16 @@ else:
             with col_ad3: sans_licence = st.checkbox("🚨 Afficher UNIQUEMENT les sans-licence", value=False)
                 
             df_admin = df[(df["Campagne"].isin(filtre_camp_admin)) & (df["Type"].isin(filtre_type_admin))].copy()
-            if sans_licence: df_admin = df_admin[df_admin["Licence_FFE"] == "Non croisé"]
+            if sans_licence and "Licence_FFE" in df_admin.columns: df_admin = df_admin[df_admin["Licence_FFE"] == "Non croisé"]
 
             df_admin['Elo Crevette 🦐'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['elos_crevette'].get(x, 400))
             
-            # ORDONNANCEMENT STRICT ET GARANTI DES COLONNES
             colonnes_prioritaires = [
                 "Nom", "Prénom", "Campagne", "Téléphone / Portable", "Téléphone Urgence", 
                 "Sortie Seul", "Responsable Légal", "Classe", "Montant Payé", "Formule", 
                 "Licence_FFE", "Email payeur"
             ]
             
-            # On ajoute ensuite toutes les autres questions dynamiques capturées sur HelloAsso
             colonnes_a_exclure = [
                 "Identité", "Type", "Elo_FFE", "Elo Crevette 🦐", 
                 "Nom payeur", "Prénom payeur", "N° Portable", "N° Portable 2 (en cas d'urgence)",
@@ -331,9 +327,11 @@ else:
             ]
             
             autres_colonnes = [c for c in df_admin.columns if c not in colonnes_prioritaires and c not in colonnes_a_exclure]
-            
             colonnes_finales = colonnes_prioritaires + autres_colonnes + ["Elo Crevette 🦐"]
-            colonnes_finales = list(dict.fromkeys(colonnes_finales)) # Nettoyage des doublons
+            colonnes_finales = list(dict.fromkeys(colonnes_finales))
+            
+            # FILTRE DE SÉCURITÉ : Ne garder que les colonnes qui existent réellement
+            colonnes_finales = [c for c in colonnes_finales if c in df_admin.columns]
             
             st.metric("Dossiers affichés", len(df_admin))
             st.dataframe(df_admin[colonnes_finales], use_container_width=True, hide_index=True)
@@ -352,7 +350,9 @@ else:
                     c2.metric("♟️ Formule Club", f"{nb_club}", f"{(nb_club / total_eleves) * 100:.1f}%")
                     c3.metric("🏫 Formule Scolaire", total_eleves - nb_club)
                     
-                    st.dataframe(df_ec[["Nom", "Prénom", "Classe", "Formule", "Téléphone / Portable", "Sortie Seul"]], use_container_width=True, hide_index=True)
+                    colonnes_ecole = ["Nom", "Prénom", "Classe", "Formule", "Téléphone / Portable", "Sortie Seul"]
+                    colonnes_ecole = [c for c in colonnes_ecole if c in df_ec.columns]
+                    st.dataframe(df_ec[colonnes_ecole], use_container_width=True, hide_index=True)
 
         with tab_cartes:
             st.markdown("### 🎟️ Suivi des Cartes de Centres (Cassis & Carnoux)")
@@ -414,7 +414,7 @@ else:
                 st.markdown("---")
                 for idx, row in df_groupe.iterrows():
                     c1, c2 = st.columns([4, 1])
-                    c1.write(f"👤 **{row['Nom']}** {row['Prénom']} *(Sortie: {row['Sortie Seul']})*")
+                    c1.write(f"👤 **{row['Nom']}** {row['Prénom']} *(Sortie: {row.get('Sortie Seul', '-')})*")
                     presences[row['Identité']] = c2.checkbox("Présent", value=True, key=f"pres_{row['Identité']}")
 
                 if st.button(f"💾 Enregistrer l'appel pour {lieu_appel}"):
