@@ -137,9 +137,10 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
         for item in items:
             user, payer = item.get("user", {}), item.get("payer", {})
             nom_tarif = str(item.get("name", ""))
-            type_formule = "Club" if any(mot in nom_tarif.lower() for mot in ["club", "adhésion", "adhesion"]) else "École"
             
-            # Nettoyage strict des prénoms et noms
+            # CORRECTION : On détecte le type sur le nom de la CAMPAGNE, pas du tarif.
+            type_formule = "Club" if "club" in nom_campagne.lower() else "École"
+            
             nom_propre = user.get("lastName", payer.get("lastName", "Inconnu")).replace("*", "").strip().upper()
             prenom_propre = user.get("firstName", payer.get("firstName", "Inconnu")).replace("*", "").strip().title()
             
@@ -157,13 +158,17 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
                 "Email payeur": payer.get("email", "")
             }
             
-            classe_trouvee, sortie_seul, telephone = "Non précisée", "Non précisé", "Non renseigné"
+            classe_trouvee, sortie_seul = "Non précisée", "Non précisé"
             
-            # Injection de TOUTES les questions personnalisées sans exception
+            # INJECTION DE TOUTES LES QUESTIONS HELLOASSO
             for field in item.get("customFields", []):
-                nom_champ, reponse = str(field.get("name", "")).strip(), str(field.get("answer", "")).strip()
+                nom_champ = str(field.get("name", "")).strip()
+                reponse = str(field.get("answer", "")).strip()
+                
+                # On sauvegarde chaque colonne avec son nom HelloAsso exact
                 row[nom_champ] = reponse
                 
+                # Détection spécifique pour la logique interne (Classes et Sortie Seul)
                 if any(mot in nom_champ.lower() for mot in ["classe", "niveau", "scolaire", "section"]): 
                     classe_trouvee = reponse
                 
@@ -175,13 +180,13 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
                         elif "non" in reponse.lower() or reponse.lower() == "false": sortie_seul = "❌ NON"
                         elif reponse == "": sortie_seul = "⚠️ Laissé vide"
                         else: sortie_seul = f"❓ {reponse}"
-                
-                if any(mot in nom_champ.lower() for mot in ["téléphone", "telephone", "tel", "mobile"]) and telephone == "Non renseigné": 
-                    telephone = reponse
             
             row["Classe"] = classe_trouvee
             row["Sortie Seul"] = sortie_seul
-            row["Téléphone"] = telephone
+            
+            if type_formule == "Club" and sortie_seul == "Non précisé":
+                row["Sortie Seul"] = "⚠️ Question non trouvée sur ce formulaire"
+                
             rows.append(row)
         return rows
     except: return []
@@ -240,6 +245,7 @@ if st.sidebar.button("🔄 Lancer la Synchronisation"):
                 
                 if all_data:
                     df_base = pd.DataFrame(all_data)
+                    
                     if 'df_ffe' in st.session_state and not st.session_state['df_ffe'].empty:
                         df_base['Cle_Croisement'] = df_base['Nom'].apply(normaliser_nom) + df_base['Prénom'].apply(normaliser_nom)
                         df_base = pd.merge(df_base, st.session_state['df_ffe'], on='Cle_Croisement', how='left')
@@ -253,6 +259,7 @@ if st.sidebar.button("🔄 Lancer la Synchronisation"):
                         identite = row['Identité']
                         if identite not in st.session_state['db']['elos_crevette']:
                             st.session_state['db']['elos_crevette'][identite] = 400
+                        
                         creneau_auto = auto_affecter_creneau(row['Campagne'], row['Formule'])
                         if creneau_auto:
                             if creneau_auto not in st.session_state['db']['affectations_creneaux']:
@@ -290,7 +297,7 @@ else:
             recherche_nom = st.selectbox("Taper un nom/prénom pour obtenir ses coordonnées :", options=[""] + sorted(df["Identité"].tolist()))
             if recherche_nom:
                 contact = df[df["Identité"] == recherche_nom].iloc[0]
-                tel = contact.get('N° Portable', contact.get('Téléphone', 'Non renseigné'))
+                tel = contact.get('Numéro de téléphone', contact.get('N° Portable', 'Non renseigné'))
                 st.write(f"📞 **Téléphone :** {tel} | 🚨 **Sortie :** {contact['Sortie Seul']} | 🏫 **Campagne :** {contact['Campagne']}")
             st.markdown('</div>', unsafe_allow_html=True)
 
@@ -302,15 +309,23 @@ else:
             df_admin = df[(df["Campagne"].isin(filtre_camp_admin)) & (df["Type"].isin(filtre_type_admin))].copy()
             if sans_licence: df_admin = df_admin[df_admin["Licence_FFE"] == "Non croisé"]
 
-            # Fixation absolue des colonnes prioritaires avec ajout dynamique de TOUT le reste
-            colonnes_prioritaires = ["Nom", "Prénom", "Campagne", "Classe", "N° Portable", "N° Portable 2 (en cas d'urgence)", "Nom et prénom du responsable légal", "Email payeur", "Sortie Seul", "Montant Payé", "Formule", "Licence_FFE"]
+            df_admin['Elo Crevette 🦐'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['elos_crevette'].get(x, 400))
+            
+            # On liste d'abord les colonnes clés selon ta capture d'écran (pour qu'elles soient en premier)
+            colonnes_prioritaires = [
+                "Nom", "Prénom", "Campagne", "Classe", "Sortie Seul", 
+                "Numéro de téléphone", "Numéro de téléphone 2 (en cas d'urgence)", 
+                "Nom et prénom du responsable légal", "Email", "Date de naissance du joueur",
+                "Montant Payé", "Formule", "Licence_FFE"
+            ]
+            
             colonnes_prioritaires_existantes = [c for c in colonnes_prioritaires if c in df_admin.columns]
             
-            # Injection de toutes les autres colonnes existantes
-            colonnes_a_exclure = ["Identité", "Type", "Téléphone", "Elo Crevette 🦐", "Elo_FFE"]
+            # On ajoute ensuite ABSOLUMENT TOUTES les autres colonnes qui n'ont pas encore été affichées
+            colonnes_a_exclure = ["Identité", "Type", "Elo_FFE"]
             autres_colonnes = [c for c in df_admin.columns if c not in colonnes_prioritaires_existantes and c not in colonnes_a_exclure]
             
-            colonnes_finales = colonnes_prioritaires_existantes + autres_colonnes
+            colonnes_finales = colonnes_prioritaires_existantes + autres_colonnes + ["Elo Crevette 🦐"]
             
             st.metric("Dossiers affichés", len(df_admin))
             st.dataframe(df_admin[colonnes_finales], use_container_width=True, hide_index=True)
@@ -328,8 +343,11 @@ else:
                     c1.metric("🎓 Total Élèves", total_eleves)
                     c2.metric("♟️ Formule Club", f"{nb_club}", f"{(nb_club / total_eleves) * 100:.1f}%")
                     c3.metric("🏫 Formule Scolaire", total_eleves - nb_club)
+                    
                     colonnes_ecole = ["Nom", "Prénom", "Classe", "Formule", "Sortie Seul"]
-                    if "N° Portable" in df_ec.columns: colonnes_ecole.append("N° Portable")
+                    if "Numéro de téléphone" in df_ec.columns: colonnes_ecole.append("Numéro de téléphone")
+                    elif "N° Portable" in df_ec.columns: colonnes_ecole.append("N° Portable")
+                    
                     st.dataframe(df_ec[colonnes_ecole], use_container_width=True, hide_index=True)
 
         with tab_cartes:
