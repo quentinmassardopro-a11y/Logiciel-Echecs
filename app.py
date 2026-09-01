@@ -1,0 +1,490 @@
+import streamlit as st
+import requests
+import pandas as pd
+import random
+import unicodedata
+import json
+import os
+from datetime import datetime
+
+st.set_page_config(page_title="Académie d'Échecs des Calanques", layout="wide", page_icon="♟️")
+
+st.markdown("""
+    <style>
+    h1, h2, h3 { color: #4682B4 !important; }
+    .stButton>button { background-color: #FF8C00; color: white; border: none; font-weight: bold; width:100%;}
+    .stButton>button:hover { background-color: #e67e22; color: white; }
+    div[data-testid="stSidebarNav"] { font-weight: bold; }
+    .recherche-rapide { background-color: #f0f2f6; padding: 15px; border-radius: 10px; margin-bottom: 20px; border-left: 5px solid #FF8C00; }
+    </style>
+""", unsafe_allow_html=True)
+
+DB_FILE = "base_calanques.json"
+
+def charger_base():
+    default_db = {
+        "elos_crevette": {}, 
+        "historique_appels": {}, 
+        "eleves_essai": [],
+        "affectations_creneaux": {},
+        "cartes_membres": {} 
+    }
+    if os.path.exists(DB_FILE):
+        with open(DB_FILE, "r", encoding="utf-8") as f:
+            try:
+                db_chargee = json.load(f)
+                for cle in default_db:
+                    if cle not in db_chargee:
+                        db_chargee[cle] = default_db[cle]
+                return db_chargee
+            except:
+                return default_db
+    return default_db
+
+def sauvegarder_base(db):
+    with open(DB_FILE, "w", encoding="utf-8") as f:
+        json.dump(db, f, ensure_ascii=False, indent=4)
+
+if 'db' not in st.session_state:
+    st.session_state['db'] = charger_base()
+
+col1, col2 = st.columns([1, 4])
+with col1:
+    try: st.image("logo.png", width=140)
+    except: st.write("♟️ **ACC**")
+with col2:
+    st.title("Académie d'Échecs des Calanques")
+    st.markdown("**Plateforme Globale : Administration, Écoles & Entraînements**")
+
+def calculer_nouveau_elo(r_a, r_b, score_a, k=40):
+    e_a = 1.0 / (1.0 + 10.0 ** ((r_b - r_a) / 400.0))
+    nouveau_r_a = r_a + k * (score_a - e_a)
+    return max(100, round(nouveau_r_a))
+
+def normaliser_nom(nom):
+    if pd.isna(nom): return ""
+    nom = str(nom).lower().strip()
+    return ''.join(c for c in unicodedata.normalize('NFD', nom) if unicodedata.category(c) != 'Mn')
+
+def generer_appariements_suisses(joueurs_scores, elos_dict, historique_rencontres):
+    joueurs_tries = sorted(joueurs_scores.keys(), key=lambda j: (joueurs_scores[j], elos_dict.get(j, 400), random.random()), reverse=True)
+    appariements, non_apparies, exempt = [], list(joueurs_tries), None
+    if len(non_apparies) % 2 != 0: exempt = non_apparies.pop()
+    while len(non_apparies) > 1:
+        j1 = non_apparies.pop(0)
+        j2_trouve = None
+        for idx, j2 in enumerate(non_apparies):
+            pair = (min(j1, j2), max(j1, j2))
+            if pair not in historique_rencontres:
+                j2_trouve = non_apparies.pop(idx)
+                historique_rencontres.add(pair)
+                appariements.append((j1, j2_trouve))
+                break
+        if not j2_trouve and non_apparies:
+            j2_trouve = non_apparies.pop(0)
+            historique_rencontres.add((min(j1, j2_trouve), max(j1, j2_trouve)))
+            appariements.append((j1, j2_trouve))
+    return appariements, exempt, historique_rencontres
+
+def auto_affecter_creneau(campagne, formule):
+    camp = str(campagne).lower()
+    form = str(formule).lower()
+    
+    if "lundi" in form:
+        if "trinit" in camp: return "Lundi - Sainte-Trinité (CP)"
+        return "Lundi - La Ciotat (École)"
+    if "mardi" in form:
+        if "trinit" in camp: return "Mardi - Sainte-Trinité (CE1)"
+        if "augustin" in camp: return "Mardi - Saint-Augustin (CP-CE1)"
+        return "Mardi - Ceyreste / Marseille"
+    if "mercredi" in form:
+        return "Mercredi - Ceyreste / Cassis"
+    if "jeudi" in form:
+        if "trinit" in camp: return "Jeudi - Sainte-Trinité (Collège)"
+        if "bosco" in camp: 
+            if "collège" in form or "college" in form: return "Jeudi - Don Bosco (Collège)"
+            return "Jeudi - Don Bosco (École)"
+        return "Jeudi - Cassis / La Ciotat"
+    if "vendredi" in form:
+        if "augustin" in camp: return "Vendredi - Saint-Augustin (CE2-CM2)"
+        if "trinit" in camp: return "Vendredi - Sainte-Trinité (CE2-CM2)"
+        return "Vendredi - Cassis"
+    
+    return None
+
+def get_helloasso_token(client_id, client_secret):
+    url = "https://api.helloasso.com/oauth2/token"
+    payload = {"client_id": client_id, "client_secret": client_secret, "grant_type": "client_credentials"}
+    try:
+        r = requests.post(url, data=payload, headers={"Content-Type": "application/x-www-form-urlencoded"})
+        return r.json().get("access_token") if r.status_code == 200 else None
+    except: return None
+
+def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
+    url = f"https://api.helloasso.com/v5/organizations/echecs-cassis/forms/{form_type}/{form_slug}/items"
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        r = requests.get(url, headers=headers, params={"pageSize": 100})
+        items = r.json().get("data", [])
+        rows = []
+        for item in items:
+            user, payer = item.get("user", {}), item.get("payer", {})
+            nom_tarif = str(item.get("name", ""))
+            type_formule = "Club" if any(mot in nom_tarif.lower() for mot in ["club", "adhésion", "adhesion"]) else "École"
+            
+            row = {
+                "Campagne": nom_campagne,
+                "Nom": user.get("lastName", payer.get("lastName", "Inconnu")).upper(),
+                "Prénom": user.get("firstName", payer.get("firstName", "Inconnu")).title(),
+                "Identité": f"{user.get('firstName', payer.get('firstName', ''))} {user.get('lastName', payer.get('lastName', ''))}".title(),
+                "Formule": nom_tarif,
+                "Type": type_formule,
+                "Montant Payé": f"{item.get('amount', 0) / 100} €",
+                "Licence_FFE": "Non croisé",
+                "Nom payeur": payer.get("lastName", ""),
+                "Prénom payeur": payer.get("firstName", ""),
+                "Email payeur": payer.get("email", ""),
+            }
+            
+            classe_trouvee, sortie_seul, telephone = "Non précisée", "Non précisé", "Non renseigné"
+            
+            for field in item.get("customFields", []):
+                nom_champ, reponse = str(field.get("name", "")), str(field.get("answer", ""))
+                row[nom_champ] = reponse
+                
+                # Détection Classe
+                if any(mot in nom_champ.lower() for mot in ["classe", "niveau", "scolaire", "section"]): 
+                    classe_trouvee = reponse
+                
+                # Détection Sortie Seul
+                if "quitter" in nom_champ.lower() or "seul" in nom_champ.lower():
+                    if type_formule == "Club":
+                        if "oui" in reponse.lower() or reponse.lower() == "true":
+                            sortie_seul = "✅ OUI"
+                        elif "non" in reponse.lower() or reponse.lower() == "false":
+                            sortie_seul = "❌ NON"
+                        else:
+                            sortie_seul = reponse
+                    else:
+                        sortie_seul = "N/A (École)"
+                
+                # Détection Téléphone
+                if any(mot in nom_champ.lower() for mot in ["téléphone", "telephone", "tel", "mobile"]) and telephone == "Non renseigné": 
+                    telephone = reponse
+            
+            row["Classe"], row["Sortie Seul"], row["Téléphone"] = classe_trouvee, sortie_seul, telephone
+            
+            # Si le champ sortie_seul n'a pas été trouvé du tout dans le formulaire Club, on l'indique.
+            if type_formule == "Club" and sortie_seul == "Non précisé":
+                row["Sortie Seul"] = "⚠️ À vérifier"
+                
+            rows.append(row)
+        return rows
+    except: return []
+
+def analyser_fichier_ffe(fichier):
+    try:
+        if fichier.name.endswith('.csv'): df_ffe = pd.read_csv(fichier, sep=None, engine='python')
+        else: df_ffe = pd.read_excel(fichier)
+        col_nom = next((c for c in df_ffe.columns if "nom" in c.lower() and "prenom" not in c.lower()), None)
+        col_prenom = next((c for c in df_ffe.columns if "prenom" in str(c).lower() or "prénom" in str(c).lower()), None)
+        col_elo = next((c for c in df_ffe.columns if "elo" in str(c).lower() or "rapide" in str(c).lower()), None)
+        col_licence = next((c for c in df_ffe.columns if "licence" in str(c).lower() or "code" in str(c).lower() or "ref" in str(c).lower()), None)
+
+        if col_nom and col_prenom:
+            df_ffe['Cle_Croisement'] = df_ffe[col_nom].apply(normaliser_nom) + df_ffe[col_prenom].apply(normaliser_nom)
+            df_ffe['Elo_FFE'] = df_ffe[col_elo] if col_elo else 1000
+            df_ffe['Licence_FFE'] = df_ffe[col_licence] if col_licence else "Inconnue"
+            return df_ffe[['Cle_Croisement', 'Elo_FFE', 'Licence_FFE']]
+    except: return pd.DataFrame()
+    return pd.DataFrame()
+
+st.sidebar.header("🔑 Espace de Travail")
+module_choisi = st.sidebar.radio("", ["🛠️ Module Administration", "♟️ Module Entraîneur"])
+
+st.sidebar.markdown("---")
+st.sidebar.header("1️⃣ Base FFE (Licences)")
+fichier_ffe = st.sidebar.file_uploader("Fichier FFE pour croisement", type=['csv', 'xls', 'xlsx'])
+if fichier_ffe:
+    df_ffe = analyser_fichier_ffe(fichier_ffe)
+    if not df_ffe.empty:
+        st.session_state['df_ffe'] = df_ffe
+        st.sidebar.success("Fichier FFE chargé !")
+
+st.sidebar.markdown("---")
+st.sidebar.header("2️⃣ Synchronisation Data")
+saved_id = st.secrets["helloasso"]["client_id"] if "helloasso" in st.secrets else ""
+saved_secret = st.secrets["helloasso"]["client_secret"] if "helloasso" in st.secrets else ""
+client_id = st.sidebar.text_input("Client ID", value=saved_id, type="password")
+client_secret = st.sidebar.text_input("Client Secret", value=saved_secret, type="password")
+
+if st.sidebar.button("🔄 Lancer la Synchronisation"):
+    if client_id and client_secret:
+        with st.spinner("Téléchargement des données..."):
+            token = get_helloasso_token(client_id, client_secret)
+            if token:
+                campagnes = [
+                    ("Adhésions Club", "Membership", "cotisations-et-adhesion-club-d-echecs-2026-2027"),
+                    ("Sainte Trinité", "Event", "club-d-echecs-sainte-trinitie"),
+                    ("Saint Augustin", "Event", "club-d-echecs-saint-augustin"),
+                    ("Don Bosco", "Event", "club-d-echecs-don-bosco")
+                ]
+                all_data = []
+                for nom, type_camp, slug in campagnes:
+                    all_data.extend(fetch_campaign_items(token, type_camp, slug, nom))
+                all_data.extend(st.session_state['db']['eleves_essai'])
+                
+                if all_data:
+                    df_base = pd.DataFrame(all_data)
+                    
+                    if 'df_ffe' in st.session_state and not st.session_state['df_ffe'].empty:
+                        df_base['Cle_Croisement'] = df_base['Nom'].apply(normaliser_nom) + df_base['Prénom'].apply(normaliser_nom)
+                        df_base = pd.merge(df_base, st.session_state['df_ffe'], on='Cle_Croisement', how='left')
+                        df_base['Elo_FFE'] = df_base['Elo_FFE'].fillna(1000).astype(int)
+                        df_base['Licence_FFE'] = df_base['Licence_FFE'].fillna("Non croisé")
+                        df_base = df_base.drop(columns=['Cle_Croisement'])
+                    else:
+                        df_base['Elo_FFE'], df_base['Licence_FFE'] = 1000, "Non croisé"
+
+                    for _, row in df_base.iterrows():
+                        identite = row['Identité']
+                        if identite not in st.session_state['db']['elos_crevette']:
+                            st.session_state['db']['elos_crevette'][identite] = 400
+                        
+                        creneau_auto = auto_affecter_creneau(row['Campagne'], row['Formule'])
+                        if creneau_auto:
+                            if creneau_auto not in st.session_state['db']['affectations_creneaux']:
+                                st.session_state['db']['affectations_creneaux'][creneau_auto] = []
+                            if identite not in st.session_state['db']['affectations_creneaux'][creneau_auto]:
+                                st.session_state['db']['affectations_creneaux'][creneau_auto].append(identite)
+                                
+                    sauvegarder_base(st.session_state['db'])
+                    st.session_state['df_adherents'] = df_base
+                    st.sidebar.success(f"Base à jour ! {len(all_data)} dossiers.")
+                else: st.sidebar.warning("Aucune donnée trouvée.")
+            else: st.sidebar.error("Erreur API HelloAsso.")
+
+if 'df_adherents' not in st.session_state:
+    st.info("👈 Cliquez sur **Lancer la Synchronisation** dans le menu de gauche pour démarrer.")
+else:
+    df = st.session_state['df_adherents']
+    date_jour = datetime.now().strftime("%d/%m/%Y")
+    
+    structure_creneaux = {
+        "Lundi": ["Lundi - Sainte-Trinité (CP)", "Lundi - La Ciotat (École)", "Lundi - Carnoux", "Lundi - Club Cassis"],
+        "Mardi": ["Mardi - Sainte-Trinité (CE1)", "Mardi - Saint-Augustin (CP-CE1)", "Mardi - Ceyreste / Marseille"],
+        "Mercredi": ["Mercredi - Ceyreste / Cassis"],
+        "Jeudi": ["Jeudi - Sainte-Trinité (Collège)", "Jeudi - Don Bosco (École)", "Jeudi - Don Bosco (Collège)", "Jeudi - Cassis / La Ciotat"],
+        "Vendredi": ["Vendredi - Saint-Augustin (CE2-CM2)", "Vendredi - Sainte-Trinité (CE2-CM2)", "Vendredi - Cassis"]
+    }
+
+    if module_choisi == "🛠️ Module Administration":
+        st.subheader("🛠️ Espace Administration du Club")
+        tab_admin, tab_ecoles, tab_cartes, tab_historique = st.tabs(["📊 Base Adhérents", "🏫 Écoles", "🎟️ Cartes de Centres", "📅 Historique Appels"])
+        
+        with tab_admin:
+            st.markdown('<div class="recherche-rapide">', unsafe_allow_html=True)
+            st.markdown("#### 🔍 Recherche rapide de contact")
+            recherche_nom = st.selectbox("Taper un nom/prénom pour obtenir ses coordonnées :", options=[""] + sorted(df["Identité"].tolist()))
+            if recherche_nom:
+                contact = df[df["Identité"] == recherche_nom].iloc[0]
+                st.write(f"📞 **Téléphone :** {contact['Téléphone']} | 🚨 **Sortie :** {contact['Sortie Seul']} | 🏫 **Campagne :** {contact['Campagne']}")
+            st.markdown('</div>', unsafe_allow_html=True)
+
+            col_ad1, col_ad2, col_ad3 = st.columns(3)
+            with col_ad1: filtre_camp_admin = st.multiselect("Campagnes :", options=df["Campagne"].unique(), default=df["Campagne"].unique())
+            with col_ad2: filtre_type_admin = st.multiselect("Types :", options=df["Type"].unique(), default=df["Type"].unique())
+            with col_ad3: sans_licence = st.checkbox("🚨 Afficher UNIQUEMENT les sans-licence", value=False)
+                
+            df_admin = df[(df["Campagne"].isin(filtre_camp_admin)) & (df["Type"].isin(filtre_type_admin))].copy()
+            if sans_licence:
+                df_admin = df_admin[df_admin["Licence_FFE"] == "Non croisé"]
+
+            df_admin['Elo Crevette 🦐'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['elos_crevette'].get(x, 400))
+            
+            colonnes_prioritaires = ["Nom", "Prénom", "Campagne", "Téléphone", "Email payeur", "Sortie Seul", "Montant Payé", "Formule", "Licence_FFE"]
+            autres_colonnes = [c for c in df_admin.columns if c not in colonnes_prioritaires and c not in ["Identité", "Elo Crevette 🦐", "Type", "Nom payeur", "Prénom payeur"]]
+            colonnes_finales = colonnes_prioritaires + autres_colonnes
+            
+            st.metric("Dossiers affichés", len(df_admin))
+            st.dataframe(df_admin[colonnes_finales], use_container_width=True, hide_index=True)
+            
+        with tab_ecoles:
+            st.markdown("### 🏫 Pilotage des Établissements Scolaires")
+            ecoles_dispos = [c for c in df["Campagne"].unique() if "Club" not in c and "Adhésions" not in c]
+            if ecoles_dispos:
+                ecole_choisie = st.selectbox("Sélectionnez l'établissement :", ecoles_dispos)
+                df_ec = df[df["Campagne"] == ecole_choisie].copy()
+                
+                total_eleves = len(df_ec)
+                if total_eleves > 0:
+                    c1, c2, c3 = st.columns(3)
+                    nb_club = len(df_ec[df_ec["Type"] == "Club"])
+                    c1.metric("🎓 Total Élèves", total_eleves)
+                    c2.metric("♟️ Formule Club", f"{nb_club}", f"{(nb_club / total_eleves) * 100:.1f}%")
+                    c3.metric("🏫 Formule Scolaire", total_eleves - nb_club)
+                    st.dataframe(df_ec[["Nom", "Prénom", "Classe", "Formule", "Téléphone", "Sortie Seul"]], use_container_width=True, hide_index=True)
+
+        with tab_cartes:
+            st.markdown("### 🎟️ Suivi des Cartes de Centres (Cassis & Carnoux)")
+            ville_carte = st.radio("Sélectionner la commune à vérifier :", ["Cassis (Carte Centre Culturel)", "Carnoux (Carte du Coq)"])
+            ville_cle = "Cassis" if "Cassis" in ville_carte else "Carnoux"
+            
+            eleves_concernes = set()
+            for cle, liste in st.session_state['db']['affectations_creneaux'].items():
+                if ville_cle in cle: eleves_concernes.update(liste)
+                    
+            if not eleves_concernes: st.info(f"Aucun élève n'est encore assigné à {ville_cle} dans les listes d'appels.")
+            else:
+                for eleve in sorted(list(eleves_concernes)):
+                    if eleve not in st.session_state['db']['cartes_membres']:
+                        st.session_state['db']['cartes_membres'][eleve] = {"Cassis": False, "Carnoux": False}
+                    c1, c2 = st.columns([3, 1])
+                    c1.write(f"👤 **{eleve}**")
+                    est_coche = c2.checkbox("✅ Carte OK", value=st.session_state['db']['cartes_membres'][eleve][ville_cle], key=f"carte_{ville_cle}_{eleve}")
+                    st.session_state['db']['cartes_membres'][eleve][ville_cle] = est_coche
+                
+                if st.button("💾 Sauvegarder l'état des cartes"):
+                    sauvegarder_base(st.session_state['db'])
+                    st.success("Mise à jour des cartes enregistrée avec succès !")
+
+        with tab_historique:
+            st.markdown("### 📅 Registre des présences")
+            if not st.session_state['db']['historique_appels']: st.info("Aucun appel n'a encore été enregistré.")
+            else:
+                for date_appel, data_groupes in sorted(st.session_state['db']['historique_appels'].items(), reverse=True):
+                    with st.expander(f"📁 Présences du {date_appel}"):
+                        for groupe, infos in data_groupes.items():
+                            st.write(f"**{groupe}** (par {infos.get('entraineur', 'Inconnu')}) : {len(infos.get('presents', []))} présents")
+
+    elif module_choisi == "♟️ Module Entraîneur":
+        st.subheader("♟️ Espace Entraîneur")
+        tab_appel, tab_tournoi, tab_affectations = st.tabs(["📋 Faire l'Appel", "⚔️ Tournoi & Elo", "⚙️ Affecter Élèves (Manuel)"])
+
+        with tab_affectations:
+            st.markdown("### ⚙️ Création Manuelle des listes de Créneaux")
+            c_jour, c_lieu = st.columns(2)
+            with c_jour: jour_aff = st.selectbox("Jour :", options=list(structure_creneaux.keys()), key="jour_aff")
+            with c_lieu: lieu_aff = st.selectbox("Créneau :", options=structure_creneaux[jour_aff], key="lieu_aff")
+            
+            if lieu_aff not in st.session_state['db']['affectations_creneaux']:
+                st.session_state['db']['affectations_creneaux'][lieu_aff] = []
+                
+            nouveaux_eleves = st.multiselect(
+                f"Élèves assignés à {lieu_aff} :", 
+                options=sorted(df["Identité"].tolist()),
+                default=st.session_state['db']['affectations_creneaux'][lieu_aff]
+            )
+            
+            if st.button("💾 Sauvegarder cette liste d'appel"):
+                st.session_state['db']['affectations_creneaux'][lieu_aff] = nouveaux_eleves
+                sauvegarder_base(st.session_state['db'])
+                st.success(f"Liste de {lieu_aff} mise à jour !")
+
+        with tab_appel:
+            st.markdown(f"### 📋 Appel du jour : **{date_jour}**")
+            entraineur_appel = st.selectbox("Entraîneur responsable :", ["Quentin Massardo", "Alexandre Merenciano"])
+            
+            c_jour_ap, c_lieu_ap = st.columns(2)
+            with c_jour_ap: jour_appel = st.selectbox("Sélectionner le Jour :", options=list(structure_creneaux.keys()), key="jour_ap")
+            with c_lieu_ap: lieu_appel = st.selectbox("Créneau :", options=structure_creneaux[jour_appel], key="lieu_ap")
+            
+            liste_identites = st.session_state['db']['affectations_creneaux'].get(lieu_appel, [])
+            
+            if not liste_identites:
+                st.info("Aucun élève assigné. Assurez-vous que le jour est bien dans le nom de la formule ou affectez-les manuellement.")
+            else:
+                df_groupe = df[df["Identité"].isin(liste_identites)]
+                presences = {}
+                st.markdown("---")
+                for idx, row in df_groupe.iterrows():
+                    c1, c2 = st.columns([4, 1])
+                    c1.write(f"👤 **{row['Nom']}** {row['Prénom']} *(Sortie: {row['Sortie Seul']})*")
+                    presences[row['Identité']] = c2.checkbox("Présent", value=True, key=f"pres_{row['Identité']}")
+
+                if st.button(f"💾 Enregistrer l'appel pour {lieu_appel}"):
+                    liste_presents = [id_joueur for id_joueur, est_present in presences.items() if est_present]
+                    if date_jour not in st.session_state['db']['historique_appels']: st.session_state['db']['historique_appels'][date_jour] = {}
+                    st.session_state['db']['historique_appels'][date_jour][lieu_appel] = {
+                        "entraineur": entraineur_appel,
+                        "presents": liste_presents
+                    }
+                    sauvegarder_base(st.session_state['db'])
+                    st.success("Appel enregistré !")
+
+        with tab_tournoi:
+            st.markdown("### ⚔️ Tournoi Suisse & Elo Crevette 🦐")
+            creneaux_remplis = [k for k, v in st.session_state['db']['affectations_creneaux'].items() if len(v) > 0]
+            
+            if not creneaux_remplis:
+                st.info("Aucun créneau disponible pour lancer un tournoi.")
+            else:
+                creneau_tournoi = st.selectbox("Lancer le tournoi pour le créneau :", options=creneaux_remplis)
+                joueurs_inscrits = st.session_state['db']['affectations_creneaux'][creneau_tournoi]
+                
+                if 'scores_tournoi' not in st.session_state:
+                    st.session_state['scores_tournoi'] = {j: 0.0 for j in joueurs_inscrits}
+                    st.session_state['historique_rencontres'] = set()
+                    st.session_state['ronde_actuelle'] = 1
+                    st.session_state['appariements_ronde'] = []
+
+                col_t1, col_t2 = st.columns(2)
+                with col_t1: st.metric("Ronde actuelle", st.session_state['ronde_actuelle'])
+                with col_t2:
+                    if st.button("🔄 Réinitialiser le tournoi"):
+                        st.session_state['scores_tournoi'] = {j: 0.0 for j in joueurs_inscrits}
+                        st.session_state['historique_rencontres'] = set()
+                        st.session_state['ronde_actuelle'] = 1
+                        st.session_state['appariements_ronde'] = []
+                        st.rerun()
+
+                st.markdown("---")
+                if st.button("🎲 Générer la Ronde"):
+                    pairs, exempt, st.session_state['historique_rencontres'] = generer_appariements_suisses(
+                        st.session_state['scores_tournoi'], st.session_state['db']['elos_crevette'], st.session_state['historique_rencontres']
+                    )
+                    st.session_state['appariements_ronde'], st.session_state['exempt_ronde'] = pairs, exempt
+
+                if st.session_state.get('appariements_ronde'):
+                    st.subheader(f"♟️ Matchs — Ronde {st.session_state['ronde_actuelle']}")
+                    resultats_saisis = []
+                    
+                    for i, (j1, j2) in enumerate(st.session_state['appariements_ronde'], 1):
+                        elo1 = st.session_state['db']['elos_crevette'].get(j1, 400)
+                        elo2 = st.session_state['db']['elos_crevette'].get(j2, 400)
+                        
+                        c_ech, c_res = st.columns([3, 2])
+                        c_ech.markdown(f"**Échiquier {i} :** ⚪ **{j1}** ({elo1}🦐)  🆚  ⚫ **{j2}** ({elo2}🦐)")
+                        res = c_res.selectbox(f"Résultat", ["Sélectionner...", "1 - 0 (Blancs)", "0 - 1 (Noirs)", "0.5 - 0.5 (Nulle)"], key=f"res_{i}", label_visibility="collapsed")
+                        resultats_saisis.append((j1, j2, res))
+                    
+                    if st.session_state.get('exempt_ronde'): st.warning(f"👑 **Exempt (1 pt) :** {st.session_state['exempt_ronde']}")
+
+                    st.markdown("---")
+                    if st.button("💾 Valider les résultats et sauvegarder les Elo Crevette"):
+                        if any(r[2] == "Sélectionner..." for r in resultats_saisis):
+                            st.error("⚠️ Saisissez tous les résultats.")
+                        else:
+                            for j1, j2, res in resultats_saisis:
+                                elo1 = st.session_state['db']['elos_crevette'].get(j1, 400)
+                                elo2 = st.session_state['db']['elos_crevette'].get(j2, 400)
+                                if res == "1 - 0 (Blancs)":
+                                    st.session_state['scores_tournoi'][j1] += 1.0
+                                    st.session_state['db']['elos_crevette'][j1] = calculer_nouveau_elo(elo1, elo2, 1.0)
+                                    st.session_state['db']['elos_crevette'][j2] = calculer_nouveau_elo(elo2, elo1, 0.0)
+                                elif res == "0 - 1 (Noirs)":
+                                    st.session_state['scores_tournoi'][j2] += 1.0
+                                    st.session_state['db']['elos_crevette'][j1] = calculer_nouveau_elo(elo1, elo2, 0.0)
+                                    st.session_state['db']['elos_crevette'][j2] = calculer_nouveau_elo(elo2, elo1, 1.0)
+                                else:
+                                    st.session_state['scores_tournoi'][j1] += 0.5
+                                    st.session_state['scores_tournoi'][j2] += 0.5
+                                    st.session_state['db']['elos_crevette'][j1] = calculer_nouveau_elo(elo1, elo2, 0.5)
+                                    st.session_state['db']['elos_crevette'][j2] = calculer_nouveau_elo(elo2, elo1, 0.5)
+
+                            if st.session_state.get('exempt_ronde'): st.session_state['scores_tournoi'][st.session_state['exempt_ronde']] += 1.0
+                            sauvegarder_base(st.session_state['db'])
+                            st.session_state['ronde_actuelle'] += 1
+                            st.session_state['appariements_ronde'] = []
+                            st.success("Résultats et Elos Crevette sauvegardés !")
+                            st.rerun()
