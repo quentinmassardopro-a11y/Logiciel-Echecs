@@ -147,15 +147,17 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
                 "Nom": nom_propre,
                 "Prénom": prenom_propre,
                 "Identité": f"{prenom_propre} {nom_propre}",
-                "Sortie Seul": "-",
-                "Classe": "-",
                 "Montant Payé": f"{item.get('amount', 0) / 100} €",
                 "Formule": nom_tarif,
                 "Type": type_formule,
                 "Licence_FFE": "Non croisé",
                 "Nom payeur": payer.get("lastName", "").replace("*", "").strip(),
                 "Prénom payeur": payer.get("firstName", "").replace("*", "").strip(),
-                "Email payeur": payer.get("email", "")
+                "Email payeur": payer.get("email", ""),
+                
+                # Colonnes techniques cachées pour le module Entraîneur
+                "Sortie Seul": "-",
+                "Classe Déduite": "-"
             }
             
             for field in item.get("customFields", []):
@@ -163,21 +165,31 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
                 reponse = str(field.get("answer", "")).strip()
                 nom_lower = nom_champ.lower()
                 
-                # On injecte la réponse brute dans la colonne exacte d'HelloAsso
+                # INJECTION DIRECTE BRUTE : On crée la colonne avec le nom EXACT de HelloAsso
                 row[nom_champ] = reponse
                 
+                # Mécanique d'analyse pour les entraîneurs
                 if any(mot in nom_lower for mot in ["classe", "niveau", "scolaire", "section"]): 
-                    row["Classe"] = reponse
+                    row["Classe Déduite"] = reponse
                 
                 if "quitter" in nom_lower and "seul" in nom_lower:
                     if type_formule == "École":
                         row["Sortie Seul"] = "N/A (École)"
+                        row[nom_champ] = "N/A (École)" # On modifie aussi la cellule pour l'admin
                     else:
-                        if "oui" in reponse.lower() or reponse.lower() == "true": row["Sortie Seul"] = "✅ OUI"
-                        elif "non" in reponse.lower() or reponse.lower() == "false": row["Sortie Seul"] = "❌ NON"
-                        elif reponse == "": row["Sortie Seul"] = "-"
-                        else: row["Sortie Seul"] = f"❓ {reponse}"
-                        
+                        if "oui" in reponse.lower() or reponse.lower() == "true": 
+                            row["Sortie Seul"] = "✅ OUI"
+                            row[nom_champ] = "✅ OUI"
+                        elif "non" in reponse.lower() or reponse.lower() == "false": 
+                            row["Sortie Seul"] = "❌ NON"
+                            row[nom_champ] = "❌ NON"
+                        elif reponse == "": 
+                            row["Sortie Seul"] = "-"
+                            row[nom_champ] = "-"
+                        else: 
+                            row["Sortie Seul"] = f"❓ {reponse}"
+                            row[nom_champ] = f"❓ {reponse}"
+                            
             rows.append(row)
         return rows
     except: return []
@@ -288,8 +300,8 @@ else:
             recherche_nom = st.selectbox("Taper un nom/prénom pour obtenir ses coordonnées :", options=[""] + sorted(df["Identité"].tolist()))
             if recherche_nom:
                 contact = df[df["Identité"] == recherche_nom].iloc[0]
-                tel = contact.get('N° Portable', contact.get('Numéro de téléphone', 'Non renseigné'))
-                st.write(f"📞 **Téléphone :** {tel} | 🚨 **Sortie :** {contact.get('Sortie Seul', '-')} | 🏫 **Campagne :** {contact.get('Campagne', '-')}")
+                tel = contact.get('N° Portable', contact.get('EMail', 'Non renseigné'))
+                st.write(f"📞 **Contact :** {tel} | 🚨 **Sortie :** {contact.get('Sortie Seul', '-')} | 🏫 **Campagne :** {contact.get('Campagne', '-')}")
             st.markdown('</div>', unsafe_allow_html=True)
 
             col_ad1, col_ad2, col_ad3 = st.columns(3)
@@ -302,26 +314,31 @@ else:
 
             df_admin['Elo Crevette 🦐'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['elos_crevette'].get(x, 400))
             
-            # Les colonnes avec leurs vrais noms HelloAsso, sans fusion ni masquerie.
+            # ORDONNANCEMENT PARFAIT CALQUÉ SUR L'EXCEL
             colonnes_prioritaires = [
-                "Nom", "Prénom", "Campagne", 
-                "N° Portable", "Numéro de téléphone", 
-                "N° Portable 2 (en cas d'urgence)", "Numéro de téléphone 2 (en cas d'urgence)", 
-                "Nom et prénom du responsable légal", "Sortie Seul", "Classe", 
-                "Montant Payé", "Formule", "Licence_FFE", "Email payeur"
+                "Nom", "Prénom", "Nom payeur", "Prénom payeur", "Email payeur", 
+                "Montant Payé", "Formule", "Licence_FFE", "Campagne",
+                "Nom et prénom du responsable légal", "N° Portable", "N° Portable 2 (en cas d'urgence)", 
+                "EMail", "Adresse", "Ville", "Classe", "Date de naissance", "Taille du t-shirt", 
+                "Dans quel ville sera votre créneaux principale ",
+                "J'autorise le club à diffuser des photos de moi ou mon enfant en lien avec notre activité sur notre site et sur les réseaux sociaux (Facebook ; Instagram, Twitter):",
+                "J’autorise le club à utiliser des images de moi ou mon enfant pour des objets publicitaires (prospectus de présentation du club, oriflamme, kakemono) :",
+                "J’accepte de recevoir les informations sur l’actualité du club (soirée blitz, organisation de stages pendant les vacances…) ainsi que les annonces des prochains tournois par mail",
+                "J’autorise mon enfant à quitter le club seul",
+                'e confirme avoir renseigné le questionnaire de santé "Sport" (mineurs) https://www.echecs.asso.fr/Actus/14098/questionnaire_mineur.pdf'
             ]
             
-            colonnes_a_exclure = [
-                "Identité", "Type", "Elo_FFE", "Elo Crevette 🦐", 
-                "Nom payeur", "Prénom payeur"
-            ]
+            # 1. On ne garde de la liste prioritaire que les colonnes qui existent
+            colonnes_presentes = [c for c in colonnes_prioritaires if c in df_admin.columns]
             
-            colonnes_prioritaires_existantes = [c for c in colonnes_prioritaires if c in df_admin.columns]
-            autres_colonnes = [c for c in df_admin.columns if c not in colonnes_prioritaires_existantes and c not in colonnes_a_exclure]
+            # 2. On exclut les colonnes techniques de l'affichage
+            colonnes_a_exclure = ["Identité", "Type", "Elo_FFE", "Sortie Seul", "Classe Déduite", "Elo Crevette 🦐"]
             
-            colonnes_finales = colonnes_prioritaires_existantes + autres_colonnes + ["Elo Crevette 🦐"]
+            # 3. On ajoute à la fin tout ce que l'Excel aurait généré en plus et qu'on n'aurait pas listé
+            autres_colonnes = [c for c in df_admin.columns if c not in colonnes_presentes and c not in colonnes_a_exclure]
+            
+            colonnes_finales = colonnes_presentes + autres_colonnes + ["Elo Crevette 🦐"]
             colonnes_finales = list(dict.fromkeys(colonnes_finales))
-            colonnes_finales = [c for c in colonnes_finales if c in df_admin.columns]
             
             st.metric("Dossiers affichés", len(df_admin))
             st.dataframe(df_admin[colonnes_finales], use_container_width=True, hide_index=True)
@@ -340,7 +357,7 @@ else:
                     c2.metric("♟️ Formule Club", f"{nb_club}", f"{(nb_club / total_eleves) * 100:.1f}%")
                     c3.metric("🏫 Formule Scolaire", total_eleves - nb_club)
                     
-                    colonnes_ecole = ["Nom", "Prénom", "Classe", "Formule", "Sortie Seul", "N° Portable", "Numéro de téléphone"]
+                    colonnes_ecole = ["Nom", "Prénom", "Classe Déduite", "Formule", "Sortie Seul", "N° Portable", "N° Portable 2 (en cas d'urgence)"]
                     colonnes_ecole = [c for c in colonnes_ecole if c in df_ec.columns]
                     st.dataframe(df_ec[colonnes_ecole], use_container_width=True, hide_index=True)
 
@@ -385,7 +402,6 @@ else:
             if lieu_aff not in st.session_state['db']['affectations_creneaux']: 
                 st.session_state['db']['affectations_creneaux'][lieu_aff] = []
                 
-            # FILTRE DE SÉCURITÉ ANTI-CRASH (pour ignorer les noms avec des étoiles qui ont été nettoyés)
             options_eleves = sorted(df["Identité"].tolist())
             eleves_sauvegardes = st.session_state['db']['affectations_creneaux'][lieu_aff]
             eleves_valides = [e for e in eleves_sauvegardes if e in options_eleves]
