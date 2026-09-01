@@ -28,8 +28,6 @@ if not st.session_state["authentifie"]:
                 st.error("Mot de passe incorrect.")
     st.stop()
 
-# --- FIN DU VERROUILLAGE ---
-
 st.markdown("""
     <style>
     h1, h2, h3 { color: #4682B4 !important; }
@@ -78,7 +76,7 @@ def calculer_nouveau_elo(r_a, r_b, score_a, k=40):
 
 def normaliser_nom(nom):
     if pd.isna(nom): return ""
-    nom = str(nom).lower().strip()
+    nom = str(nom).lower().strip().replace("*", "")
     return ''.join(c for c in unicodedata.normalize('NFD', nom) if unicodedata.category(c) != 'Mn')
 
 def generer_appariements_suisses(joueurs_scores, elos_dict, historique_rencontres):
@@ -141,45 +139,49 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
             nom_tarif = str(item.get("name", ""))
             type_formule = "Club" if any(mot in nom_tarif.lower() for mot in ["club", "adhésion", "adhesion"]) else "École"
             
+            # Nettoyage strict des prénoms et noms
+            nom_propre = user.get("lastName", payer.get("lastName", "Inconnu")).replace("*", "").strip().upper()
+            prenom_propre = user.get("firstName", payer.get("firstName", "Inconnu")).replace("*", "").strip().title()
+            
             row = {
                 "Campagne": nom_campagne,
-                "Nom": user.get("lastName", payer.get("lastName", "Inconnu")).upper(),
-                "Prénom": user.get("firstName", payer.get("firstName", "Inconnu")).title(),
-                "Identité": f"{user.get('firstName', payer.get('firstName', ''))} {user.get('lastName', payer.get('lastName', ''))}".title(),
+                "Nom": nom_propre,
+                "Prénom": prenom_propre,
+                "Identité": f"{prenom_propre} {nom_propre}",
                 "Formule": nom_tarif,
                 "Type": type_formule,
                 "Montant Payé": f"{item.get('amount', 0) / 100} €",
                 "Licence_FFE": "Non croisé",
-                "Nom payeur": payer.get("lastName", ""),
-                "Prénom payeur": payer.get("firstName", ""),
+                "Nom payeur": payer.get("lastName", "").replace("*", "").strip(),
+                "Prénom payeur": payer.get("firstName", "").replace("*", "").strip(),
                 "Email payeur": payer.get("email", "")
             }
             
-            # Initialisation par défaut pour éviter les colonnes vides
-            row["N° Portable"] = "Non renseigné"
-            row["N° Portable 2 (en cas d'urgence)"] = "Non renseigné"
-            row["Classe"] = "Non précisée"
-            row["Sortie Seul"] = "Non précisé"
+            classe_trouvee, sortie_seul, telephone = "Non précisée", "Non précisé", "Non renseigné"
             
+            # Injection de TOUTES les questions personnalisées sans exception
             for field in item.get("customFields", []):
-                nom_champ, reponse = str(field.get("name", "")), str(field.get("answer", ""))
+                nom_champ, reponse = str(field.get("name", "")).strip(), str(field.get("answer", "")).strip()
                 row[nom_champ] = reponse
                 
-                if "Classe" in nom_champ: row["Classe"] = reponse
-                elif "N° Portable" in nom_champ and "urgence" not in nom_champ.lower(): row["N° Portable"] = reponse
-                elif "N° Portable 2" in nom_champ: row["N° Portable 2 (en cas d'urgence)"] = reponse
+                if any(mot in nom_champ.lower() for mot in ["classe", "niveau", "scolaire", "section"]): 
+                    classe_trouvee = reponse
                 
-                elif "quitter le club seul" in nom_champ:
-                    if type_formule == "Club":
-                        if "oui" in reponse.lower() or reponse.lower() == "true": row["Sortie Seul"] = "✅ OUI"
-                        elif "non" in reponse.lower() or reponse.lower() == "false": row["Sortie Seul"] = "❌ NON"
-                        else: row["Sortie Seul"] = reponse
+                if "quitter" in nom_champ.lower() and "seul" in nom_champ.lower():
+                    if type_formule == "École":
+                        sortie_seul = "N/A (École)"
                     else:
-                        row["Sortie Seul"] = "N/A (École)"
-            
-            if type_formule == "Club" and row["Sortie Seul"] == "Non précisé":
-                row["Sortie Seul"] = "⚠️ À vérifier"
+                        if "oui" in reponse.lower() or reponse.lower() == "true": sortie_seul = "✅ OUI"
+                        elif "non" in reponse.lower() or reponse.lower() == "false": sortie_seul = "❌ NON"
+                        elif reponse == "": sortie_seul = "⚠️ Laissé vide"
+                        else: sortie_seul = f"❓ {reponse}"
                 
+                if any(mot in nom_champ.lower() for mot in ["téléphone", "telephone", "tel", "mobile"]) and telephone == "Non renseigné": 
+                    telephone = reponse
+            
+            row["Classe"] = classe_trouvee
+            row["Sortie Seul"] = sortie_seul
+            row["Téléphone"] = telephone
             rows.append(row)
         return rows
     except: return []
@@ -300,14 +302,14 @@ else:
             df_admin = df[(df["Campagne"].isin(filtre_camp_admin)) & (df["Type"].isin(filtre_type_admin))].copy()
             if sans_licence: df_admin = df_admin[df_admin["Licence_FFE"] == "Non croisé"]
 
-            df_admin['Elo Crevette 🦐'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['elos_crevette'].get(x, 400))
-            
-            # Organisation précise demandée
+            # Fixation absolue des colonnes prioritaires avec ajout dynamique de TOUT le reste
             colonnes_prioritaires = ["Nom", "Prénom", "Campagne", "Classe", "N° Portable", "N° Portable 2 (en cas d'urgence)", "Nom et prénom du responsable légal", "Email payeur", "Sortie Seul", "Montant Payé", "Formule", "Licence_FFE"]
-            
-            # Sécuriser l'affichage si la colonne n'existe pas encore dans HelloAsso
             colonnes_prioritaires_existantes = [c for c in colonnes_prioritaires if c in df_admin.columns]
-            autres_colonnes = [c for c in df_admin.columns if c not in colonnes_prioritaires_existantes and c not in ["Identité", "Elo Crevette 🦐", "Type", "Téléphone"]]
+            
+            # Injection de toutes les autres colonnes existantes
+            colonnes_a_exclure = ["Identité", "Type", "Téléphone", "Elo Crevette 🦐", "Elo_FFE"]
+            autres_colonnes = [c for c in df_admin.columns if c not in colonnes_prioritaires_existantes and c not in colonnes_a_exclure]
+            
             colonnes_finales = colonnes_prioritaires_existantes + autres_colonnes
             
             st.metric("Dossiers affichés", len(df_admin))
@@ -326,7 +328,6 @@ else:
                     c1.metric("🎓 Total Élèves", total_eleves)
                     c2.metric("♟️ Formule Club", f"{nb_club}", f"{(nb_club / total_eleves) * 100:.1f}%")
                     c3.metric("🏫 Formule Scolaire", total_eleves - nb_club)
-                    
                     colonnes_ecole = ["Nom", "Prénom", "Classe", "Formule", "Sortie Seul"]
                     if "N° Portable" in df_ec.columns: colonnes_ecole.append("N° Portable")
                     st.dataframe(df_ec[colonnes_ecole], use_container_width=True, hide_index=True)
@@ -335,21 +336,17 @@ else:
             st.markdown("### 🎟️ Suivi des Cartes de Centres (Cassis & Carnoux)")
             ville_carte = st.radio("Sélectionner la commune à vérifier :", ["Cassis (Carte Centre Culturel)", "Carnoux (Carte du Coq)"])
             ville_cle = "Cassis" if "Cassis" in ville_carte else "Carnoux"
-            
             eleves_concernes = set()
             for cle, liste in st.session_state['db']['affectations_creneaux'].items():
                 if ville_cle in cle: eleves_concernes.update(liste)
-                    
             if not eleves_concernes: st.info(f"Aucun élève n'est encore assigné à {ville_cle}.")
             else:
                 for eleve in sorted(list(eleves_concernes)):
-                    if eleve not in st.session_state['db']['cartes_membres']:
-                        st.session_state['db']['cartes_membres'][eleve] = {"Cassis": False, "Carnoux": False}
+                    if eleve not in st.session_state['db']['cartes_membres']: st.session_state['db']['cartes_membres'][eleve] = {"Cassis": False, "Carnoux": False}
                     c1, c2 = st.columns([3, 1])
                     c1.write(f"👤 **{eleve}**")
                     est_coche = c2.checkbox("✅ Carte OK", value=st.session_state['db']['cartes_membres'][eleve][ville_cle], key=f"carte_{ville_cle}_{eleve}")
                     st.session_state['db']['cartes_membres'][eleve][ville_cle] = est_coche
-                
                 if st.button("💾 Sauvegarder l'état des cartes"):
                     sauvegarder_base(st.session_state['db'])
                     st.success("Mise à jour des cartes enregistrée avec succès !")
@@ -373,15 +370,8 @@ else:
             with c_jour: jour_aff = st.selectbox("Jour :", options=list(structure_creneaux.keys()), key="jour_aff")
             with c_lieu: lieu_aff = st.selectbox("Créneau :", options=structure_creneaux[jour_aff], key="lieu_aff")
             
-            if lieu_aff not in st.session_state['db']['affectations_creneaux']:
-                st.session_state['db']['affectations_creneaux'][lieu_aff] = []
-                
-            nouveaux_eleves = st.multiselect(
-                f"Élèves assignés à {lieu_aff} :", 
-                options=sorted(df["Identité"].tolist()),
-                default=st.session_state['db']['affectations_creneaux'][lieu_aff]
-            )
-            
+            if lieu_aff not in st.session_state['db']['affectations_creneaux']: st.session_state['db']['affectations_creneaux'][lieu_aff] = []
+            nouveaux_eleves = st.multiselect(f"Élèves assignés à {lieu_aff} :", options=sorted(df["Identité"].tolist()), default=st.session_state['db']['affectations_creneaux'][lieu_aff])
             if st.button("💾 Sauvegarder cette liste d'appel"):
                 st.session_state['db']['affectations_creneaux'][lieu_aff] = nouveaux_eleves
                 sauvegarder_base(st.session_state['db'])
@@ -390,15 +380,12 @@ else:
         with tab_appel:
             st.markdown(f"### 📋 Appel du jour : **{date_jour}**")
             entraineur_appel = st.selectbox("Entraîneur responsable :", ["Quentin Massardo", "Alexandre Merenciano"])
-            
             c_jour_ap, c_lieu_ap = st.columns(2)
             with c_jour_ap: jour_appel = st.selectbox("Sélectionner le Jour :", options=list(structure_creneaux.keys()), key="jour_ap")
             with c_lieu_ap: lieu_appel = st.selectbox("Créneau :", options=structure_creneaux[jour_appel], key="lieu_ap")
             
             liste_identites = st.session_state['db']['affectations_creneaux'].get(lieu_appel, [])
-            
-            if not liste_identites:
-                st.info("Aucun élève assigné. Assurez-vous que le jour est bien dans le nom de la formule ou affectez-les manuellement.")
+            if not liste_identites: st.info("Aucun élève assigné à ce créneau.")
             else:
                 df_groupe = df[df["Identité"].isin(liste_identites)]
                 presences = {}
@@ -411,19 +398,14 @@ else:
                 if st.button(f"💾 Enregistrer l'appel pour {lieu_appel}"):
                     liste_presents = [id_joueur for id_joueur, est_present in presences.items() if est_present]
                     if date_jour not in st.session_state['db']['historique_appels']: st.session_state['db']['historique_appels'][date_jour] = {}
-                    st.session_state['db']['historique_appels'][date_jour][lieu_appel] = {
-                        "entraineur": entraineur_appel,
-                        "presents": liste_presents
-                    }
+                    st.session_state['db']['historique_appels'][date_jour][lieu_appel] = {"entraineur": entraineur_appel, "presents": liste_presents}
                     sauvegarder_base(st.session_state['db'])
                     st.success("Appel enregistré !")
 
         with tab_tournoi:
             st.markdown("### ⚔️ Tournoi Suisse & Elo Crevette 🦐")
             creneaux_remplis = [k for k, v in st.session_state['db']['affectations_creneaux'].items() if len(v) > 0]
-            
-            if not creneaux_remplis:
-                st.info("Aucun créneau disponible pour lancer un tournoi.")
+            if not creneaux_remplis: st.info("Aucun créneau disponible pour lancer un tournoi.")
             else:
                 creneau_tournoi = st.selectbox("Lancer le tournoi pour le créneau :", options=creneaux_remplis)
                 joueurs_inscrits = st.session_state['db']['affectations_creneaux'][creneau_tournoi]
@@ -454,22 +436,18 @@ else:
                 if st.session_state.get('appariements_ronde'):
                     st.subheader(f"♟️ Matchs — Ronde {st.session_state['ronde_actuelle']}")
                     resultats_saisis = []
-                    
                     for i, (j1, j2) in enumerate(st.session_state['appariements_ronde'], 1):
                         elo1 = st.session_state['db']['elos_crevette'].get(j1, 400)
                         elo2 = st.session_state['db']['elos_crevette'].get(j2, 400)
-                        
                         c_ech, c_res = st.columns([3, 2])
                         c_ech.markdown(f"**Échiquier {i} :** ⚪ **{j1}** ({elo1}🦐)  🆚  ⚫ **{j2}** ({elo2}🦐)")
                         res = c_res.selectbox(f"Résultat", ["Sélectionner...", "1 - 0 (Blancs)", "0 - 1 (Noirs)", "0.5 - 0.5 (Nulle)"], key=f"res_{i}", label_visibility="collapsed")
                         resultats_saisis.append((j1, j2, res))
-                    
                     if st.session_state.get('exempt_ronde'): st.warning(f"👑 **Exempt (1 pt) :** {st.session_state['exempt_ronde']}")
 
                     st.markdown("---")
                     if st.button("💾 Valider les résultats et sauvegarder les Elo Crevette"):
-                        if any(r[2] == "Sélectionner..." for r in resultats_saisis):
-                            st.error("⚠️ Saisissez tous les résultats.")
+                        if any(r[2] == "Sélectionner..." for r in resultats_saisis): st.error("⚠️ Saisissez tous les résultats.")
                         else:
                             for j1, j2, res in resultats_saisis:
                                 elo1 = st.session_state['db']['elos_crevette'].get(j1, 400)
