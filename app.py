@@ -131,7 +131,6 @@ def get_helloasso_token(client_id, client_secret):
 def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
     url = f"https://api.helloasso.com/v5/organizations/echecs-cassis/forms/{form_type}/{form_slug}/items"
     try:
-        # LE CŒUR DU CORRECTIF : L'ajout de withDetails=true oblige HelloAsso à cracher les réponses aux questions
         r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, params={"pageSize": 100, "withDetails": "true"})
         items = r.json().get("data", [])
         rows = []
@@ -361,8 +360,9 @@ else:
 
             df_admin['Elo Crevette 🦐'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['elos_crevette'].get(x, 400))
             
+            # --- LES COLONNES DEMANDÉES (SANS LES INFOS PAYEURS) ---
             colonnes_prioritaires = [
-                "Nom", "Prénom", "Nom payeur", "Prénom payeur", "Email payeur", 
+                "Nom", "Prénom", 
                 "Montant Payé", "Formule", "Licence_FFE", "Campagne",
                 "Nom et prénom du responsable légal", "N° Portable", "N° Portable 2 (en cas d'urgence)", 
                 "EMail", "Adresse", "Ville", "Classe", "Date de naissance", "Taille du t-shirt", 
@@ -375,7 +375,10 @@ else:
             ]
             
             colonnes_presentes = [c for c in colonnes_prioritaires if c in df_admin.columns]
-            colonnes_a_exclure = ["Identité", "Type", "Elo_FFE", "Sortie Seul", "Classe Déduite", "Elo Crevette 🦐"]
+            
+            # --- ON CACHE LES COLONNES QUE TU NE VEUX PLUS VOIR ---
+            colonnes_a_exclure = ["Identité", "Type", "Elo_FFE", "Sortie Seul", "Classe Déduite", "Elo Crevette 🦐", "Nom payeur", "Prénom payeur", "Email payeur"]
+            
             autres_colonnes = [c for c in df_admin.columns if c not in colonnes_presentes and c not in colonnes_a_exclure]
             
             colonnes_finales = colonnes_presentes + autres_colonnes + ["Elo Crevette 🦐"]
