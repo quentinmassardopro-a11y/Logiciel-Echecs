@@ -9,6 +9,27 @@ from datetime import datetime
 
 st.set_page_config(page_title="Académie d'Échecs des Calanques", layout="wide", page_icon="♟️")
 
+# --- VERROUILLAGE PAR MOT DE PASSE ---
+if "authentifie" not in st.session_state:
+    st.session_state["authentifie"] = False
+
+if not st.session_state["authentifie"]:
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        try: st.image("logo.png", width=150)
+        except: pass
+        st.markdown("**🔒 Accès Restreint - Académie d'Échecs des Calanques**")
+        mdp = st.text_input("Veuillez saisir le mot de passe :", type="password")
+        if st.button("Se connecter"):
+            if mdp == "cassisechecs":
+                st.session_state["authentifie"] = True
+                st.rerun()
+            else:
+                st.error("Mot de passe incorrect.")
+    st.stop()
+
+# --- FIN DU VERROUILLAGE ---
+
 st.markdown("""
     <style>
     h1, h2, h3 { color: #4682B4 !important; }
@@ -23,30 +44,24 @@ DB_FILE = "base_calanques.json"
 
 def charger_base():
     default_db = {
-        "elos_crevette": {}, 
-        "historique_appels": {}, 
-        "eleves_essai": [],
-        "affectations_creneaux": {},
-        "cartes_membres": {} 
+        "elos_crevette": {}, "historique_appels": {}, "eleves_essai": [],
+        "affectations_creneaux": {}, "cartes_membres": {} 
     }
     if os.path.exists(DB_FILE):
         with open(DB_FILE, "r", encoding="utf-8") as f:
             try:
                 db_chargee = json.load(f)
                 for cle in default_db:
-                    if cle not in db_chargee:
-                        db_chargee[cle] = default_db[cle]
+                    if cle not in db_chargee: db_chargee[cle] = default_db[cle]
                 return db_chargee
-            except:
-                return default_db
+            except: return default_db
     return default_db
 
 def sauvegarder_base(db):
     with open(DB_FILE, "w", encoding="utf-8") as f:
         json.dump(db, f, ensure_ascii=False, indent=4)
 
-if 'db' not in st.session_state:
-    st.session_state['db'] = charger_base()
+if 'db' not in st.session_state: st.session_state['db'] = charger_base()
 
 col1, col2 = st.columns([1, 4])
 with col1:
@@ -87,9 +102,7 @@ def generer_appariements_suisses(joueurs_scores, elos_dict, historique_rencontre
     return appariements, exempt, historique_rencontres
 
 def auto_affecter_creneau(campagne, formule):
-    camp = str(campagne).lower()
-    form = str(formule).lower()
-    
+    camp, form = str(campagne).lower(), str(formule).lower()
     if "lundi" in form:
         if "trinit" in camp: return "Lundi - Sainte-Trinité (CP)"
         return "Lundi - La Ciotat (École)"
@@ -97,8 +110,7 @@ def auto_affecter_creneau(campagne, formule):
         if "trinit" in camp: return "Mardi - Sainte-Trinité (CE1)"
         if "augustin" in camp: return "Mardi - Saint-Augustin (CP-CE1)"
         return "Mardi - Ceyreste / Marseille"
-    if "mercredi" in form:
-        return "Mercredi - Ceyreste / Cassis"
+    if "mercredi" in form: return "Mercredi - Ceyreste / Cassis"
     if "jeudi" in form:
         if "trinit" in camp: return "Jeudi - Sainte-Trinité (Collège)"
         if "bosco" in camp: 
@@ -109,22 +121,19 @@ def auto_affecter_creneau(campagne, formule):
         if "augustin" in camp: return "Vendredi - Saint-Augustin (CE2-CM2)"
         if "trinit" in camp: return "Vendredi - Sainte-Trinité (CE2-CM2)"
         return "Vendredi - Cassis"
-    
     return None
 
 def get_helloasso_token(client_id, client_secret):
     url = "https://api.helloasso.com/oauth2/token"
-    payload = {"client_id": client_id, "client_secret": client_secret, "grant_type": "client_credentials"}
     try:
-        r = requests.post(url, data=payload, headers={"Content-Type": "application/x-www-form-urlencoded"})
+        r = requests.post(url, data={"client_id": client_id, "client_secret": client_secret, "grant_type": "client_credentials"}, headers={"Content-Type": "application/x-www-form-urlencoded"})
         return r.json().get("access_token") if r.status_code == 200 else None
     except: return None
 
 def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
     url = f"https://api.helloasso.com/v5/organizations/echecs-cassis/forms/{form_type}/{form_slug}/items"
-    headers = {"Authorization": f"Bearer {token}"}
     try:
-        r = requests.get(url, headers=headers, params={"pageSize": 100})
+        r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, params={"pageSize": 100})
         items = r.json().get("data", [])
         rows = []
         for item in items:
@@ -143,39 +152,32 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
                 "Licence_FFE": "Non croisé",
                 "Nom payeur": payer.get("lastName", ""),
                 "Prénom payeur": payer.get("firstName", ""),
-                "Email payeur": payer.get("email", ""),
+                "Email payeur": payer.get("email", "")
             }
             
-            classe_trouvee, sortie_seul, telephone = "Non précisée", "Non précisé", "Non renseigné"
+            # Initialisation par défaut pour éviter les colonnes vides
+            row["N° Portable"] = "Non renseigné"
+            row["N° Portable 2 (en cas d'urgence)"] = "Non renseigné"
+            row["Classe"] = "Non précisée"
+            row["Sortie Seul"] = "Non précisé"
             
             for field in item.get("customFields", []):
                 nom_champ, reponse = str(field.get("name", "")), str(field.get("answer", ""))
                 row[nom_champ] = reponse
                 
-                # Détection Classe
-                if any(mot in nom_champ.lower() for mot in ["classe", "niveau", "scolaire", "section"]): 
-                    classe_trouvee = reponse
+                if "Classe" in nom_champ: row["Classe"] = reponse
+                elif "N° Portable" in nom_champ and "urgence" not in nom_champ.lower(): row["N° Portable"] = reponse
+                elif "N° Portable 2" in nom_champ: row["N° Portable 2 (en cas d'urgence)"] = reponse
                 
-                # Détection Sortie Seul
-                if "quitter" in nom_champ.lower() or "seul" in nom_champ.lower():
+                elif "quitter le club seul" in nom_champ:
                     if type_formule == "Club":
-                        if "oui" in reponse.lower() or reponse.lower() == "true":
-                            sortie_seul = "✅ OUI"
-                        elif "non" in reponse.lower() or reponse.lower() == "false":
-                            sortie_seul = "❌ NON"
-                        else:
-                            sortie_seul = reponse
+                        if "oui" in reponse.lower() or reponse.lower() == "true": row["Sortie Seul"] = "✅ OUI"
+                        elif "non" in reponse.lower() or reponse.lower() == "false": row["Sortie Seul"] = "❌ NON"
+                        else: row["Sortie Seul"] = reponse
                     else:
-                        sortie_seul = "N/A (École)"
-                
-                # Détection Téléphone
-                if any(mot in nom_champ.lower() for mot in ["téléphone", "telephone", "tel", "mobile"]) and telephone == "Non renseigné": 
-                    telephone = reponse
+                        row["Sortie Seul"] = "N/A (École)"
             
-            row["Classe"], row["Sortie Seul"], row["Téléphone"] = classe_trouvee, sortie_seul, telephone
-            
-            # Si le champ sortie_seul n'a pas été trouvé du tout dans le formulaire Club, on l'indique.
-            if type_formule == "Club" and sortie_seul == "Non précisé":
+            if type_formule == "Club" and row["Sortie Seul"] == "Non précisé":
                 row["Sortie Seul"] = "⚠️ À vérifier"
                 
             rows.append(row)
@@ -236,7 +238,6 @@ if st.sidebar.button("🔄 Lancer la Synchronisation"):
                 
                 if all_data:
                     df_base = pd.DataFrame(all_data)
-                    
                     if 'df_ffe' in st.session_state and not st.session_state['df_ffe'].empty:
                         df_base['Cle_Croisement'] = df_base['Nom'].apply(normaliser_nom) + df_base['Prénom'].apply(normaliser_nom)
                         df_base = pd.merge(df_base, st.session_state['df_ffe'], on='Cle_Croisement', how='left')
@@ -250,7 +251,6 @@ if st.sidebar.button("🔄 Lancer la Synchronisation"):
                         identite = row['Identité']
                         if identite not in st.session_state['db']['elos_crevette']:
                             st.session_state['db']['elos_crevette'][identite] = 400
-                        
                         creneau_auto = auto_affecter_creneau(row['Campagne'], row['Formule'])
                         if creneau_auto:
                             if creneau_auto not in st.session_state['db']['affectations_creneaux']:
@@ -288,7 +288,8 @@ else:
             recherche_nom = st.selectbox("Taper un nom/prénom pour obtenir ses coordonnées :", options=[""] + sorted(df["Identité"].tolist()))
             if recherche_nom:
                 contact = df[df["Identité"] == recherche_nom].iloc[0]
-                st.write(f"📞 **Téléphone :** {contact['Téléphone']} | 🚨 **Sortie :** {contact['Sortie Seul']} | 🏫 **Campagne :** {contact['Campagne']}")
+                tel = contact.get('N° Portable', contact.get('Téléphone', 'Non renseigné'))
+                st.write(f"📞 **Téléphone :** {tel} | 🚨 **Sortie :** {contact['Sortie Seul']} | 🏫 **Campagne :** {contact['Campagne']}")
             st.markdown('</div>', unsafe_allow_html=True)
 
             col_ad1, col_ad2, col_ad3 = st.columns(3)
@@ -297,14 +298,17 @@ else:
             with col_ad3: sans_licence = st.checkbox("🚨 Afficher UNIQUEMENT les sans-licence", value=False)
                 
             df_admin = df[(df["Campagne"].isin(filtre_camp_admin)) & (df["Type"].isin(filtre_type_admin))].copy()
-            if sans_licence:
-                df_admin = df_admin[df_admin["Licence_FFE"] == "Non croisé"]
+            if sans_licence: df_admin = df_admin[df_admin["Licence_FFE"] == "Non croisé"]
 
             df_admin['Elo Crevette 🦐'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['elos_crevette'].get(x, 400))
             
-            colonnes_prioritaires = ["Nom", "Prénom", "Campagne", "Téléphone", "Email payeur", "Sortie Seul", "Montant Payé", "Formule", "Licence_FFE"]
-            autres_colonnes = [c for c in df_admin.columns if c not in colonnes_prioritaires and c not in ["Identité", "Elo Crevette 🦐", "Type", "Nom payeur", "Prénom payeur"]]
-            colonnes_finales = colonnes_prioritaires + autres_colonnes
+            # Organisation précise demandée
+            colonnes_prioritaires = ["Nom", "Prénom", "Campagne", "Classe", "N° Portable", "N° Portable 2 (en cas d'urgence)", "Nom et prénom du responsable légal", "Email payeur", "Sortie Seul", "Montant Payé", "Formule", "Licence_FFE"]
+            
+            # Sécuriser l'affichage si la colonne n'existe pas encore dans HelloAsso
+            colonnes_prioritaires_existantes = [c for c in colonnes_prioritaires if c in df_admin.columns]
+            autres_colonnes = [c for c in df_admin.columns if c not in colonnes_prioritaires_existantes and c not in ["Identité", "Elo Crevette 🦐", "Type", "Téléphone"]]
+            colonnes_finales = colonnes_prioritaires_existantes + autres_colonnes
             
             st.metric("Dossiers affichés", len(df_admin))
             st.dataframe(df_admin[colonnes_finales], use_container_width=True, hide_index=True)
@@ -315,7 +319,6 @@ else:
             if ecoles_dispos:
                 ecole_choisie = st.selectbox("Sélectionnez l'établissement :", ecoles_dispos)
                 df_ec = df[df["Campagne"] == ecole_choisie].copy()
-                
                 total_eleves = len(df_ec)
                 if total_eleves > 0:
                     c1, c2, c3 = st.columns(3)
@@ -323,7 +326,10 @@ else:
                     c1.metric("🎓 Total Élèves", total_eleves)
                     c2.metric("♟️ Formule Club", f"{nb_club}", f"{(nb_club / total_eleves) * 100:.1f}%")
                     c3.metric("🏫 Formule Scolaire", total_eleves - nb_club)
-                    st.dataframe(df_ec[["Nom", "Prénom", "Classe", "Formule", "Téléphone", "Sortie Seul"]], use_container_width=True, hide_index=True)
+                    
+                    colonnes_ecole = ["Nom", "Prénom", "Classe", "Formule", "Sortie Seul"]
+                    if "N° Portable" in df_ec.columns: colonnes_ecole.append("N° Portable")
+                    st.dataframe(df_ec[colonnes_ecole], use_container_width=True, hide_index=True)
 
         with tab_cartes:
             st.markdown("### 🎟️ Suivi des Cartes de Centres (Cassis & Carnoux)")
@@ -334,7 +340,7 @@ else:
             for cle, liste in st.session_state['db']['affectations_creneaux'].items():
                 if ville_cle in cle: eleves_concernes.update(liste)
                     
-            if not eleves_concernes: st.info(f"Aucun élève n'est encore assigné à {ville_cle} dans les listes d'appels.")
+            if not eleves_concernes: st.info(f"Aucun élève n'est encore assigné à {ville_cle}.")
             else:
                 for eleve in sorted(list(eleves_concernes)):
                     if eleve not in st.session_state['db']['cartes_membres']:
