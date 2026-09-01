@@ -138,7 +138,6 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
             user, payer = item.get("user", {}), item.get("payer", {})
             nom_tarif = str(item.get("name", ""))
             
-            # CORRECTION : On détecte le type sur le nom de la CAMPAGNE, pas du tarif.
             type_formule = "Club" if "club" in nom_campagne.lower() else "École"
             
             nom_propre = user.get("lastName", payer.get("lastName", "Inconnu")).replace("*", "").strip().upper()
@@ -160,15 +159,11 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
             
             classe_trouvee, sortie_seul = "Non précisée", "Non précisé"
             
-            # INJECTION DE TOUTES LES QUESTIONS HELLOASSO
             for field in item.get("customFields", []):
                 nom_champ = str(field.get("name", "")).strip()
                 reponse = str(field.get("answer", "")).strip()
-                
-                # On sauvegarde chaque colonne avec son nom HelloAsso exact
                 row[nom_champ] = reponse
                 
-                # Détection spécifique pour la logique interne (Classes et Sortie Seul)
                 if any(mot in nom_champ.lower() for mot in ["classe", "niveau", "scolaire", "section"]): 
                     classe_trouvee = reponse
                 
@@ -311,7 +306,6 @@ else:
 
             df_admin['Elo Crevette 🦐'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['elos_crevette'].get(x, 400))
             
-            # On liste d'abord les colonnes clés selon ta capture d'écran (pour qu'elles soient en premier)
             colonnes_prioritaires = [
                 "Nom", "Prénom", "Campagne", "Classe", "Sortie Seul", 
                 "Numéro de téléphone", "Numéro de téléphone 2 (en cas d'urgence)", 
@@ -321,11 +315,12 @@ else:
             
             colonnes_prioritaires_existantes = [c for c in colonnes_prioritaires if c in df_admin.columns]
             
-            # On ajoute ensuite ABSOLUMENT TOUTES les autres colonnes qui n'ont pas encore été affichées
-            colonnes_a_exclure = ["Identité", "Type", "Elo_FFE"]
+            # SÉCURITÉ ANTI-DOUBLONS : exclusion stricte des colonnes déjà ajoutées ou inutiles
+            colonnes_a_exclure = ["Identité", "Type", "Elo_FFE", "Elo Crevette 🦐", "Téléphone", "Nom payeur", "Prénom payeur"]
             autres_colonnes = [c for c in df_admin.columns if c not in colonnes_prioritaires_existantes and c not in colonnes_a_exclure]
             
             colonnes_finales = colonnes_prioritaires_existantes + autres_colonnes + ["Elo Crevette 🦐"]
+            colonnes_finales = list(dict.fromkeys(colonnes_finales)) # Nettoyage des doublons potentiels
             
             st.metric("Dossiers affichés", len(df_admin))
             st.dataframe(df_admin[colonnes_finales], use_container_width=True, hide_index=True)
@@ -348,6 +343,8 @@ else:
                     if "Numéro de téléphone" in df_ec.columns: colonnes_ecole.append("Numéro de téléphone")
                     elif "N° Portable" in df_ec.columns: colonnes_ecole.append("N° Portable")
                     
+                    # Anti-doublons pour le tableau école aussi
+                    colonnes_ecole = list(dict.fromkeys([c for c in colonnes_ecole if c in df_ec.columns]))
                     st.dataframe(df_ec[colonnes_ecole], use_container_width=True, hide_index=True)
 
         with tab_cartes:
