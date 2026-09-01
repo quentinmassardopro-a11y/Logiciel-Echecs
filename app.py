@@ -142,7 +142,12 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
             nom_propre = user.get("lastName", payer.get("lastName", "Inconnu")).replace("*", "").strip().upper()
             prenom_propre = user.get("firstName", payer.get("firstName", "Inconnu")).replace("*", "").strip().title()
             
-            # --- CRÉATION FORCÉE DE TOUTES LES COLONNES DEMANDÉES (Même si vides) ---
+            email_def = user.get("email", payer.get("email", ""))
+            adresse_def = user.get("address", payer.get("address", ""))
+            ville_def = user.get("city", payer.get("city", ""))
+            naissance_def = user.get("birthDate", user.get("dateOfBirth", payer.get("dateOfBirth", "")))
+            
+            # --- STRUCTURE BLINDÉE : Les colonnes existent toujours ---
             row = {
                 "Campagne": nom_campagne,
                 "Nom": nom_propre,
@@ -154,17 +159,16 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
                 "Licence_FFE": "Non croisé",
                 "Nom payeur": payer.get("lastName", "").replace("*", "").strip(),
                 "Prénom payeur": payer.get("firstName", "").replace("*", "").strip(),
-                "Email payeur": payer.get("email", ""),
+                "Email payeur": email_def,
                 
-                # Voici les colonnes que tu as listées (Générées systématiquement)
                 "N° Portable": "",
                 "N° Portable 2 (en cas d'urgence)": "",
-                "EMail": user.get("email", payer.get("email", "")),
-                "Adresse": user.get("address", payer.get("address", "")),
-                "Ville": user.get("city", payer.get("city", "")),
+                "EMail": email_def,
+                "Adresse": adresse_def,
+                "Ville": ville_def,
                 "Nom et prénom du responsable légal": "",
                 "Classe": "",
-                "Date de naissance": user.get("birthDate", user.get("dateOfBirth", "")),
+                "Date de naissance": naissance_def,
                 "Taille du t-shirt": "",
                 "Dans quel ville sera votre créneaux principale ": "",
                 "J'autorise le club à diffuser des photos de moi ou mon enfant en lien avec notre activité sur notre site et sur les réseaux sociaux (Facebook ; Instagram, Twitter):": "",
@@ -174,35 +178,45 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
                 'e confirme avoir renseigné le questionnaire de santé "Sport" (mineurs) https://www.echecs.asso.fr/Actus/14098/questionnaire_mineur.pdf': ""
             }
             
-            # Nettoyage de l'heure sur la date de naissance si elle existe
             if row["Date de naissance"] and len(str(row["Date de naissance"])) >= 10:
                 row["Date de naissance"] = str(row["Date de naissance"])[:10]
             
-            # --- REMPLISSAGE DES COLONNES SI HELLOASSO A LA RÉPONSE ---
+            # --- ASPIRATION INTELLIGENTE PAR MOTS-CLÉS ---
             for field in item.get("customFields", []):
                 nom_champ = str(field.get("name", ""))
                 reponse = str(field.get("answer", "")).strip()
                 nom_lower = nom_champ.lower()
                 
-                # Injection du nom brut (au cas où il soit très différent)
+                # Injection brute au cas où 
                 row[nom_champ] = reponse
                 
-                # Mapping intelligent pour être sûr à 100% de remplir TES colonnes
-                if "classe" in nom_lower or "niveau" in nom_lower: row["Classe"] = reponse
-                if "portable 2" in nom_lower or "urgence" in nom_lower: row["N° Portable 2 (en cas d'urgence)"] = reponse
-                elif "portable" in nom_lower or "téléphone" in nom_lower or "telephone" in nom_lower: row["N° Portable"] = reponse
-                if "responsable" in nom_lower or "légal" in nom_lower: row["Nom et prénom du responsable légal"] = reponse
-                if "t-shirt" in nom_lower: row["Taille du t-shirt"] = reponse
-                if "créneaux principale" in nom_lower: row["Dans quel ville sera votre créneaux principale "] = reponse
+                # Détection par mot-clé (ignore la ponctuation et les espaces invisibles)
+                if "classe" in nom_lower or "niveau" in nom_lower: 
+                    row["Classe"] = reponse
+                if "portable 2" in nom_lower or "urgence" in nom_lower: 
+                    row["N° Portable 2 (en cas d'urgence)"] = reponse
+                elif "portable" in nom_lower or "téléphone" in nom_lower or "telephone" in nom_lower or "tel" in nom_lower: 
+                    if not row["N° Portable"]: row["N° Portable"] = reponse
+                if "responsable" in nom_lower or "légal" in nom_lower: 
+                    row["Nom et prénom du responsable légal"] = reponse
+                if "t-shirt" in nom_lower: 
+                    row["Taille du t-shirt"] = reponse
+                if "créneaux" in nom_lower and "principale" in nom_lower: 
+                    row["Dans quel ville sera votre créneaux principale "] = reponse
                 
                 if "diffuser" in nom_lower and "photos" in nom_lower: 
                     row["J'autorise le club à diffuser des photos de moi ou mon enfant en lien avec notre activité sur notre site et sur les réseaux sociaux (Facebook ; Instagram, Twitter):"] = reponse
-                if "publicitaires" in nom_lower and "prospectus" in nom_lower: 
+                if "publicitaires" in nom_lower or "prospectus" in nom_lower: 
                     row["J’autorise le club à utiliser des images de moi ou mon enfant pour des objets publicitaires (prospectus de présentation du club, oriflamme, kakemono) :"] = reponse
-                if "actualité" in nom_lower and "mail" in nom_lower: 
+                if "actualité" in nom_lower or "blitz" in nom_lower: 
                     row["J’accepte de recevoir les informations sur l’actualité du club (soirée blitz, organisation de stages pendant les vacances…) ainsi que les annonces des prochains tournois par mail"] = reponse
                 if "questionnaire" in nom_lower and "mineurs" in nom_lower: 
                     row['e confirme avoir renseigné le questionnaire de santé "Sport" (mineurs) https://www.echecs.asso.fr/Actus/14098/questionnaire_mineur.pdf'] = reponse
+                    
+                if "adresse" in nom_lower and len(reponse) > 2: row["Adresse"] = reponse
+                if "ville" in nom_lower and "créneaux" not in nom_lower and len(reponse) > 1: row["Ville"] = reponse
+                if "naissance" in nom_lower and len(reponse) > 2: row["Date de naissance"] = reponse
+                if "email" in nom_lower or "courriel" in nom_lower: row["EMail"] = reponse
                 
                 if "quitter" in nom_lower and "seul" in nom_lower:
                     if type_formule == "École":
@@ -341,7 +355,6 @@ else:
 
             df_admin['Elo Crevette 🦐'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['elos_crevette'].get(x, 400))
             
-            # --- L'ORDRE EXACT QUE TU AS DEMANDÉ ---
             colonnes_prioritaires = [
                 "Nom", "Prénom", "Nom payeur", "Prénom payeur", "Email payeur", 
                 "Montant Payé", "Formule", "Licence_FFE", "Campagne",
@@ -360,7 +373,7 @@ else:
             autres_colonnes = [c for c in df_admin.columns if c not in colonnes_presentes and c not in colonnes_a_exclure]
             
             colonnes_finales = colonnes_presentes + autres_colonnes + ["Elo Crevette 🦐"]
-            colonnes_finales = list(dict.fromkeys(colonnes_finales)) # Supprime les doublons éventuels
+            colonnes_finales = list(dict.fromkeys(colonnes_finales))
             
             st.metric("Dossiers affichés", len(df_admin))
             st.dataframe(df_admin[colonnes_finales], use_container_width=True, hide_index=True)
