@@ -155,27 +155,34 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
                 "Prénom payeur": payer.get("firstName", "").replace("*", "").strip(),
                 "Email payeur": payer.get("email", ""),
                 
-                # Colonnes techniques cachées pour le module Entraîneur
+                # Extraction forcée des champs standards HelloAsso 
+                "Adresse": user.get("address", payer.get("address", "")),
+                "Ville": user.get("city", payer.get("city", "")),
+                "Date de naissance": user.get("birthDate", user.get("dateOfBirth", "")),
+                "EMail": user.get("email", payer.get("email", "")),
+                
                 "Sortie Seul": "-",
                 "Classe Déduite": "-"
             }
             
+            # Formatage de la date de naissance
+            if row["Date de naissance"] and len(str(row["Date de naissance"])) >= 10:
+                row["Date de naissance"] = str(row["Date de naissance"])[:10]
+            
             for field in item.get("customFields", []):
-                nom_champ = str(field.get("name", "")).strip()
+                nom_champ = str(field.get("name", "")) # SANS le strip pour préserver les espaces cachés comme "principale "
                 reponse = str(field.get("answer", "")).strip()
                 nom_lower = nom_champ.lower()
                 
-                # INJECTION DIRECTE BRUTE : On crée la colonne avec le nom EXACT de HelloAsso
                 row[nom_champ] = reponse
                 
-                # Mécanique d'analyse pour les entraîneurs
                 if any(mot in nom_lower for mot in ["classe", "niveau", "scolaire", "section"]): 
                     row["Classe Déduite"] = reponse
                 
                 if "quitter" in nom_lower and "seul" in nom_lower:
                     if type_formule == "École":
                         row["Sortie Seul"] = "N/A (École)"
-                        row[nom_champ] = "N/A (École)" # On modifie aussi la cellule pour l'admin
+                        row[nom_champ] = "N/A (École)"
                     else:
                         if "oui" in reponse.lower() or reponse.lower() == "true": 
                             row["Sortie Seul"] = "✅ OUI"
@@ -328,13 +335,8 @@ else:
                 'e confirme avoir renseigné le questionnaire de santé "Sport" (mineurs) https://www.echecs.asso.fr/Actus/14098/questionnaire_mineur.pdf'
             ]
             
-            # 1. On ne garde de la liste prioritaire que les colonnes qui existent
             colonnes_presentes = [c for c in colonnes_prioritaires if c in df_admin.columns]
-            
-            # 2. On exclut les colonnes techniques de l'affichage
             colonnes_a_exclure = ["Identité", "Type", "Elo_FFE", "Sortie Seul", "Classe Déduite", "Elo Crevette 🦐"]
-            
-            # 3. On ajoute à la fin tout ce que l'Excel aurait généré en plus et qu'on n'aurait pas listé
             autres_colonnes = [c for c in df_admin.columns if c not in colonnes_presentes and c not in colonnes_a_exclure]
             
             colonnes_finales = colonnes_presentes + autres_colonnes + ["Elo Crevette 🦐"]
