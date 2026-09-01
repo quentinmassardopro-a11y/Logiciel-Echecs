@@ -139,49 +139,59 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
             nom_tarif = str(item.get("name", ""))
             
             type_formule = "Club" if "club" in nom_campagne.lower() else "École"
-            
             nom_propre = user.get("lastName", payer.get("lastName", "Inconnu")).replace("*", "").strip().upper()
             prenom_propre = user.get("firstName", payer.get("firstName", "Inconnu")).replace("*", "").strip().title()
             
+            # Initialisation stricte des colonnes pour garantir l'ordre d'affichage
             row = {
                 "Campagne": nom_campagne,
                 "Nom": nom_propre,
                 "Prénom": prenom_propre,
                 "Identité": f"{prenom_propre} {nom_propre}",
+                "Téléphone / Portable": "",
+                "Téléphone Urgence": "",
+                "Sortie Seul": "-",
+                "Responsable Légal": "",
+                "Classe": "-",
+                "Montant Payé": f"{item.get('amount', 0) / 100} €",
                 "Formule": nom_tarif,
                 "Type": type_formule,
-                "Montant Payé": f"{item.get('amount', 0) / 100} €",
                 "Licence_FFE": "Non croisé",
                 "Nom payeur": payer.get("lastName", "").replace("*", "").strip(),
                 "Prénom payeur": payer.get("firstName", "").replace("*", "").strip(),
                 "Email payeur": payer.get("email", "")
             }
             
-            classe_trouvee, sortie_seul = "Non précisée", "Non précisé"
-            
             for field in item.get("customFields", []):
                 nom_champ = str(field.get("name", "")).strip()
                 reponse = str(field.get("answer", "")).strip()
+                nom_lower = nom_champ.lower()
+                
+                # Injection de la donnée brute
                 row[nom_champ] = reponse
                 
-                if any(mot in nom_champ.lower() for mot in ["classe", "niveau", "scolaire", "section"]): 
-                    classe_trouvee = reponse
+                # Mapping intelligent vers les colonnes prioritaires fixes
+                if any(mot in nom_lower for mot in ["classe", "niveau", "scolaire", "section"]): 
+                    row["Classe"] = reponse
+                    
+                if "urgence" in nom_lower or "portable 2" in nom_lower or "téléphone 2" in nom_lower:
+                    row["Téléphone Urgence"] = reponse
+                elif any(mot in nom_lower for mot in ["téléphone", "telephone", "tel", "mobile", "portable"]): 
+                    if row["Téléphone / Portable"] == "":
+                        row["Téléphone / Portable"] = reponse
+                        
+                if "responsable" in nom_lower or "légal" in nom_lower:
+                    row["Responsable Légal"] = reponse
                 
-                if "quitter" in nom_champ.lower() and "seul" in nom_champ.lower():
+                if "quitter" in nom_lower and "seul" in nom_lower:
                     if type_formule == "École":
-                        sortie_seul = "N/A (École)"
+                        row["Sortie Seul"] = "N/A (École)"
                     else:
-                        if "oui" in reponse.lower() or reponse.lower() == "true": sortie_seul = "✅ OUI"
-                        elif "non" in reponse.lower() or reponse.lower() == "false": sortie_seul = "❌ NON"
-                        elif reponse == "": sortie_seul = "⚠️ Laissé vide"
-                        else: sortie_seul = f"❓ {reponse}"
-            
-            row["Classe"] = classe_trouvee
-            row["Sortie Seul"] = sortie_seul
-            
-            if type_formule == "Club" and sortie_seul == "Non précisé":
-                row["Sortie Seul"] = "⚠️ Question non trouvée sur ce formulaire"
-                
+                        if "oui" in reponse.lower() or reponse.lower() == "true": row["Sortie Seul"] = "✅ OUI"
+                        elif "non" in reponse.lower() or reponse.lower() == "false": row["Sortie Seul"] = "❌ NON"
+                        elif reponse == "": row["Sortie Seul"] = "-"
+                        else: row["Sortie Seul"] = f"❓ {reponse}"
+                        
             rows.append(row)
         return rows
     except: return []
@@ -292,8 +302,7 @@ else:
             recherche_nom = st.selectbox("Taper un nom/prénom pour obtenir ses coordonnées :", options=[""] + sorted(df["Identité"].tolist()))
             if recherche_nom:
                 contact = df[df["Identité"] == recherche_nom].iloc[0]
-                tel = contact.get('Numéro de téléphone', contact.get('N° Portable', 'Non renseigné'))
-                st.write(f"📞 **Téléphone :** {tel} | 🚨 **Sortie :** {contact['Sortie Seul']} | 🏫 **Campagne :** {contact['Campagne']}")
+                st.write(f"📞 **Téléphone :** {contact['Téléphone / Portable']} | 🚨 **Sortie :** {contact['Sortie Seul']} | 🏫 **Campagne :** {contact['Campagne']}")
             st.markdown('</div>', unsafe_allow_html=True)
 
             col_ad1, col_ad2, col_ad3 = st.columns(3)
@@ -306,21 +315,25 @@ else:
 
             df_admin['Elo Crevette 🦐'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['elos_crevette'].get(x, 400))
             
+            # ORDONNANCEMENT STRICT ET GARANTI DES COLONNES
             colonnes_prioritaires = [
-                "Nom", "Prénom", "Campagne", "Classe", "Sortie Seul", 
-                "Numéro de téléphone", "Numéro de téléphone 2 (en cas d'urgence)", 
-                "Nom et prénom du responsable légal", "Email", "Date de naissance du joueur",
-                "Montant Payé", "Formule", "Licence_FFE"
+                "Nom", "Prénom", "Campagne", "Téléphone / Portable", "Téléphone Urgence", 
+                "Sortie Seul", "Responsable Légal", "Classe", "Montant Payé", "Formule", 
+                "Licence_FFE", "Email payeur"
             ]
             
-            colonnes_prioritaires_existantes = [c for c in colonnes_prioritaires if c in df_admin.columns]
+            # On ajoute ensuite toutes les autres questions dynamiques capturées sur HelloAsso
+            colonnes_a_exclure = [
+                "Identité", "Type", "Elo_FFE", "Elo Crevette 🦐", 
+                "Nom payeur", "Prénom payeur", "N° Portable", "N° Portable 2 (en cas d'urgence)",
+                "Numéro de téléphone", "Numéro de téléphone 2 (en cas d'urgence)", 
+                "Nom et prénom du responsable légal"
+            ]
             
-            # SÉCURITÉ ANTI-DOUBLONS : exclusion stricte des colonnes déjà ajoutées ou inutiles
-            colonnes_a_exclure = ["Identité", "Type", "Elo_FFE", "Elo Crevette 🦐", "Téléphone", "Nom payeur", "Prénom payeur"]
-            autres_colonnes = [c for c in df_admin.columns if c not in colonnes_prioritaires_existantes and c not in colonnes_a_exclure]
+            autres_colonnes = [c for c in df_admin.columns if c not in colonnes_prioritaires and c not in colonnes_a_exclure]
             
-            colonnes_finales = colonnes_prioritaires_existantes + autres_colonnes + ["Elo Crevette 🦐"]
-            colonnes_finales = list(dict.fromkeys(colonnes_finales)) # Nettoyage des doublons potentiels
+            colonnes_finales = colonnes_prioritaires + autres_colonnes + ["Elo Crevette 🦐"]
+            colonnes_finales = list(dict.fromkeys(colonnes_finales)) # Nettoyage des doublons
             
             st.metric("Dossiers affichés", len(df_admin))
             st.dataframe(df_admin[colonnes_finales], use_container_width=True, hide_index=True)
@@ -339,13 +352,7 @@ else:
                     c2.metric("♟️ Formule Club", f"{nb_club}", f"{(nb_club / total_eleves) * 100:.1f}%")
                     c3.metric("🏫 Formule Scolaire", total_eleves - nb_club)
                     
-                    colonnes_ecole = ["Nom", "Prénom", "Classe", "Formule", "Sortie Seul"]
-                    if "Numéro de téléphone" in df_ec.columns: colonnes_ecole.append("Numéro de téléphone")
-                    elif "N° Portable" in df_ec.columns: colonnes_ecole.append("N° Portable")
-                    
-                    # Anti-doublons pour le tableau école aussi
-                    colonnes_ecole = list(dict.fromkeys([c for c in colonnes_ecole if c in df_ec.columns]))
-                    st.dataframe(df_ec[colonnes_ecole], use_container_width=True, hide_index=True)
+                    st.dataframe(df_ec[["Nom", "Prénom", "Classe", "Formule", "Téléphone / Portable", "Sortie Seul"]], use_container_width=True, hide_index=True)
 
         with tab_cartes:
             st.markdown("### 🎟️ Suivi des Cartes de Centres (Cassis & Carnoux)")
