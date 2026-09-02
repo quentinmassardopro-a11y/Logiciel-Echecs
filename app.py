@@ -44,7 +44,7 @@ def charger_base():
     default_db = {
         "elos_crevette": {}, "historique_appels": {}, "eleves_essai": [],
         "affectations_creneaux": {}, "cartes_membres": {},
-        "validations_promo": {}  # NOUVEAU : Sauvegarde des codes promos vérifiés
+        "validations_promo": {} 
     }
     if os.path.exists(DB_FILE):
         with open(DB_FILE, "r", encoding="utf-8") as f:
@@ -100,27 +100,62 @@ def generer_appariements_suisses(joueurs_scores, elos_dict, historique_rencontre
             appariements.append((j1, j2_trouve))
     return appariements, exempt, historique_rencontres
 
-def auto_affecter_creneau(campagne, formule):
-    camp, form = str(campagne).lower(), str(formule).lower()
-    if "lundi" in form:
-        if "trinit" in camp: return "Lundi - Sainte-Trinité (CP)"
-        return "Lundi - La Ciotat (École)"
-    if "mardi" in form:
-        if "trinit" in camp: return "Mardi - Sainte-Trinité (CE1)"
-        if "augustin" in camp: return "Mardi - Saint-Augustin (CP-CE1)"
-        return "Mardi - Ceyreste / Marseille"
-    if "mercredi" in form: return "Mercredi - Ceyreste / Cassis"
-    if "jeudi" in form:
-        if "trinit" in camp: return "Jeudi - Sainte-Trinité (Collège)"
-        if "bosco" in camp: 
-            if "collège" in form or "college" in form: return "Jeudi - Don Bosco (Collège)"
-            return "Jeudi - Don Bosco (École)"
-        return "Jeudi - Cassis / La Ciotat"
-    if "vendredi" in form:
-        if "augustin" in camp: return "Vendredi - Saint-Augustin (CE2-CM2)"
-        if "trinit" in camp: return "Vendredi - Sainte-Trinité (CE2-CM2)"
-        return "Vendredi - Cassis"
-    return None
+# --- NOUVEAU MOTEUR INTELLIGENT DE RÉPARTITION ---
+def affectations_automatiques(row):
+    creneaux = []
+    camp = str(row.get("Campagne", "")).lower()
+    form = str(row.get("Formule", "")).lower()
+    classe = str(row.get("Classe", "")).lower()
+    ville_choisie = str(row.get("Dans quel ville sera votre créneaux principale", "")).lower()
+    
+    # 1. Traitement Écoles par Classe
+    if "trinit" in camp:
+        if "cp" in classe: creneaux.append("Lundi - Sainte-Trinité (CP)")
+        elif "ce1" in classe: creneaux.append("Mardi - Sainte-Trinité (CE1)")
+        elif any(c in classe for c in ["ce2", "cm1", "cm2", "cm"]): creneaux.append("Vendredi - Sainte-Trinité (CE2-CM2)")
+        elif any(c in classe for c in ["coll", "6ème", "5ème", "4ème", "3ème"]): creneaux.append("Jeudi - Sainte-Trinité (Collège)")
+    elif "augustin" in camp:
+        if "cp" in classe or "ce1" in classe: creneaux.append("Mardi - Saint-Augustin (CP-CE1)")
+        elif any(c in classe for c in ["ce2", "cm1", "cm2", "cm"]): creneaux.append("Vendredi - Saint-Augustin (CE2-CM2)")
+    elif "bosco" in camp:
+        if any(c in classe for c in ["coll", "6ème", "5ème", "4ème", "3ème"]): creneaux.append("Jeudi - Don Bosco (Collège)")
+        else: creneaux.append("Jeudi - Don Bosco (École)")
+        
+    # 2. Traitement Club par choix de Ville
+    if "club" in camp or "adhésion" in camp or "adhesion" in camp:
+        if "cassis" in ville_choisie:
+            creneaux.extend(["Lundi - Club Cassis", "Mercredi - Ceyreste / Cassis", "Jeudi - Cassis / La Ciotat", "Vendredi - Cassis"])
+        if "marseille" in ville_choisie:
+            creneaux.append("Mardi - Ceyreste / Marseille")
+        if "ceyreste" in ville_choisie:
+            creneaux.extend(["Mardi - Ceyreste / Marseille", "Mercredi - Ceyreste / Cassis"])
+        if "ciotat" in ville_choisie:
+            creneaux.extend(["Lundi - La Ciotat (École)", "Jeudi - Cassis / La Ciotat"])
+        if "carnoux" in ville_choisie:
+            creneaux.append("Lundi - Carnoux")
+            
+    # 3. Sécurité : si on n'a rien trouvé, on se base sur le nom du tarif
+    if not creneaux:
+        if "lundi" in form:
+            if "trinit" in camp: creneaux.append("Lundi - Sainte-Trinité (CP)")
+            else: creneaux.append("Lundi - La Ciotat (École)")
+        elif "mardi" in form:
+            if "trinit" in camp: creneaux.append("Mardi - Sainte-Trinité (CE1)")
+            elif "augustin" in camp: creneaux.append("Mardi - Saint-Augustin (CP-CE1)")
+            else: creneaux.append("Mardi - Ceyreste / Marseille")
+        elif "mercredi" in form: creneaux.append("Mercredi - Ceyreste / Cassis")
+        elif "jeudi" in form:
+            if "trinit" in camp: creneaux.append("Jeudi - Sainte-Trinité (Collège)")
+            elif "bosco" in camp: 
+                if "coll" in form: creneaux.append("Jeudi - Don Bosco (Collège)")
+                else: creneaux.append("Jeudi - Don Bosco (École)")
+            else: creneaux.append("Jeudi - Cassis / La Ciotat")
+        elif "vendredi" in form:
+            if "augustin" in camp: creneaux.append("Vendredi - Saint-Augustin (CE2-CM2)")
+            elif "trinit" in camp: creneaux.append("Vendredi - Sainte-Trinité (CE2-CM2)")
+            else: creneaux.append("Vendredi - Cassis")
+    
+    return list(set(creneaux)) # On supprime les doublons éventuels
 
 def get_helloasso_token(client_id, client_secret):
     url = "https://api.helloasso.com/oauth2/token"
@@ -139,7 +174,6 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
             user, payer = item.get("user", {}), item.get("payer", {})
             nom_tarif = str(item.get("name", ""))
             
-            # --- GESTION DU CODE PROMO ---
             discount = item.get("discount")
             code_promo_utilise = discount.get("code", "") if discount else ""
             
@@ -176,47 +210,35 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
                 "Classe": "",
                 "Date de naissance": naissance_def,
                 "Taille du t-shirt": "",
-                "Dans quel ville sera votre créneaux principale ": "",
+                "Dans quel ville sera votre créneaux principale": "",
                 "J'autorise le club à diffuser des photos de moi ou mon enfant en lien avec notre activité sur notre site et sur les réseaux sociaux (Facebook ; Instagram, Twitter):": "",
                 "J’autorise le club à utiliser des images de moi ou mon enfant pour des objets publicitaires (prospectus de présentation du club, oriflamme, kakemono) :": "",
                 "J’accepte de recevoir les informations sur l’actualité du club (soirée blitz, organisation de stages pendant les vacances…) ainsi que les annonces des prochains tournois par mail": "",
-                "J’autorise mon enfant à quitter le club seul": "-",
-                'e confirme avoir renseigné le questionnaire de santé "Sport" (mineurs) https://www.echecs.asso.fr/Actus/14098/questionnaire_mineur.pdf': "",
-                
-                "Sortie Seul": "-",
-                "Classe Déduite": "-"
+                "Sortie Seul": "-"
             }
             
             if row["Date de naissance"] and len(str(row["Date de naissance"])) >= 10:
                 row["Date de naissance"] = str(row["Date de naissance"])[:10]
             
             for field in item.get("customFields", []):
-                nom_champ = str(field.get("name", ""))
+                # .strip() empêche définitivement les espaces fantômes de créer des doublons
+                nom_champ = str(field.get("name", "")).strip() 
                 reponse = str(field.get("answer", "")).strip()
                 nom_lower = nom_champ.lower()
                 
                 row[nom_champ] = reponse
                 
-                # RECHERCHE AUTOMATIQUE DES ALLERGIES
                 if any(mot in nom_lower for mot in ["allergie", "médical", "sante", "santé"]):
-                    if row["Allergies / Médical"] == "-":
-                        row["Allergies / Médical"] = reponse
-                    else:
-                        row["Allergies / Médical"] += f" | {reponse}"
+                    if row["Allergies / Médical"] == "-": row["Allergies / Médical"] = reponse
+                    else: row["Allergies / Médical"] += f" | {reponse}"
                 
-                if "classe" in nom_lower or "niveau" in nom_lower: 
-                    row["Classe"] = reponse
-                    row["Classe Déduite"] = reponse
-                if "portable 2" in nom_lower or "urgence" in nom_lower: 
-                    row["N° Portable 2 (en cas d'urgence)"] = reponse
+                if "classe" in nom_lower or "niveau" in nom_lower: row["Classe"] = reponse
+                if "portable 2" in nom_lower or "urgence" in nom_lower: row["N° Portable 2 (en cas d'urgence)"] = reponse
                 elif "portable" in nom_lower or "téléphone" in nom_lower or "telephone" in nom_lower or "tel" in nom_lower: 
                     if not row["N° Portable"]: row["N° Portable"] = reponse
-                if "responsable" in nom_lower or "légal" in nom_lower: 
-                    row["Nom et prénom du responsable légal"] = reponse
-                if "t-shirt" in nom_lower: 
-                    row["Taille du t-shirt"] = reponse
-                if "créneaux" in nom_lower and "principale" in nom_lower: 
-                    row["Dans quel ville sera votre créneaux principale "] = reponse
+                if "responsable" in nom_lower or "légal" in nom_lower: row["Nom et prénom du responsable légal"] = reponse
+                if "t-shirt" in nom_lower: row["Taille du t-shirt"] = reponse
+                if "créneaux" in nom_lower and "principale" in nom_lower: row["Dans quel ville sera votre créneaux principale"] = reponse
                 
                 if "diffuser" in nom_lower and "photos" in nom_lower: 
                     row["J'autorise le club à diffuser des photos de moi ou mon enfant en lien avec notre activité sur notre site et sur les réseaux sociaux (Facebook ; Instagram, Twitter):"] = reponse
@@ -224,8 +246,6 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
                     row["J’autorise le club à utiliser des images de moi ou mon enfant pour des objets publicitaires (prospectus de présentation du club, oriflamme, kakemono) :"] = reponse
                 if "actualité" in nom_lower or "blitz" in nom_lower: 
                     row["J’accepte de recevoir les informations sur l’actualité du club (soirée blitz, organisation de stages pendant les vacances…) ainsi que les annonces des prochains tournois par mail"] = reponse
-                if "questionnaire" in nom_lower and "mineurs" in nom_lower: 
-                    row['e confirme avoir renseigné le questionnaire de santé "Sport" (mineurs) https://www.echecs.asso.fr/Actus/14098/questionnaire_mineur.pdf'] = reponse
                     
                 if "adresse" in nom_lower and len(reponse) > 2: row["Adresse"] = reponse
                 if "ville" in nom_lower and "créneaux" not in nom_lower and len(reponse) > 1: row["Ville"] = reponse
@@ -234,21 +254,21 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
                 
                 if "quitter" in nom_lower and "seul" in nom_lower:
                     if type_formule == "École":
-                        row["J’autorise mon enfant à quitter le club seul"] = "N/A (École)"
                         row["Sortie Seul"] = "N/A (École)"
+                        row[nom_champ] = "N/A (École)"
                     else:
                         if "oui" in reponse.lower() or reponse.lower() == "true": 
-                            row["J’autorise mon enfant à quitter le club seul"] = "✅ OUI"
                             row["Sortie Seul"] = "✅ OUI"
+                            row[nom_champ] = "✅ OUI"
                         elif "non" in reponse.lower() or reponse.lower() == "false": 
-                            row["J’autorise mon enfant à quitter le club seul"] = "❌ NON"
                             row["Sortie Seul"] = "❌ NON"
+                            row[nom_champ] = "❌ NON"
                         elif reponse == "": 
-                            row["J’autorise mon enfant à quitter le club seul"] = "-"
                             row["Sortie Seul"] = "-"
+                            row[nom_champ] = "-"
                         else: 
-                            row["J’autorise mon enfant à quitter le club seul"] = f"❓ {reponse}"
                             row["Sortie Seul"] = f"❓ {reponse}"
+                            row[nom_champ] = f"❓ {reponse}"
                             
             rows.append(row)
         return rows
@@ -323,12 +343,13 @@ if st.sidebar.button("🔄 Lancer la Synchronisation"):
                         if identite not in st.session_state['db']['elos_crevette']:
                             st.session_state['db']['elos_crevette'][identite] = 400
                         
-                        creneau_auto = auto_affecter_creneau(row['Campagne'], row['Formule'])
-                        if creneau_auto:
-                            if creneau_auto not in st.session_state['db']['affectations_creneaux']:
-                                st.session_state['db']['affectations_creneaux'][creneau_auto] = []
-                            if identite not in st.session_state['db']['affectations_creneaux'][creneau_auto]:
-                                st.session_state['db']['affectations_creneaux'][creneau_auto].append(identite)
+                        # UTILISATION DU NOUVEAU MOTEUR MULTI-CRENEAUX
+                        creneaux_autos = affectations_automatiques(row)
+                        for c_auto in creneaux_autos:
+                            if c_auto not in st.session_state['db']['affectations_creneaux']:
+                                st.session_state['db']['affectations_creneaux'][c_auto] = []
+                            if identite not in st.session_state['db']['affectations_creneaux'][c_auto]:
+                                st.session_state['db']['affectations_creneaux'][c_auto].append(identite)
                                 
                     sauvegarder_base(st.session_state['db'])
                     st.session_state['df_adherents'] = df_base
@@ -361,7 +382,7 @@ else:
             if recherche_nom:
                 contact = df[df["Identité"] == recherche_nom].iloc[0]
                 tel = contact.get('N° Portable', contact.get('EMail', 'Non renseigné'))
-                st.write(f"📞 **Contact :** {tel} | 🚨 **Sortie :** {contact.get('J’autorise mon enfant à quitter le club seul', '-')} | 🏫 **Campagne :** {contact.get('Campagne', '-')}")
+                st.write(f"📞 **Contact :** {tel} | 🚨 **Sortie :** {contact.get('Sortie Seul', '-')} | 🏫 **Campagne :** {contact.get('Campagne', '-')}")
             st.markdown('</div>', unsafe_allow_html=True)
 
             col_ad1, col_ad2, col_ad3, col_ad4 = st.columns(4)
@@ -372,7 +393,6 @@ else:
                 
             df_admin = df[(df["Campagne"].isin(filtre_camp_admin)) & (df["Type"].isin(filtre_type_admin))].copy()
             
-            # FILTRE ALLERGIES ACTIF
             if filtre_allergie and "Allergies / Médical" in df_admin.columns:
                 mots_sains = ["non", "ras", "rien", "néant", "neant", "aucun", "aucune", "-"]
                 df_admin = df_admin[
@@ -383,59 +403,55 @@ else:
             if sans_licence and "Licence_FFE" in df_admin.columns: df_admin = df_admin[df_admin["Licence_FFE"] == "Non croisé"]
 
             df_admin['Elo Crevette 🦐'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['elos_crevette'].get(x, 400))
-            
-            # INTÉGRATION DES DONNÉES PROMO
             df_admin['Promo Validée ✅'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['validations_promo'].get(x, False))
             
+            # MISE EN ÉVIDENCE DE SORTIE SEUL ET PROMO AU DÉBUT
             colonnes_prioritaires = [
-                "Prénom", "Promo Validée ✅", "Code Promo", "Allergies / Médical", 
+                "Promo Validée ✅", "Sortie Seul", "Code Promo", "Allergies / Médical", 
                 "Montant Payé", "Formule", "Licence_FFE", "Campagne",
                 "Nom et prénom du responsable légal", "N° Portable", "N° Portable 2 (en cas d'urgence)", 
                 "EMail", "Adresse", "Ville", "Classe", "Date de naissance", "Taille du t-shirt", 
-                "Dans quel ville sera votre créneaux principale ",
+                "Dans quel ville sera votre créneaux principale",
                 "J'autorise le club à diffuser des photos de moi ou mon enfant en lien avec notre activité sur notre site et sur les réseaux sociaux (Facebook ; Instagram, Twitter):",
                 "J’autorise le club à utiliser des images de moi ou mon enfant pour des objets publicitaires (prospectus de présentation du club, oriflamme, kakemono) :",
                 "J’accepte de recevoir les informations sur l’actualité du club (soirée blitz, organisation de stages pendant les vacances…) ainsi que les annonces des prochains tournois par mail",
-                "J’autorise mon enfant à quitter le club seul",
                 'e confirme avoir renseigné le questionnaire de santé "Sport" (mineurs) https://www.echecs.asso.fr/Actus/14098/questionnaire_mineur.pdf'
             ]
             
             colonnes_presentes = [c for c in colonnes_prioritaires if c in df_admin.columns]
-            # "Nom" est exclu des colonnes classiques car il va devenir notre index fixe.
-            colonnes_a_exclure = ["Identité", "Nom", "Type", "Elo_FFE", "Sortie Seul", "Classe Déduite", "Elo Crevette 🦐", "Nom payeur", "Prénom payeur", "Email payeur"]
+            # On exclut le nom et prénom car ils vont devenir notre ancrage figé
+            colonnes_a_exclure = ["Identité", "Nom", "Prénom", "Type", "Elo_FFE", "Nom payeur", "Prénom payeur", "Email payeur"]
+            
             autres_colonnes = [c for c in df_admin.columns if c not in colonnes_presentes and c not in colonnes_a_exclure]
             
             colonnes_finales = colonnes_presentes + autres_colonnes + ["Elo Crevette 🦐", "Identité"]
             colonnes_finales = list(dict.fromkeys(colonnes_finales))
             
-            # --- GEL DE LA PREMIÈRE COLONNE (Le Nom devient l'index figé du tableau) ---
-            df_display = df_admin.set_index("Nom")
+            # --- DOUBLE GEL (Nom ET Prénom) ---
+            df_display = df_admin.set_index(["Nom", "Prénom"])
             cols_to_use = [c for c in colonnes_finales if c in df_display.columns]
             
             st.metric("Dossiers affichés", len(df_display))
             
-            # --- TABLEAU INTERACTIF (Permet de cocher la validation Promo) ---
             edited_df = st.data_editor(
                 df_display[cols_to_use],
                 use_container_width=True,
                 column_config={
-                    "Identité": None, # On cache la colonne Identité, elle ne sert qu'au code
+                    "Identité": None,
                     "Promo Validée ✅": st.column_config.CheckboxColumn("Promo Validée ✅", default=False)
                 },
-                disabled=[c for c in cols_to_use if c != "Promo Validée ✅"] # Seule la promo est cliquable
+                disabled=[c for c in cols_to_use if c != "Promo Validée ✅"]
             )
             
-            # SAUVEGARDE AUTOMATIQUE DE LA CASE PROMO
             changements_promo = False
-            for index_nom, row in edited_df.iterrows():
+            for (index_nom, index_prenom), row in edited_df.iterrows():
                 identite_eleve = row["Identité"]
                 etat_coche = row["Promo Validée ✅"]
                 if st.session_state['db']['validations_promo'].get(identite_eleve, False) != etat_coche:
                     st.session_state['db']['validations_promo'][identite_eleve] = etat_coche
                     changements_promo = True
                     
-            if changements_promo:
-                sauvegarder_base(st.session_state['db'])
+            if changements_promo: sauvegarder_base(st.session_state['db'])
             
         with tab_ecoles:
             st.markdown("### 🏫 Pilotage des Établissements Scolaires")
@@ -451,9 +467,8 @@ else:
                     c2.metric("♟️ Formule Club", f"{nb_club}", f"{(nb_club / total_eleves) * 100:.1f}%")
                     c3.metric("🏫 Formule Scolaire", total_eleves - nb_club)
                     
-                    # Gel de la colonne "Nom" ici aussi
-                    df_ec_display = df_ec.set_index("Nom")
-                    colonnes_ecole = ["Prénom", "Classe Déduite", "Formule", "J’autorise mon enfant à quitter le club seul", "N° Portable", "N° Portable 2 (en cas d'urgence)"]
+                    df_ec_display = df_ec.set_index(["Nom", "Prénom"])
+                    colonnes_ecole = ["Classe", "Formule", "Sortie Seul", "N° Portable", "N° Portable 2 (en cas d'urgence)"]
                     colonnes_ecole = [c for c in colonnes_ecole if c in df_ec_display.columns]
                     st.dataframe(df_ec_display[colonnes_ecole], use_container_width=True)
 
@@ -528,7 +543,7 @@ else:
                 st.markdown("---")
                 for idx, row in df_groupe.iterrows():
                     c1, c2 = st.columns([4, 1])
-                    c1.write(f"👤 **{row['Nom']}** {row['Prénom']} *(Sortie: {row.get('J’autorise mon enfant à quitter le club seul', '-')})*")
+                    c1.write(f"👤 **{row['Nom']}** {row['Prénom']} *(Sortie: {row.get('Sortie Seul', '-')})*")
                     presences[row['Identité']] = c2.checkbox("Présent", value=True, key=f"pres_{row['Identité']}")
 
                 if st.button(f"💾 Enregistrer l'appel pour {lieu_appel}"):
