@@ -39,7 +39,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 DB_FILE = "base_calanques.json"
-FFE_LOCAL_FILE = "base_ffe_locale.csv" # Persistance FFE sur le serveur
+FFE_LOCAL_FILE = "base_ffe_locale.csv"
 
 def charger_base():
     default_db = {
@@ -61,7 +61,14 @@ def sauvegarder_base(db):
     with open(DB_FILE, "w", encoding="utf-8") as f:
         json.dump(db, f, ensure_ascii=False, indent=4)
 
-if 'db' not in st.session_state: st.session_state['db'] = charger_base()
+if 'db' not in st.session_state: 
+    st.session_state['db'] = charger_base()
+
+# --- PATCH SÉCURITÉ CACHE ---
+# Force la création des clés si une ancienne session est bloquée en mémoire
+for cle in ["validations_promo", "sorties_manuelles", "cartes_membres"]:
+    if cle not in st.session_state['db']:
+        st.session_state['db'][cle] = {}
 
 col1, col2 = st.columns([1, 4])
 with col1:
@@ -101,7 +108,6 @@ def generer_appariements_suisses(joueurs_scores, elos_dict, historique_rencontre
             appariements.append((j1, j2_trouve))
     return appariements, exempt, historique_rencontres
 
-# --- MOTEUR DE RÉPARTITION INTELLIGENT (Cassis Partout, par Classe) ---
 def affectations_automatiques(row):
     creneaux = []
     camp = str(row.get("Campagne", "")).lower()
@@ -253,16 +259,19 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
                     if type_formule == "École":
                         row["Sortie Seul"] = "N/A (École)"
                     else:
-                        if "oui" in reponse.lower() or reponse.lower() == "true": row["Sortie Seul"] = "✅ OUI"
-                        elif "non" in reponse.lower() or reponse.lower() == "false": row["Sortie Seul"] = "❌ NON"
-                        elif reponse == "": row["Sortie Seul"] = "-"
-                        else: row["Sortie Seul"] = f"❓ {reponse}"
+                        if "oui" in reponse.lower() or reponse.lower() == "true": 
+                            row["Sortie Seul"] = "✅ OUI"
+                        elif "non" in reponse.lower() or reponse.lower() == "false": 
+                            row["Sortie Seul"] = "❌ NON"
+                        elif reponse == "": 
+                            row["Sortie Seul"] = "-"
+                        else: 
+                            row["Sortie Seul"] = f"❓ {reponse}"
                             
             rows.append(row)
         return rows
     except: return []
 
-# --- ANALYSE FFE AMÉLIORÉE (NOM + PRÉNOM + DATE DE NAISSANCE) ---
 def analyser_fichier_ffe(fichier):
     try:
         if isinstance(fichier, str):
@@ -287,9 +296,7 @@ def analyser_fichier_ffe(fichier):
             else:
                 df_ffe['Annee_FFE'] = ""
                 
-            # Clé 1 : Précision Maximale (Nom + Prenom + Année de Naissance)
             df_ffe['Cle_Forte'] = df_ffe['Nom_Norm'] + df_ffe['Prenom_Norm'] + df_ffe['Annee_FFE']
-            # Clé 2 : Précision Souple (Si jamais les dates diffèrent ou sont absentes)
             df_ffe['Cle_Souple'] = df_ffe['Nom_Norm'] + df_ffe['Prenom_Norm']
             
             df_ffe['Elo_FFE'] = df_ffe[col_elo] if col_elo else 1000
@@ -302,7 +309,6 @@ def analyser_fichier_ffe(fichier):
 st.sidebar.header("🔑 Espace de Travail")
 module_choisi = st.sidebar.radio("", ["🛠️ Module Administration", "♟️ Module Entraîneur"])
 
-# --- PERSISTANCE FFE EN MÉMOIRE LOCALE ---
 st.sidebar.markdown("---")
 st.sidebar.header("1️⃣ Base FFE (Licences)")
 fichier_ffe = st.sidebar.file_uploader("Fichier FFE (Glissez pour enregistrer)", type=['csv', 'xls', 'xlsx'])
@@ -358,10 +364,8 @@ if st.sidebar.button("🔄 Lancer la Synchronisation"):
                         df_ffe_strict = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Forte'])
                         df_ffe_souple = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Souple'])
                         
-                        # Phase 1 : Match PARFAIT avec la Date de Naissance
                         df_base = pd.merge(df_base, df_ffe_strict[['Cle_Forte', 'Elo_FFE', 'Licence_FFE']], on='Cle_Forte', how='left')
                         
-                        # Phase 2 : Rattrapage souple (Nom + Prénom) pour ceux dont la date manquait
                         manquants = df_base['Licence_FFE'].isna()
                         if manquants.any():
                             df_base_m = df_base[manquants].drop(columns=['Elo_FFE', 'Licence_FFE'])
@@ -459,7 +463,6 @@ else:
             colonnes_finales = colonnes_presentes + autres_colonnes + ["Elo Crevette 🦐", "Identité"]
             colonnes_finales = list(dict.fromkeys(colonnes_finales))
             
-            # --- GEL DOUBLE : Nom ET Prénom fixés à gauche ---
             df_admin.insert(0, "👤 Élève (Fige)", df_admin["Nom"] + " " + df_admin["Prénom"])
             df_display = df_admin.set_index("👤 Élève (Fige)")
             
@@ -583,7 +586,6 @@ else:
                 df_groupe = df[df["Identité"].isin(liste_identites)]
                 total_appel = len(df_groupe)
                 
-                # --- COMPTEURS DYNAMIQUES D'APPEL ---
                 st.markdown("---")
                 presences = {}
                 for idx, row in df_groupe.iterrows():
@@ -616,7 +618,6 @@ else:
                 creneau_tournoi = st.selectbox("Lancer le tournoi pour le créneau :", options=creneaux_remplis)
                 joueurs_inscrits = st.session_state['db']['affectations_creneaux'][creneau_tournoi]
                 
-                # --- EXCLUSION DES ABSENTS ---
                 st.markdown("**Retirez les élèves absents pour ne pas les apparier :**")
                 joueurs_presents = st.multiselect("", options=joueurs_inscrits, default=joueurs_inscrits)
                 
@@ -627,7 +628,6 @@ else:
                     st.session_state['appariements_ronde'] = []
                     st.session_state['tournoi_en_cours'] = creneau_tournoi
 
-                # Mise à jour des scores pour intégrer les présents
                 for j in joueurs_presents:
                     if j not in st.session_state['scores_tournoi']: st.session_state['scores_tournoi'][j] = 0.0
 
@@ -644,7 +644,6 @@ else:
 
                 st.markdown("---")
                 if st.button("🎲 Générer la Ronde"):
-                    # On n'envoie au moteur de tournoi QUE les joueurs cochés comme présents
                     scores_actifs = {j: st.session_state['scores_tournoi'][j] for j in joueurs_presents}
                     pairs, exempt, st.session_state['historique_rencontres'] = generer_appariements_suisses(
                         scores_actifs, st.session_state['db']['elos_crevette'], st.session_state['historique_rencontres']
