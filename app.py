@@ -39,12 +39,13 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 DB_FILE = "base_calanques.json"
+FFE_LOCAL_FILE = "base_ffe_locale.csv" # Persistance FFE sur le serveur
 
 def charger_base():
     default_db = {
         "elos_crevette": {}, "historique_appels": {}, "eleves_essai": [],
         "affectations_creneaux": {}, "cartes_membres": {},
-        "validations_promo": {} 
+        "validations_promo": {}, "sorties_manuelles": {}
     }
     if os.path.exists(DB_FILE):
         with open(DB_FILE, "r", encoding="utf-8") as f:
@@ -100,28 +101,7 @@ def generer_appariements_suisses(joueurs_scores, elos_dict, historique_rencontre
             appariements.append((j1, j2_trouve))
     return appariements, exempt, historique_rencontres
 
-def auto_affecter_creneau(campagne, formule):
-    camp, form = str(campagne).lower(), str(formule).lower()
-    if "lundi" in form:
-        if "trinit" in camp: return "Lundi - Sainte-Trinité (CP)"
-        return "Lundi - La Ciotat (École)"
-    if "mardi" in form:
-        if "trinit" in camp: return "Mardi - Sainte-Trinité (CE1)"
-        if "augustin" in camp: return "Mardi - Saint-Augustin (CP-CE1)"
-        return "Mardi - Ceyreste / Marseille"
-    if "mercredi" in form: return "Mercredi - Ceyreste / Cassis"
-    if "jeudi" in form:
-        if "trinit" in camp: return "Jeudi - Sainte-Trinité (Collège)"
-        if "bosco" in camp: 
-            if "collège" in form or "college" in form: return "Jeudi - Don Bosco (Collège)"
-            return "Jeudi - Don Bosco (École)"
-        return "Jeudi - Cassis / La Ciotat"
-    if "vendredi" in form:
-        if "augustin" in camp: return "Vendredi - Saint-Augustin (CE2-CM2)"
-        if "trinit" in camp: return "Vendredi - Sainte-Trinité (CE2-CM2)"
-        return "Vendredi - Cassis"
-    return None
-
+# --- MOTEUR DE RÉPARTITION INTELLIGENT (Cassis Partout, par Classe) ---
 def affectations_automatiques(row):
     creneaux = []
     camp = str(row.get("Campagne", "")).lower()
@@ -272,53 +252,74 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
                 if "quitter" in nom_lower and "seul" in nom_lower:
                     if type_formule == "École":
                         row["Sortie Seul"] = "N/A (École)"
-                        row[nom_champ] = "N/A (École)"
                     else:
-                        if "oui" in reponse.lower() or reponse.lower() == "true": 
-                            row["Sortie Seul"] = "✅ OUI"
-                            row[nom_champ] = "✅ OUI"
-                        elif "non" in reponse.lower() or reponse.lower() == "false": 
-                            row["Sortie Seul"] = "❌ NON"
-                            row[nom_champ] = "❌ NON"
-                        elif reponse == "": 
-                            row["Sortie Seul"] = "-"
-                            row[nom_champ] = "-"
-                        else: 
-                            row["Sortie Seul"] = f"❓ {reponse}"
-                            row[nom_champ] = f"❓ {reponse}"
+                        if "oui" in reponse.lower() or reponse.lower() == "true": row["Sortie Seul"] = "✅ OUI"
+                        elif "non" in reponse.lower() or reponse.lower() == "false": row["Sortie Seul"] = "❌ NON"
+                        elif reponse == "": row["Sortie Seul"] = "-"
+                        else: row["Sortie Seul"] = f"❓ {reponse}"
                             
             rows.append(row)
         return rows
     except: return []
 
+# --- ANALYSE FFE AMÉLIORÉE (NOM + PRÉNOM + DATE DE NAISSANCE) ---
 def analyser_fichier_ffe(fichier):
     try:
-        if fichier.name.endswith('.csv'): df_ffe = pd.read_csv(fichier, sep=None, engine='python')
-        else: df_ffe = pd.read_excel(fichier)
+        if isinstance(fichier, str):
+            if fichier.endswith('.csv'): df_ffe = pd.read_csv(fichier, sep=None, engine='python')
+            else: df_ffe = pd.read_excel(fichier)
+        else:
+            if fichier.name.endswith('.csv'): df_ffe = pd.read_csv(fichier, sep=None, engine='python')
+            else: df_ffe = pd.read_excel(fichier)
+            
         col_nom = next((c for c in df_ffe.columns if "nom" in c.lower() and "prenom" not in c.lower()), None)
         col_prenom = next((c for c in df_ffe.columns if "prenom" in str(c).lower() or "prénom" in str(c).lower()), None)
         col_elo = next((c for c in df_ffe.columns if "elo" in str(c).lower() or "rapide" in str(c).lower()), None)
         col_licence = next((c for c in df_ffe.columns if "licence" in str(c).lower() or "code" in str(c).lower() or "ref" in str(c).lower()), None)
+        col_dna = next((c for c in df_ffe.columns if "dna" in str(c).lower() or "né" in str(c).lower() or "naissance" in str(c).lower()), None)
 
         if col_nom and col_prenom:
-            df_ffe['Cle_Croisement'] = df_ffe[col_nom].apply(normaliser_nom) + df_ffe[col_prenom].apply(normaliser_nom)
+            df_ffe['Nom_Norm'] = df_ffe[col_nom].apply(normaliser_nom)
+            df_ffe['Prenom_Norm'] = df_ffe[col_prenom].apply(normaliser_nom)
+            
+            if col_dna:
+                df_ffe['Annee_FFE'] = df_ffe[col_dna].astype(str).str.extract(r'(\d{4})')[0].fillna("")
+            else:
+                df_ffe['Annee_FFE'] = ""
+                
+            # Clé 1 : Précision Maximale (Nom + Prenom + Année de Naissance)
+            df_ffe['Cle_Forte'] = df_ffe['Nom_Norm'] + df_ffe['Prenom_Norm'] + df_ffe['Annee_FFE']
+            # Clé 2 : Précision Souple (Si jamais les dates diffèrent ou sont absentes)
+            df_ffe['Cle_Souple'] = df_ffe['Nom_Norm'] + df_ffe['Prenom_Norm']
+            
             df_ffe['Elo_FFE'] = df_ffe[col_elo] if col_elo else 1000
             df_ffe['Licence_FFE'] = df_ffe[col_licence] if col_licence else "Inconnue"
-            return df_ffe[['Cle_Croisement', 'Elo_FFE', 'Licence_FFE']]
+            
+            return df_ffe[['Cle_Forte', 'Cle_Souple', 'Elo_FFE', 'Licence_FFE']]
     except: return pd.DataFrame()
     return pd.DataFrame()
 
 st.sidebar.header("🔑 Espace de Travail")
 module_choisi = st.sidebar.radio("", ["🛠️ Module Administration", "♟️ Module Entraîneur"])
 
+# --- PERSISTANCE FFE EN MÉMOIRE LOCALE ---
 st.sidebar.markdown("---")
 st.sidebar.header("1️⃣ Base FFE (Licences)")
-fichier_ffe = st.sidebar.file_uploader("Fichier FFE pour croisement", type=['csv', 'xls', 'xlsx'])
+fichier_ffe = st.sidebar.file_uploader("Fichier FFE (Glissez pour enregistrer)", type=['csv', 'xls', 'xlsx'])
+
 if fichier_ffe:
+    with open(FFE_LOCAL_FILE, "wb") as f: f.write(fichier_ffe.getbuffer())
     df_ffe = analyser_fichier_ffe(fichier_ffe)
     if not df_ffe.empty:
         st.session_state['df_ffe'] = df_ffe
-        st.sidebar.success("Fichier FFE chargé !")
+        st.sidebar.success("Fichier FFE sauvegardé en mémoire permanente !")
+elif os.path.exists(FFE_LOCAL_FILE) and 'df_ffe' not in st.session_state:
+    df_ffe = analyser_fichier_ffe(FFE_LOCAL_FILE)
+    if not df_ffe.empty:
+        st.session_state['df_ffe'] = df_ffe
+        st.sidebar.info("✅ Base FFE chargée automatiquement.")
+elif 'df_ffe' in st.session_state:
+    st.sidebar.info("✅ Base FFE active.")
 
 st.sidebar.markdown("---")
 st.sidebar.header("2️⃣ Synchronisation Data")
@@ -347,11 +348,30 @@ if st.sidebar.button("🔄 Lancer la Synchronisation"):
                     df_base = pd.DataFrame(all_data)
                     
                     if 'df_ffe' in st.session_state and not st.session_state['df_ffe'].empty:
-                        df_base['Cle_Croisement'] = df_base['Nom'].apply(normaliser_nom) + df_base['Prénom'].apply(normaliser_nom)
-                        df_base = pd.merge(df_base, st.session_state['df_ffe'], on='Cle_Croisement', how='left')
+                        df_base['Nom_Norm'] = df_base['Nom'].apply(normaliser_nom)
+                        df_base['Prenom_Norm'] = df_base['Prénom'].apply(normaliser_nom)
+                        df_base['Annee_HA'] = df_base['Date de naissance'].astype(str).str.extract(r'(\d{4})')[0].fillna("")
+                        
+                        df_base['Cle_Forte'] = df_base['Nom_Norm'] + df_base['Prenom_Norm'] + df_base['Annee_HA']
+                        df_base['Cle_Souple'] = df_base['Nom_Norm'] + df_base['Prenom_Norm']
+                        
+                        df_ffe_strict = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Forte'])
+                        df_ffe_souple = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Souple'])
+                        
+                        # Phase 1 : Match PARFAIT avec la Date de Naissance
+                        df_base = pd.merge(df_base, df_ffe_strict[['Cle_Forte', 'Elo_FFE', 'Licence_FFE']], on='Cle_Forte', how='left')
+                        
+                        # Phase 2 : Rattrapage souple (Nom + Prénom) pour ceux dont la date manquait
+                        manquants = df_base['Licence_FFE'].isna()
+                        if manquants.any():
+                            df_base_m = df_base[manquants].drop(columns=['Elo_FFE', 'Licence_FFE'])
+                            df_base_m = pd.merge(df_base_m, df_ffe_souple[['Cle_Souple', 'Elo_FFE', 'Licence_FFE']], on='Cle_Souple', how='left')
+                            df_base.loc[manquants, 'Elo_FFE'] = df_base_m['Elo_FFE'].values
+                            df_base.loc[manquants, 'Licence_FFE'] = df_base_m['Licence_FFE'].values
+
                         df_base['Elo_FFE'] = df_base['Elo_FFE'].fillna(1000).astype(int)
                         df_base['Licence_FFE'] = df_base['Licence_FFE'].fillna("Non croisé")
-                        df_base = df_base.drop(columns=['Cle_Croisement'])
+                        df_base = df_base.drop(columns=['Cle_Forte', 'Cle_Souple', 'Nom_Norm', 'Prenom_Norm', 'Annee_HA'])
                     else:
                         df_base['Elo_FFE'], df_base['Licence_FFE'] = 1000, "Non croisé"
 
@@ -398,7 +418,8 @@ else:
             if recherche_nom:
                 contact = df[df["Identité"] == recherche_nom].iloc[0]
                 tel = contact.get('N° Portable', contact.get('EMail', 'Non renseigné'))
-                st.write(f"📞 **Contact :** {tel} | 🚨 **Sortie :** {contact.get('Sortie Seul', '-')} | 🏫 **Campagne :** {contact.get('Campagne', '-')}")
+                s_actuelle = st.session_state['db']['sorties_manuelles'].get(contact["Identité"], contact.get("Sortie Seul", "-"))
+                st.write(f"📞 **Contact :** {tel} | 🚨 **Sortie :** {s_actuelle} | 🏫 **Campagne :** {contact.get('Campagne', '-')}")
             st.markdown('</div>', unsafe_allow_html=True)
 
             col_ad1, col_ad2, col_ad3, col_ad4 = st.columns(4)
@@ -411,15 +432,13 @@ else:
             
             if filtre_allergie and "Allergies / Médical" in df_admin.columns:
                 mots_sains = ["non", "ras", "rien", "néant", "neant", "aucun", "aucune", "-"]
-                df_admin = df_admin[
-                    (df_admin["Allergies / Médical"] != "") & 
-                    (~df_admin["Allergies / Médical"].str.lower().isin(mots_sains))
-                ]
+                df_admin = df_admin[(df_admin["Allergies / Médical"] != "") & (~df_admin["Allergies / Médical"].str.lower().isin(mots_sains))]
                 
             if sans_licence and "Licence_FFE" in df_admin.columns: df_admin = df_admin[df_admin["Licence_FFE"] == "Non croisé"]
 
             df_admin['Elo Crevette 🦐'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['elos_crevette'].get(x, 400))
             df_admin['Promo Validée ✅'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['validations_promo'].get(x, False))
+            df_admin['Sortie Seul'] = df_admin.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Identité'], r['Sortie Seul']), axis=1)
             
             colonnes_prioritaires = [
                 "Promo Validée ✅", "Sortie Seul", "Code Promo", "Allergies / Médical", 
@@ -435,13 +454,12 @@ else:
             
             colonnes_presentes = [c for c in colonnes_prioritaires if c in df_admin.columns]
             colonnes_a_exclure = ["Identité", "Nom", "Prénom", "Type", "Elo_FFE", "Nom payeur", "Prénom payeur", "Email payeur"]
-            
             autres_colonnes = [c for c in df_admin.columns if c not in colonnes_presentes and c not in colonnes_a_exclure]
             
             colonnes_finales = colonnes_presentes + autres_colonnes + ["Elo Crevette 🦐", "Identité"]
             colonnes_finales = list(dict.fromkeys(colonnes_finales))
             
-            # --- CRÉATION DE L'INDEX UNIQUE GÉLÉ À GAUCHE ---
+            # --- GEL DOUBLE : Nom ET Prénom fixés à gauche ---
             df_admin.insert(0, "👤 Élève (Fige)", df_admin["Nom"] + " " + df_admin["Prénom"])
             df_display = df_admin.set_index("👤 Élève (Fige)")
             
@@ -454,20 +472,25 @@ else:
                 use_container_width=True,
                 column_config={
                     "Identité": None,
-                    "Promo Validée ✅": st.column_config.CheckboxColumn("Promo Validée ✅", default=False)
+                    "Promo Validée ✅": st.column_config.CheckboxColumn("Promo Validée ✅", default=False),
+                    "Sortie Seul": st.column_config.SelectboxColumn("Sortie Seul", options=["✅ OUI", "❌ NON", "N/A (École)", "-"])
                 },
-                disabled=[c for c in cols_to_use if c != "Promo Validée ✅"]
+                disabled=[c for c in cols_to_use if c not in ["Promo Validée ✅", "Sortie Seul"]]
             )
             
-            changements_promo = False
+            changements_faits = False
             for index_eleve, row in edited_df.iterrows():
                 identite_eleve = row["Identité"]
-                etat_coche = row["Promo Validée ✅"]
-                if st.session_state['db']['validations_promo'].get(identite_eleve, False) != etat_coche:
-                    st.session_state['db']['validations_promo'][identite_eleve] = etat_coche
-                    changements_promo = True
+                
+                if st.session_state['db']['validations_promo'].get(identite_eleve, False) != row["Promo Validée ✅"]:
+                    st.session_state['db']['validations_promo'][identite_eleve] = row["Promo Validée ✅"]
+                    changements_faits = True
                     
-            if changements_promo: sauvegarder_base(st.session_state['db'])
+                if st.session_state['db']['sorties_manuelles'].get(identite_eleve) != row["Sortie Seul"]:
+                    st.session_state['db']['sorties_manuelles'][identite_eleve] = row["Sortie Seul"]
+                    changements_faits = True
+                    
+            if changements_faits: sauvegarder_base(st.session_state['db'])
             
         with tab_ecoles:
             st.markdown("### 🏫 Pilotage des Établissements Scolaires")
@@ -483,6 +506,7 @@ else:
                     c2.metric("♟️ Formule Club", f"{nb_club}", f"{(nb_club / total_eleves) * 100:.1f}%")
                     c3.metric("🏫 Formule Scolaire", total_eleves - nb_club)
                     
+                    df_ec['Sortie Seul'] = df_ec.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Identité'], r['Sortie Seul']), axis=1)
                     df_ec.insert(0, "👤 Élève (Fige)", df_ec["Nom"] + " " + df_ec["Prénom"])
                     df_ec_display = df_ec.set_index("👤 Élève (Fige)")
                     
@@ -557,12 +581,25 @@ else:
             if not liste_identites: st.info("Aucun élève assigné à ce créneau.")
             else:
                 df_groupe = df[df["Identité"].isin(liste_identites)]
-                presences = {}
+                total_appel = len(df_groupe)
+                
+                # --- COMPTEURS DYNAMIQUES D'APPEL ---
                 st.markdown("---")
+                presences = {}
                 for idx, row in df_groupe.iterrows():
                     c1, c2 = st.columns([4, 1])
-                    c1.write(f"👤 **{row['Nom']}** {row['Prénom']} *(Sortie: {row.get('Sortie Seul', '-')})*")
+                    sortie_act = st.session_state['db']['sorties_manuelles'].get(row['Identité'], row.get('Sortie Seul', '-'))
+                    c1.write(f"👤 **{row['Nom']}** {row['Prénom']} *(Sortie: {sortie_act})*")
                     presences[row['Identité']] = c2.checkbox("Présent", value=True, key=f"pres_{row['Identité']}")
+
+                presents_count = sum(presences.values())
+                absents_count = total_appel - presents_count
+                
+                st.markdown("---")
+                c_m1, c_m2, c_m3 = st.columns(3)
+                c_m1.metric("👥 Total Liste", total_appel)
+                c_m2.metric("✅ Présents", presents_count)
+                c_m3.metric("❌ Absents", absents_count)
 
                 if st.button(f"💾 Enregistrer l'appel pour {lieu_appel}"):
                     liste_presents = [id_joueur for id_joueur, est_present in presences.items() if est_present]
@@ -579,17 +616,27 @@ else:
                 creneau_tournoi = st.selectbox("Lancer le tournoi pour le créneau :", options=creneaux_remplis)
                 joueurs_inscrits = st.session_state['db']['affectations_creneaux'][creneau_tournoi]
                 
-                if 'scores_tournoi' not in st.session_state:
-                    st.session_state['scores_tournoi'] = {j: 0.0 for j in joueurs_inscrits}
+                # --- EXCLUSION DES ABSENTS ---
+                st.markdown("**Retirez les élèves absents pour ne pas les apparier :**")
+                joueurs_presents = st.multiselect("", options=joueurs_inscrits, default=joueurs_inscrits)
+                
+                if 'scores_tournoi' not in st.session_state or st.session_state.get('tournoi_en_cours') != creneau_tournoi:
+                    st.session_state['scores_tournoi'] = {}
                     st.session_state['historique_rencontres'] = set()
                     st.session_state['ronde_actuelle'] = 1
                     st.session_state['appariements_ronde'] = []
+                    st.session_state['tournoi_en_cours'] = creneau_tournoi
 
+                # Mise à jour des scores pour intégrer les présents
+                for j in joueurs_presents:
+                    if j not in st.session_state['scores_tournoi']: st.session_state['scores_tournoi'][j] = 0.0
+
+                st.markdown("---")
                 col_t1, col_t2 = st.columns(2)
                 with col_t1: st.metric("Ronde actuelle", st.session_state['ronde_actuelle'])
                 with col_t2:
                     if st.button("🔄 Réinitialiser le tournoi"):
-                        st.session_state['scores_tournoi'] = {j: 0.0 for j in joueurs_inscrits}
+                        st.session_state['scores_tournoi'] = {}
                         st.session_state['historique_rencontres'] = set()
                         st.session_state['ronde_actuelle'] = 1
                         st.session_state['appariements_ronde'] = []
@@ -597,8 +644,10 @@ else:
 
                 st.markdown("---")
                 if st.button("🎲 Générer la Ronde"):
+                    # On n'envoie au moteur de tournoi QUE les joueurs cochés comme présents
+                    scores_actifs = {j: st.session_state['scores_tournoi'][j] for j in joueurs_presents}
                     pairs, exempt, st.session_state['historique_rencontres'] = generer_appariements_suisses(
-                        st.session_state['scores_tournoi'], st.session_state['db']['elos_crevette'], st.session_state['historique_rencontres']
+                        scores_actifs, st.session_state['db']['elos_crevette'], st.session_state['historique_rencontres']
                     )
                     st.session_state['appariements_ronde'], st.session_state['exempt_ronde'] = pairs, exempt
 
