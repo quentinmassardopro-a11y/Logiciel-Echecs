@@ -43,7 +43,8 @@ DB_FILE = "base_calanques.json"
 def charger_base():
     default_db = {
         "elos_crevette": {}, "historique_appels": {}, "eleves_essai": [],
-        "affectations_creneaux": {}, "cartes_membres": {} 
+        "affectations_creneaux": {}, "cartes_membres": {},
+        "validations_promo": {}  # NOUVEAU : Sauvegarde des codes promos vérifiés
     }
     if os.path.exists(DB_FILE):
         with open(DB_FILE, "r", encoding="utf-8") as f:
@@ -138,6 +139,10 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
             user, payer = item.get("user", {}), item.get("payer", {})
             nom_tarif = str(item.get("name", ""))
             
+            # --- GESTION DU CODE PROMO ---
+            discount = item.get("discount")
+            code_promo_utilise = discount.get("code", "") if discount else ""
+            
             type_formule = "Club" if "club" in nom_campagne.lower() else "École"
             nom_propre = user.get("lastName", payer.get("lastName", "Inconnu")).replace("*", "").strip().upper()
             prenom_propre = user.get("firstName", payer.get("firstName", "Inconnu")).replace("*", "").strip().title()
@@ -153,6 +158,8 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
                 "Prénom": prenom_propre,
                 "Identité": f"{prenom_propre} {nom_propre}",
                 "Montant Payé": f"{item.get('amount', 0) / 100} €",
+                "Code Promo": code_promo_utilise,
+                "Allergies / Médical": "-",
                 "Formule": nom_tarif,
                 "Type": type_formule,
                 "Licence_FFE": "Non croisé",
@@ -189,6 +196,13 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
                 nom_lower = nom_champ.lower()
                 
                 row[nom_champ] = reponse
+                
+                # RECHERCHE AUTOMATIQUE DES ALLERGIES
+                if any(mot in nom_lower for mot in ["allergie", "médical", "sante", "santé"]):
+                    if row["Allergies / Médical"] == "-":
+                        row["Allergies / Médical"] = reponse
+                    else:
+                        row["Allergies / Médical"] += f" | {reponse}"
                 
                 if "classe" in nom_lower or "niveau" in nom_lower: 
                     row["Classe"] = reponse
@@ -350,19 +364,31 @@ else:
                 st.write(f"📞 **Contact :** {tel} | 🚨 **Sortie :** {contact.get('J’autorise mon enfant à quitter le club seul', '-')} | 🏫 **Campagne :** {contact.get('Campagne', '-')}")
             st.markdown('</div>', unsafe_allow_html=True)
 
-            col_ad1, col_ad2, col_ad3 = st.columns(3)
+            col_ad1, col_ad2, col_ad3, col_ad4 = st.columns(4)
             with col_ad1: filtre_camp_admin = st.multiselect("Campagnes :", options=df["Campagne"].unique(), default=df["Campagne"].unique())
             with col_ad2: filtre_type_admin = st.multiselect("Types :", options=df["Type"].unique(), default=df["Type"].unique())
             with col_ad3: sans_licence = st.checkbox("🚨 Afficher UNIQUEMENT les sans-licence", value=False)
+            with col_ad4: filtre_allergie = st.checkbox("🤧 Alerte Allergies / Médical", value=False)
                 
             df_admin = df[(df["Campagne"].isin(filtre_camp_admin)) & (df["Type"].isin(filtre_type_admin))].copy()
+            
+            # FILTRE ALLERGIES ACTIF
+            if filtre_allergie and "Allergies / Médical" in df_admin.columns:
+                mots_sains = ["non", "ras", "rien", "néant", "neant", "aucun", "aucune", "-"]
+                df_admin = df_admin[
+                    (df_admin["Allergies / Médical"] != "") & 
+                    (~df_admin["Allergies / Médical"].str.lower().isin(mots_sains))
+                ]
+                
             if sans_licence and "Licence_FFE" in df_admin.columns: df_admin = df_admin[df_admin["Licence_FFE"] == "Non croisé"]
 
             df_admin['Elo Crevette 🦐'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['elos_crevette'].get(x, 400))
             
-            # --- LES COLONNES DEMANDÉES (SANS LES INFOS PAYEURS) ---
+            # INTÉGRATION DES DONNÉES PROMO
+            df_admin['Promo Validée ✅'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['validations_promo'].get(x, False))
+            
             colonnes_prioritaires = [
-                "Nom", "Prénom", 
+                "Prénom", "Promo Validée ✅", "Code Promo", "Allergies / Médical", 
                 "Montant Payé", "Formule", "Licence_FFE", "Campagne",
                 "Nom et prénom du responsable légal", "N° Portable", "N° Portable 2 (en cas d'urgence)", 
                 "EMail", "Adresse", "Ville", "Classe", "Date de naissance", "Taille du t-shirt", 
@@ -375,17 +401,41 @@ else:
             ]
             
             colonnes_presentes = [c for c in colonnes_prioritaires if c in df_admin.columns]
-            
-            # --- ON CACHE LES COLONNES QUE TU NE VEUX PLUS VOIR ---
-            colonnes_a_exclure = ["Identité", "Type", "Elo_FFE", "Sortie Seul", "Classe Déduite", "Elo Crevette 🦐", "Nom payeur", "Prénom payeur", "Email payeur"]
-            
+            # "Nom" est exclu des colonnes classiques car il va devenir notre index fixe.
+            colonnes_a_exclure = ["Identité", "Nom", "Type", "Elo_FFE", "Sortie Seul", "Classe Déduite", "Elo Crevette 🦐", "Nom payeur", "Prénom payeur", "Email payeur"]
             autres_colonnes = [c for c in df_admin.columns if c not in colonnes_presentes and c not in colonnes_a_exclure]
             
-            colonnes_finales = colonnes_presentes + autres_colonnes + ["Elo Crevette 🦐"]
+            colonnes_finales = colonnes_presentes + autres_colonnes + ["Elo Crevette 🦐", "Identité"]
             colonnes_finales = list(dict.fromkeys(colonnes_finales))
             
-            st.metric("Dossiers affichés", len(df_admin))
-            st.dataframe(df_admin[colonnes_finales], use_container_width=True, hide_index=True)
+            # --- GEL DE LA PREMIÈRE COLONNE (Le Nom devient l'index figé du tableau) ---
+            df_display = df_admin.set_index("Nom")
+            cols_to_use = [c for c in colonnes_finales if c in df_display.columns]
+            
+            st.metric("Dossiers affichés", len(df_display))
+            
+            # --- TABLEAU INTERACTIF (Permet de cocher la validation Promo) ---
+            edited_df = st.data_editor(
+                df_display[cols_to_use],
+                use_container_width=True,
+                column_config={
+                    "Identité": None, # On cache la colonne Identité, elle ne sert qu'au code
+                    "Promo Validée ✅": st.column_config.CheckboxColumn("Promo Validée ✅", default=False)
+                },
+                disabled=[c for c in cols_to_use if c != "Promo Validée ✅"] # Seule la promo est cliquable
+            )
+            
+            # SAUVEGARDE AUTOMATIQUE DE LA CASE PROMO
+            changements_promo = False
+            for index_nom, row in edited_df.iterrows():
+                identite_eleve = row["Identité"]
+                etat_coche = row["Promo Validée ✅"]
+                if st.session_state['db']['validations_promo'].get(identite_eleve, False) != etat_coche:
+                    st.session_state['db']['validations_promo'][identite_eleve] = etat_coche
+                    changements_promo = True
+                    
+            if changements_promo:
+                sauvegarder_base(st.session_state['db'])
             
         with tab_ecoles:
             st.markdown("### 🏫 Pilotage des Établissements Scolaires")
@@ -401,9 +451,11 @@ else:
                     c2.metric("♟️ Formule Club", f"{nb_club}", f"{(nb_club / total_eleves) * 100:.1f}%")
                     c3.metric("🏫 Formule Scolaire", total_eleves - nb_club)
                     
-                    colonnes_ecole = ["Nom", "Prénom", "Classe Déduite", "Formule", "J’autorise mon enfant à quitter le club seul", "N° Portable", "N° Portable 2 (en cas d'urgence)"]
-                    colonnes_ecole = [c for c in colonnes_ecole if c in df_ec.columns]
-                    st.dataframe(df_ec[colonnes_ecole], use_container_width=True, hide_index=True)
+                    # Gel de la colonne "Nom" ici aussi
+                    df_ec_display = df_ec.set_index("Nom")
+                    colonnes_ecole = ["Prénom", "Classe Déduite", "Formule", "J’autorise mon enfant à quitter le club seul", "N° Portable", "N° Portable 2 (en cas d'urgence)"]
+                    colonnes_ecole = [c for c in colonnes_ecole if c in df_ec_display.columns]
+                    st.dataframe(df_ec_display[colonnes_ecole], use_container_width=True)
 
         with tab_cartes:
             st.markdown("### 🎟️ Suivi des Cartes de Centres (Cassis & Carnoux)")
