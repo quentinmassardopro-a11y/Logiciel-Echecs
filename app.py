@@ -100,7 +100,28 @@ def generer_appariements_suisses(joueurs_scores, elos_dict, historique_rencontre
             appariements.append((j1, j2_trouve))
     return appariements, exempt, historique_rencontres
 
-# --- NOUVEAU MOTEUR INTELLIGENT DE RÉPARTITION ---
+def auto_affecter_creneau(campagne, formule):
+    camp, form = str(campagne).lower(), str(formule).lower()
+    if "lundi" in form:
+        if "trinit" in camp: return "Lundi - Sainte-Trinité (CP)"
+        return "Lundi - La Ciotat (École)"
+    if "mardi" in form:
+        if "trinit" in camp: return "Mardi - Sainte-Trinité (CE1)"
+        if "augustin" in camp: return "Mardi - Saint-Augustin (CP-CE1)"
+        return "Mardi - Ceyreste / Marseille"
+    if "mercredi" in form: return "Mercredi - Ceyreste / Cassis"
+    if "jeudi" in form:
+        if "trinit" in camp: return "Jeudi - Sainte-Trinité (Collège)"
+        if "bosco" in camp: 
+            if "collège" in form or "college" in form: return "Jeudi - Don Bosco (Collège)"
+            return "Jeudi - Don Bosco (École)"
+        return "Jeudi - Cassis / La Ciotat"
+    if "vendredi" in form:
+        if "augustin" in camp: return "Vendredi - Saint-Augustin (CE2-CM2)"
+        if "trinit" in camp: return "Vendredi - Sainte-Trinité (CE2-CM2)"
+        return "Vendredi - Cassis"
+    return None
+
 def affectations_automatiques(row):
     creneaux = []
     camp = str(row.get("Campagne", "")).lower()
@@ -108,7 +129,6 @@ def affectations_automatiques(row):
     classe = str(row.get("Classe", "")).lower()
     ville_choisie = str(row.get("Dans quel ville sera votre créneaux principale", "")).lower()
     
-    # 1. Traitement Écoles par Classe
     if "trinit" in camp:
         if "cp" in classe: creneaux.append("Lundi - Sainte-Trinité (CP)")
         elif "ce1" in classe: creneaux.append("Mardi - Sainte-Trinité (CE1)")
@@ -121,7 +141,6 @@ def affectations_automatiques(row):
         if any(c in classe for c in ["coll", "6ème", "5ème", "4ème", "3ème"]): creneaux.append("Jeudi - Don Bosco (Collège)")
         else: creneaux.append("Jeudi - Don Bosco (École)")
         
-    # 2. Traitement Club par choix de Ville
     if "club" in camp or "adhésion" in camp or "adhesion" in camp:
         if "cassis" in ville_choisie:
             creneaux.extend(["Lundi - Club Cassis", "Mercredi - Ceyreste / Cassis", "Jeudi - Cassis / La Ciotat", "Vendredi - Cassis"])
@@ -134,7 +153,6 @@ def affectations_automatiques(row):
         if "carnoux" in ville_choisie:
             creneaux.append("Lundi - Carnoux")
             
-    # 3. Sécurité : si on n'a rien trouvé, on se base sur le nom du tarif
     if not creneaux:
         if "lundi" in form:
             if "trinit" in camp: creneaux.append("Lundi - Sainte-Trinité (CP)")
@@ -155,7 +173,7 @@ def affectations_automatiques(row):
             elif "trinit" in camp: creneaux.append("Vendredi - Sainte-Trinité (CE2-CM2)")
             else: creneaux.append("Vendredi - Cassis")
     
-    return list(set(creneaux)) # On supprime les doublons éventuels
+    return list(set(creneaux))
 
 def get_helloasso_token(client_id, client_secret):
     url = "https://api.helloasso.com/oauth2/token"
@@ -221,7 +239,6 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
                 row["Date de naissance"] = str(row["Date de naissance"])[:10]
             
             for field in item.get("customFields", []):
-                # .strip() empêche définitivement les espaces fantômes de créer des doublons
                 nom_champ = str(field.get("name", "")).strip() 
                 reponse = str(field.get("answer", "")).strip()
                 nom_lower = nom_champ.lower()
@@ -343,7 +360,6 @@ if st.sidebar.button("🔄 Lancer la Synchronisation"):
                         if identite not in st.session_state['db']['elos_crevette']:
                             st.session_state['db']['elos_crevette'][identite] = 400
                         
-                        # UTILISATION DU NOUVEAU MOTEUR MULTI-CRENEAUX
                         creneaux_autos = affectations_automatiques(row)
                         for c_auto in creneaux_autos:
                             if c_auto not in st.session_state['db']['affectations_creneaux']:
@@ -405,7 +421,6 @@ else:
             df_admin['Elo Crevette 🦐'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['elos_crevette'].get(x, 400))
             df_admin['Promo Validée ✅'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['validations_promo'].get(x, False))
             
-            # MISE EN ÉVIDENCE DE SORTIE SEUL ET PROMO AU DÉBUT
             colonnes_prioritaires = [
                 "Promo Validée ✅", "Sortie Seul", "Code Promo", "Allergies / Médical", 
                 "Montant Payé", "Formule", "Licence_FFE", "Campagne",
@@ -419,7 +434,6 @@ else:
             ]
             
             colonnes_presentes = [c for c in colonnes_prioritaires if c in df_admin.columns]
-            # On exclut le nom et prénom car ils vont devenir notre ancrage figé
             colonnes_a_exclure = ["Identité", "Nom", "Prénom", "Type", "Elo_FFE", "Nom payeur", "Prénom payeur", "Email payeur"]
             
             autres_colonnes = [c for c in df_admin.columns if c not in colonnes_presentes and c not in colonnes_a_exclure]
@@ -427,9 +441,11 @@ else:
             colonnes_finales = colonnes_presentes + autres_colonnes + ["Elo Crevette 🦐", "Identité"]
             colonnes_finales = list(dict.fromkeys(colonnes_finales))
             
-            # --- DOUBLE GEL (Nom ET Prénom) ---
-            df_display = df_admin.set_index(["Nom", "Prénom"])
-            cols_to_use = [c for c in colonnes_finales if c in df_display.columns]
+            # --- CRÉATION DE L'INDEX UNIQUE GÉLÉ À GAUCHE ---
+            df_admin.insert(0, "👤 Élève (Fige)", df_admin["Nom"] + " " + df_admin["Prénom"])
+            df_display = df_admin.set_index("👤 Élève (Fige)")
+            
+            cols_to_use = [c for c in colonnes_finales if c in df_display.columns and c not in ["Nom", "Prénom"]]
             
             st.metric("Dossiers affichés", len(df_display))
             
@@ -444,7 +460,7 @@ else:
             )
             
             changements_promo = False
-            for (index_nom, index_prenom), row in edited_df.iterrows():
+            for index_eleve, row in edited_df.iterrows():
                 identite_eleve = row["Identité"]
                 etat_coche = row["Promo Validée ✅"]
                 if st.session_state['db']['validations_promo'].get(identite_eleve, False) != etat_coche:
@@ -467,7 +483,9 @@ else:
                     c2.metric("♟️ Formule Club", f"{nb_club}", f"{(nb_club / total_eleves) * 100:.1f}%")
                     c3.metric("🏫 Formule Scolaire", total_eleves - nb_club)
                     
-                    df_ec_display = df_ec.set_index(["Nom", "Prénom"])
+                    df_ec.insert(0, "👤 Élève (Fige)", df_ec["Nom"] + " " + df_ec["Prénom"])
+                    df_ec_display = df_ec.set_index("👤 Élève (Fige)")
+                    
                     colonnes_ecole = ["Classe", "Formule", "Sortie Seul", "N° Portable", "N° Portable 2 (en cas d'urgence)"]
                     colonnes_ecole = [c for c in colonnes_ecole if c in df_ec_display.columns]
                     st.dataframe(df_ec_display[colonnes_ecole], use_container_width=True)
