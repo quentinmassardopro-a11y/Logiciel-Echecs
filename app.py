@@ -9,13 +9,11 @@ from datetime import datetime
 
 st.set_page_config(page_title="Académie d'Échecs des Calanques", layout="wide", page_icon="♟️")
 
-# --- CHARTE GRAPHIQUE (Bleu, Orange, Violet) ---
+# --- CHARTE GRAPHIQUE (100% Bleu et Orange) ---
 st.markdown("""
     <style>
-    /* Titres en Bleu */
-    h1 { color: #005b96 !important; font-weight: 800; }
-    /* Sous-titres en Violet */
-    h2, h3 { color: #8A2BE2 !important; }
+    /* Titres et Sous-titres en Bleu */
+    h1, h2, h3, h4, h5, h6 { color: #005b96 !important; font-weight: bold; }
     
     /* Boutons en Orange */
     .stButton>button { 
@@ -33,22 +31,28 @@ st.markdown("""
         color: white !important; 
     }
     
-    /* Onglets de navigation Streamlit : on force les couleurs */
+    /* Onglets de navigation Streamlit */
     button[data-baseweb="tab"][aria-selected="true"] > div {
-        color: #8A2BE2 !important;
+        color: #005b96 !important;
         font-weight: bold;
     }
     button[data-baseweb="tab"][aria-selected="true"] {
         border-bottom-color: #FF8C00 !important;
     }
     
-    /* Encadrés spécifiques */
+    /* Encadrés spécifiques (Recherche rapide) */
     .recherche-rapide { 
         background-color: #f4f6f9; 
         padding: 15px; 
         border-radius: 10px; 
         margin-bottom: 20px; 
-        border-left: 6px solid #8A2BE2; 
+        border-left: 6px solid #FF8C00; 
+    }
+
+    /* Boîtes de sélection (Selectbox et Multiselect) bordées d'Orange */
+    div[data-baseweb="select"] {
+        border: 2px solid #FF8C00 !important;
+        border-radius: 6px !important;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -80,7 +84,7 @@ def charger_base():
         "elos_crevette": {}, "historique_appels": {}, "eleves_essai": [],
         "affectations_creneaux": {}, "cartes_membres": {},
         "validations_promo": {}, "sorties_manuelles": {},
-        "eleves_deja_affectes": [] # Mémoire des anciens pour ne pas les écraser
+        "eleves_deja_affectes": []
     }
     if os.path.exists(DB_FILE):
         with open(DB_FILE, "r", encoding="utf-8") as f:
@@ -429,7 +433,6 @@ if st.sidebar.button("🔄 Lancer la Synchronisation"):
                         if identite not in st.session_state['db']['elos_crevette']:
                             st.session_state['db']['elos_crevette'][identite] = 400
                         
-                        # --- NE PAS ÉCRASER LES LISTES SI L'ÉLÈVE EST DÉJÀ CONNU ---
                         if identite not in st.session_state['db'].get('eleves_deja_affectes', []):
                             creneaux_autos = affectations_automatiques(row)
                             for c_auto in creneaux_autos:
@@ -438,7 +441,6 @@ if st.sidebar.button("🔄 Lancer la Synchronisation"):
                                 if identite not in st.session_state['db']['affectations_creneaux'][c_auto]:
                                     st.session_state['db']['affectations_creneaux'][c_auto].append(identite)
                             
-                            # On marque l'élève pour qu'il ne soit plus jamais écrasé
                             st.session_state['db']['eleves_deja_affectes'].append(identite)
                                 
                     sauvegarder_base(st.session_state['db'])
