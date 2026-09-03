@@ -123,8 +123,11 @@ def affectations_automatiques(row):
         if "cp" in classe or "ce1" in classe: creneaux.append("Mardi - Saint-Augustin (CP-CE1)")
         elif any(c in classe for c in ["ce2", "cm1", "cm2", "cm"]): creneaux.append("Vendredi - Saint-Augustin (CE2-CM2)")
     elif "bosco" in camp:
-        if any(c in classe for c in ["coll", "6ème", "5ème", "4ème", "3ème"]): creneaux.append("Jeudi - Don Bosco (Collège)")
-        else: creneaux.append("Jeudi - Don Bosco (École)")
+        # CORRECTION : Détection intelligente Collège vs École pour Don Bosco
+        if "coll" in form or "coll" in classe or any(c in classe for c in ["6ème", "5ème", "4ème", "3ème"]): 
+            creneaux.append("Jeudi - Don Bosco (Collège)")
+        else: 
+            creneaux.append("Jeudi - Don Bosco (École)")
         
     if "club" in camp or "adhésion" in camp or "adhesion" in camp:
         if "cassis" in ville_choisie:
@@ -177,14 +180,12 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
             user, payer = item.get("user", {}), item.get("payer", {})
             nom_tarif = str(item.get("name", ""))
             
-            # --- CORRECTION CODE PROMO ---
             discount = item.get("discount")
             if discount and isinstance(discount, dict):
                 code_promo_utilise = discount.get("code", "")
             else:
                 code_promo_utilise = ""
                 
-            # Au cas où il soit nommé autrement dans l'API
             if not code_promo_utilise and "amountDiscount" in item:
                 code_promo_utilise = "Oui (Montant Réduit)"
             
@@ -512,7 +513,6 @@ else:
                 ecole_choisie = st.selectbox("Sélectionnez l'établissement :", ecoles_dispos)
                 df_ec_full = df[df["Campagne"] == ecole_choisie].copy()
                 
-                # --- NOUVEAU : FILTRAGE PAR CRÉNEAU / FORMULE ---
                 formules_dispos = ["Tous les créneaux"] + list(df_ec_full["Formule"].dropna().unique())
                 formule_choisie = st.selectbox("Filtrer par Formule / Créneau :", formules_dispos)
                 
@@ -524,7 +524,6 @@ else:
                 total_eleves = len(df_ec)
                 if total_eleves > 0:
                     c1, c2, c3 = st.columns(3)
-                    # CORRECTION DU CALCUL DE LA FORMULE CLUB
                     nb_club = len(df_ec[df_ec["Formule"].str.lower().str.contains("club", na=False)])
                     
                     c1.metric("🎓 Total Élèves", total_eleves)
@@ -569,7 +568,8 @@ else:
 
     elif module_choisi == "♟️ Module Entraîneur":
         st.subheader("♟️ Espace Entraîneur")
-        tab_appel, tab_tournoi, tab_affectations = st.tabs(["📋 Faire l'Appel", "⚔️ Tournoi & Elo", "⚙️ Affecter Élèves (Manuel)"])
+        # --- NOUVEL ONGLET CLASSEMENT ---
+        tab_appel, tab_tournoi, tab_classement, tab_affectations = st.tabs(["📋 Faire l'Appel", "⚔️ Tournoi & Elo", "🏆 Classement Elo Crevette", "⚙️ Affecter Élèves"])
 
         with tab_affectations:
             st.markdown("### ⚙️ Création Manuelle des listes de Créneaux")
@@ -605,7 +605,6 @@ else:
             liste_identites = st.session_state['db']['affectations_creneaux'].get(lieu_appel, [])
             if not liste_identites: st.info("Aucun élève assigné à ce créneau.")
             else:
-                # --- CORRECTION DE L'ERREUR DE DUPLICATION ---
                 df_groupe = df[df["Identité"].isin(liste_identites)].drop_duplicates(subset=["Identité"])
                 total_appel = len(df_groupe)
                 
@@ -615,7 +614,6 @@ else:
                     c1, c2 = st.columns([4, 1])
                     sortie_act = st.session_state['db']['sorties_manuelles'].get(row['Identité'], row.get('Sortie Seul', '-'))
                     c1.write(f"👤 **{row['Nom']}** {row['Prénom']} *(Sortie: {sortie_act})*")
-                    # La clé est maintenant garantie à 100% unique
                     presences[row['Identité']] = c2.checkbox("Présent", value=True, key=f"pres_{row['Identité']}")
 
                 presents_count = sum(presences.values())
@@ -640,7 +638,6 @@ else:
             if not creneaux_remplis: st.info("Aucun créneau disponible pour lancer un tournoi.")
             else:
                 creneau_tournoi = st.selectbox("Lancer le tournoi pour le créneau :", options=creneaux_remplis)
-                # Nettoyage des doublons éventuels ici aussi pour le tournoi
                 joueurs_inscrits = list(set(st.session_state['db']['affectations_creneaux'][creneau_tournoi]))
                 
                 st.markdown("**Retirez les élèves absents pour ne pas les apparier :**")
@@ -714,3 +711,41 @@ else:
                             st.session_state['appariements_ronde'] = []
                             st.success("Résultats et Elos Crevette sauvegardés !")
                             st.rerun()
+                            
+        with tab_classement:
+            st.markdown("### 🏆 Classement Général Elo Crevette 🦐")
+            
+            creneaux_remplis_classement = [k for k, v in st.session_state['db']['affectations_creneaux'].items() if len(v) > 0]
+            filtre_c = st.selectbox("Filtrer par liste / créneau :", ["Tous les élèves"] + sorted(creneaux_remplis_classement))
+            
+            if filtre_c == "Tous les élèves":
+                joueurs_a_afficher = st.session_state['db']['elos_crevette'].keys()
+            else:
+                joueurs_a_afficher = st.session_state['db']['affectations_creneaux'][filtre_c]
+            
+            data_classement = []
+            for j in joueurs_a_afficher:
+                elo = st.session_state['db']['elos_crevette'].get(j, 400)
+                data_classement.append({"Élève": j, "Elo Crevette 🦐": elo})
+                
+            if data_classement:
+                df_classement = pd.DataFrame(data_classement).sort_values(by="Elo Crevette 🦐", ascending=False).reset_index(drop=True)
+                df_classement.index += 1
+                
+                max_elo = max(1000, df_classement["Elo Crevette 🦐"].max())
+                
+                st.dataframe(
+                    df_classement,
+                    use_container_width=True,
+                    column_config={
+                        "Elo Crevette 🦐": st.column_config.ProgressColumn(
+                            "Niveau de puissance 🦐",
+                            help="Progression actuelle",
+                            format="%d 🦐",
+                            min_value=100,
+                            max_value=int(max_elo)
+                        )
+                    }
+                )
+            else:
+                st.info("Aucun élève à afficher pour ce créneau.")
