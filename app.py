@@ -9,6 +9,50 @@ from datetime import datetime
 
 st.set_page_config(page_title="Académie d'Échecs des Calanques", layout="wide", page_icon="♟️")
 
+# --- CHARTE GRAPHIQUE (Bleu, Orange, Violet) ---
+st.markdown("""
+    <style>
+    /* Titres en Bleu */
+    h1 { color: #005b96 !important; font-weight: 800; }
+    /* Sous-titres en Violet */
+    h2, h3 { color: #8A2BE2 !important; }
+    
+    /* Boutons en Orange */
+    .stButton>button { 
+        background-color: #FF8C00 !important; 
+        color: white !important; 
+        border: none; 
+        font-weight: bold; 
+        width:100%;
+        border-radius: 8px;
+        transition: 0.3s;
+    }
+    /* Survol des boutons en Bleu */
+    .stButton>button:hover { 
+        background-color: #005b96 !important; 
+        color: white !important; 
+    }
+    
+    /* Onglets de navigation Streamlit : on force les couleurs */
+    button[data-baseweb="tab"][aria-selected="true"] > div {
+        color: #8A2BE2 !important;
+        font-weight: bold;
+    }
+    button[data-baseweb="tab"][aria-selected="true"] {
+        border-bottom-color: #FF8C00 !important;
+    }
+    
+    /* Encadrés spécifiques */
+    .recherche-rapide { 
+        background-color: #f4f6f9; 
+        padding: 15px; 
+        border-radius: 10px; 
+        margin-bottom: 20px; 
+        border-left: 6px solid #8A2BE2; 
+    }
+    </style>
+""", unsafe_allow_html=True)
+
 # --- VERROUILLAGE PAR MOT DE PASSE ---
 if "authentifie" not in st.session_state:
     st.session_state["authentifie"] = False
@@ -28,16 +72,6 @@ if not st.session_state["authentifie"]:
                 st.error("Mot de passe incorrect.")
     st.stop()
 
-st.markdown("""
-    <style>
-    h1, h2, h3 { color: #4682B4 !important; }
-    .stButton>button { background-color: #FF8C00; color: white; border: none; font-weight: bold; width:100%;}
-    .stButton>button:hover { background-color: #e67e22; color: white; }
-    div[data-testid="stSidebarNav"] { font-weight: bold; }
-    .recherche-rapide { background-color: #f0f2f6; padding: 15px; border-radius: 10px; margin-bottom: 20px; border-left: 5px solid #FF8C00; }
-    </style>
-""", unsafe_allow_html=True)
-
 DB_FILE = "base_calanques.json"
 FFE_LOCAL_FILE = "base_ffe_locale.csv"
 
@@ -45,7 +79,8 @@ def charger_base():
     default_db = {
         "elos_crevette": {}, "historique_appels": {}, "eleves_essai": [],
         "affectations_creneaux": {}, "cartes_membres": {},
-        "validations_promo": {}, "sorties_manuelles": {}
+        "validations_promo": {}, "sorties_manuelles": {},
+        "eleves_deja_affectes": [] # Mémoire des anciens pour ne pas les écraser
     }
     if os.path.exists(DB_FILE):
         with open(DB_FILE, "r", encoding="utf-8") as f:
@@ -65,9 +100,9 @@ if 'db' not in st.session_state:
     st.session_state['db'] = charger_base()
 
 # Sécurité Cache
-for cle in ["validations_promo", "sorties_manuelles", "cartes_membres"]:
+for cle in ["validations_promo", "sorties_manuelles", "cartes_membres", "eleves_deja_affectes"]:
     if cle not in st.session_state['db']:
-        st.session_state['db'][cle] = {}
+        st.session_state['db'][cle] = [] if cle == "eleves_deja_affectes" else {}
 
 col1, col2 = st.columns([1, 4])
 with col1:
@@ -123,7 +158,6 @@ def affectations_automatiques(row):
         if "cp" in classe or "ce1" in classe: creneaux.append("Mardi - Saint-Augustin (CP-CE1)")
         elif any(c in classe for c in ["ce2", "cm1", "cm2", "cm"]): creneaux.append("Vendredi - Saint-Augustin (CE2-CM2)")
     elif "bosco" in camp:
-        # CORRECTION : Détection intelligente Collège vs École pour Don Bosco
         if "coll" in form or "coll" in classe or any(c in classe for c in ["6ème", "5ème", "4ème", "3ème"]): 
             creneaux.append("Jeudi - Don Bosco (Collège)")
         else: 
@@ -395,12 +429,17 @@ if st.sidebar.button("🔄 Lancer la Synchronisation"):
                         if identite not in st.session_state['db']['elos_crevette']:
                             st.session_state['db']['elos_crevette'][identite] = 400
                         
-                        creneaux_autos = affectations_automatiques(row)
-                        for c_auto in creneaux_autos:
-                            if c_auto not in st.session_state['db']['affectations_creneaux']:
-                                st.session_state['db']['affectations_creneaux'][c_auto] = []
-                            if identite not in st.session_state['db']['affectations_creneaux'][c_auto]:
-                                st.session_state['db']['affectations_creneaux'][c_auto].append(identite)
+                        # --- NE PAS ÉCRASER LES LISTES SI L'ÉLÈVE EST DÉJÀ CONNU ---
+                        if identite not in st.session_state['db'].get('eleves_deja_affectes', []):
+                            creneaux_autos = affectations_automatiques(row)
+                            for c_auto in creneaux_autos:
+                                if c_auto not in st.session_state['db']['affectations_creneaux']:
+                                    st.session_state['db']['affectations_creneaux'][c_auto] = []
+                                if identite not in st.session_state['db']['affectations_creneaux'][c_auto]:
+                                    st.session_state['db']['affectations_creneaux'][c_auto].append(identite)
+                            
+                            # On marque l'élève pour qu'il ne soit plus jamais écrasé
+                            st.session_state['db']['eleves_deja_affectes'].append(identite)
                                 
                     sauvegarder_base(st.session_state['db'])
                     st.session_state['df_adherents'] = df_base
@@ -568,7 +607,6 @@ else:
 
     elif module_choisi == "♟️ Module Entraîneur":
         st.subheader("♟️ Espace Entraîneur")
-        # --- NOUVEL ONGLET CLASSEMENT ---
         tab_appel, tab_tournoi, tab_classement, tab_affectations = st.tabs(["📋 Faire l'Appel", "⚔️ Tournoi & Elo", "🏆 Classement Elo Crevette", "⚙️ Affecter Élèves"])
 
         with tab_affectations:
@@ -719,9 +757,9 @@ else:
             filtre_c = st.selectbox("Filtrer par liste / créneau :", ["Tous les élèves"] + sorted(creneaux_remplis_classement))
             
             if filtre_c == "Tous les élèves":
-                joueurs_a_afficher = st.session_state['db']['elos_crevette'].keys()
+                joueurs_a_afficher = list(st.session_state['db']['elos_crevette'].keys())
             else:
-                joueurs_a_afficher = st.session_state['db']['affectations_creneaux'][filtre_c]
+                joueurs_a_afficher = list(set(st.session_state['db']['affectations_creneaux'][filtre_c]))
             
             data_classement = []
             for j in joueurs_a_afficher:
