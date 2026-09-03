@@ -64,8 +64,7 @@ def sauvegarder_base(db):
 if 'db' not in st.session_state: 
     st.session_state['db'] = charger_base()
 
-# --- PATCH SÉCURITÉ CACHE ---
-# Force la création des clés si une ancienne session est bloquée en mémoire
+# Sécurité Cache
 for cle in ["validations_promo", "sorties_manuelles", "cartes_membres"]:
     if cle not in st.session_state['db']:
         st.session_state['db'][cle] = {}
@@ -178,8 +177,16 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
             user, payer = item.get("user", {}), item.get("payer", {})
             nom_tarif = str(item.get("name", ""))
             
+            # --- CORRECTION CODE PROMO ---
             discount = item.get("discount")
-            code_promo_utilise = discount.get("code", "") if discount else ""
+            if discount and isinstance(discount, dict):
+                code_promo_utilise = discount.get("code", "")
+            else:
+                code_promo_utilise = ""
+                
+            # Au cas où il soit nommé autrement dans l'API
+            if not code_promo_utilise and "amountDiscount" in item:
+                code_promo_utilise = "Oui (Montant Réduit)"
             
             type_formule = "Club" if "club" in nom_campagne.lower() else "École"
             nom_propre = user.get("lastName", payer.get("lastName", "Inconnu")).replace("*", "").strip().upper()
@@ -231,6 +238,9 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
                 
                 row[nom_champ] = reponse
                 
+                if "promo" in nom_lower: 
+                    row["Code Promo"] = reponse
+                    
                 if any(mot in nom_lower for mot in ["allergie", "médical", "sante", "santé"]):
                     if row["Allergies / Médical"] == "-": row["Allergies / Médical"] = reponse
                     else: row["Allergies / Médical"] += f" | {reponse}"
@@ -497,16 +507,28 @@ else:
             
         with tab_ecoles:
             st.markdown("### 🏫 Pilotage des Établissements Scolaires")
-            ecoles_dispos = [c for c in df["Campagne"].unique() if "Club" not in c and "Adhésions" not in c]
+            ecoles_dispos = [c for c in df["Campagne"].unique() if "club" not in c.lower() and "adhésion" not in c.lower() and "adhesion" not in c.lower()]
             if ecoles_dispos:
                 ecole_choisie = st.selectbox("Sélectionnez l'établissement :", ecoles_dispos)
-                df_ec = df[df["Campagne"] == ecole_choisie].copy()
+                df_ec_full = df[df["Campagne"] == ecole_choisie].copy()
+                
+                # --- NOUVEAU : FILTRAGE PAR CRÉNEAU / FORMULE ---
+                formules_dispos = ["Tous les créneaux"] + list(df_ec_full["Formule"].dropna().unique())
+                formule_choisie = st.selectbox("Filtrer par Formule / Créneau :", formules_dispos)
+                
+                if formule_choisie != "Tous les créneaux":
+                    df_ec = df_ec_full[df_ec_full["Formule"] == formule_choisie].copy()
+                else:
+                    df_ec = df_ec_full.copy()
+                
                 total_eleves = len(df_ec)
                 if total_eleves > 0:
                     c1, c2, c3 = st.columns(3)
-                    nb_club = len(df_ec[df_ec["Type"] == "Club"])
+                    # CORRECTION DU CALCUL DE LA FORMULE CLUB
+                    nb_club = len(df_ec[df_ec["Formule"].str.lower().str.contains("club", na=False)])
+                    
                     c1.metric("🎓 Total Élèves", total_eleves)
-                    c2.metric("♟️ Formule Club", f"{nb_club}", f"{(nb_club / total_eleves) * 100:.1f}%")
+                    c2.metric("♟️ Formule Club", f"{nb_club}", f"{(nb_club / total_eleves) * 100:.1f}%" if total_eleves else "0%")
                     c3.metric("🏫 Formule Scolaire", total_eleves - nb_club)
                     
                     df_ec['Sortie Seul'] = df_ec.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Identité'], r['Sortie Seul']), axis=1)
@@ -583,7 +605,8 @@ else:
             liste_identites = st.session_state['db']['affectations_creneaux'].get(lieu_appel, [])
             if not liste_identites: st.info("Aucun élève assigné à ce créneau.")
             else:
-                df_groupe = df[df["Identité"].isin(liste_identites)]
+                # --- CORRECTION DE L'ERREUR DE DUPLICATION ---
+                df_groupe = df[df["Identité"].isin(liste_identites)].drop_duplicates(subset=["Identité"])
                 total_appel = len(df_groupe)
                 
                 st.markdown("---")
@@ -592,6 +615,7 @@ else:
                     c1, c2 = st.columns([4, 1])
                     sortie_act = st.session_state['db']['sorties_manuelles'].get(row['Identité'], row.get('Sortie Seul', '-'))
                     c1.write(f"👤 **{row['Nom']}** {row['Prénom']} *(Sortie: {sortie_act})*")
+                    # La clé est maintenant garantie à 100% unique
                     presences[row['Identité']] = c2.checkbox("Présent", value=True, key=f"pres_{row['Identité']}")
 
                 presents_count = sum(presences.values())
@@ -616,7 +640,8 @@ else:
             if not creneaux_remplis: st.info("Aucun créneau disponible pour lancer un tournoi.")
             else:
                 creneau_tournoi = st.selectbox("Lancer le tournoi pour le créneau :", options=creneaux_remplis)
-                joueurs_inscrits = st.session_state['db']['affectations_creneaux'][creneau_tournoi]
+                # Nettoyage des doublons éventuels ici aussi pour le tournoi
+                joueurs_inscrits = list(set(st.session_state['db']['affectations_creneaux'][creneau_tournoi]))
                 
                 st.markdown("**Retirez les élèves absents pour ne pas les apparier :**")
                 joueurs_presents = st.multiselect("", options=joueurs_inscrits, default=joueurs_inscrits)
