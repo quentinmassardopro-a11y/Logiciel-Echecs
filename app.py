@@ -13,10 +13,8 @@ st.set_page_config(page_title="Académie d'Échecs des Calanques", layout="wide"
 # --- CHARTE GRAPHIQUE (100% Bleu et Orange) ---
 st.markdown("""
     <style>
-    /* Titres et Sous-titres en Bleu */
     h1, h2, h3, h4, h5, h6 { color: #005b96 !important; font-weight: bold; }
     
-    /* Boutons en Orange */
     .stButton>button { 
         background-color: #FF8C00 !important; 
         color: white !important; 
@@ -26,13 +24,11 @@ st.markdown("""
         border-radius: 8px;
         transition: 0.3s;
     }
-    /* Survol des boutons en Bleu */
     .stButton>button:hover { 
         background-color: #005b96 !important; 
         color: white !important; 
     }
     
-    /* Onglets de navigation Streamlit */
     button[data-baseweb="tab"][aria-selected="true"] > div {
         color: #005b96 !important;
         font-weight: bold;
@@ -41,7 +37,6 @@ st.markdown("""
         border-bottom-color: #FF8C00 !important;
     }
     
-    /* Encadrés spécifiques (Recherche rapide) */
     .recherche-rapide { 
         background-color: #f4f6f9; 
         padding: 15px; 
@@ -50,7 +45,6 @@ st.markdown("""
         border-left: 6px solid #FF8C00; 
     }
 
-    /* Boîtes de sélection (Selectbox et Multiselect) bordées d'Orange */
     div[data-baseweb="select"] {
         border: 2px solid #FF8C00 !important;
         border-radius: 6px !important;
@@ -104,7 +98,6 @@ def sauvegarder_base(db):
 if 'db' not in st.session_state: 
     st.session_state['db'] = charger_base()
 
-# Sécurité Cache
 for cle in ["validations_promo", "sorties_manuelles", "cartes_membres", "eleves_deja_affectes"]:
     if cle not in st.session_state['db']:
         st.session_state['db'][cle] = [] if cle == "eleves_deja_affectes" else {}
@@ -146,6 +139,22 @@ def generer_appariements_suisses(joueurs_scores, elos_dict, historique_rencontre
             historique_rencontres.add((min(j1, j2_trouve), max(j1, j2_trouve)))
             appariements.append((j1, j2_trouve))
     return appariements, exempt, historique_rencontres
+
+# --- MOTEUR INTELLIGENT ELO (FIDE vs CREVETTE) ---
+def get_elo_actif(identite, df_adherents, db):
+    try:
+        row = df_adherents[df_adherents["Identité"] == identite].iloc[0]
+        elo_ffe = int(row.get("Elo_FFE", 0))
+        licence = str(row.get("Licence_FFE", "Non croisé"))
+        
+        # S'il a une vraie licence croisée et un Elo rapide renseigné
+        if licence != "Non croisé" and elo_ffe > 0:
+            return elo_ffe, "⚡ FFE/FIDE"
+    except:
+        pass
+    
+    # Sinon, il utilise le système local Elo Crevette
+    return db['elos_crevette'].get(identite, 400), "🦐 Crevette"
 
 def affectations_automatiques(row):
     creneaux = []
@@ -349,8 +358,8 @@ def analyser_fichier_ffe(fichier):
             df_ffe['Cle_Forte'] = df_ffe['Nom_Norm'] + df_ffe['Prenom_Norm'] + df_ffe['Annee_FFE']
             df_ffe['Cle_Souple'] = df_ffe['Nom_Norm'] + df_ffe['Prenom_Norm']
             
-            df_ffe['Elo_FFE'] = df_ffe[col_elo] if col_elo else 1000
-            df_ffe['Licence_FFE'] = df_ffe[col_licence] if col_licence else "Inconnue"
+            df_ffe['Elo_FFE'] = df_ffe[col_elo] if col_elo else 0
+            df_ffe['Licence_FFE'] = df_ffe[col_licence] if col_licence else "Non croisé"
             
             return df_ffe[['Cle_Forte', 'Cle_Souple', 'Elo_FFE', 'Licence_FFE']]
     except: return pd.DataFrame()
@@ -423,11 +432,11 @@ if st.sidebar.button("🔄 Lancer la Synchronisation"):
                             df_base.loc[manquants, 'Elo_FFE'] = df_base_m['Elo_FFE'].values
                             df_base.loc[manquants, 'Licence_FFE'] = df_base_m['Licence_FFE'].values
 
-                        df_base['Elo_FFE'] = df_base['Elo_FFE'].fillna(1000).astype(int)
+                        df_base['Elo_FFE'] = df_base['Elo_FFE'].fillna(0).astype(int)
                         df_base['Licence_FFE'] = df_base['Licence_FFE'].fillna("Non croisé")
                         df_base = df_base.drop(columns=['Cle_Forte', 'Cle_Souple', 'Nom_Norm', 'Prenom_Norm', 'Annee_HA'])
                     else:
-                        df_base['Elo_FFE'], df_base['Licence_FFE'] = 1000, "Non croisé"
+                        df_base['Elo_FFE'], df_base['Licence_FFE'] = 0, "Non croisé"
 
                     for _, row in df_base.iterrows():
                         identite = row['Identité']
@@ -479,27 +488,52 @@ else:
                 st.write(f"📞 **Contact :** {tel} | 🚨 **Sortie :** {s_actuelle} | 🏫 **Campagne :** {contact.get('Campagne', '-')}")
             st.markdown('</div>', unsafe_allow_html=True)
 
-            col_ad1, col_ad2, col_ad3, col_ad4 = st.columns(4)
+            col_ad1, col_ad2 = st.columns(2)
             with col_ad1: filtre_camp_admin = st.multiselect("Campagnes :", options=df["Campagne"].unique(), default=df["Campagne"].unique())
             with col_ad2: filtre_type_admin = st.multiselect("Types :", options=df["Type"].unique(), default=df["Type"].unique())
-            with col_ad3: sans_licence = st.checkbox("🚨 Afficher UNIQUEMENT les sans-licence", value=False)
-            with col_ad4: filtre_allergie = st.checkbox("🤧 Alerte Allergies / Médical", value=False)
+            
+            # --- LES 4 FILTRES RAPIDES PUISSANTS ---
+            st.markdown("##### ⚡ Filtres d'Action Rapide")
+            c_f1, c_f2, c_f3, c_f4 = st.columns(4)
+            with c_f1: filtre_licence = st.checkbox("🚫 Sans Licence")
+            with c_f2: filtre_allergie = st.checkbox("🤧 Allergies / Médical")
+            with c_f3: filtre_sortie = st.checkbox("🚶 Sorties Autorisées (OUI)")
+            with c_f4: filtre_carte = st.checkbox("🎟️ Carte Cassis/Carnoux Manquante")
                 
             df_admin = df[(df["Campagne"].isin(filtre_camp_admin)) & (df["Type"].isin(filtre_type_admin))].copy()
             
+            # Application des filtres magiques
+            if filtre_licence and "Licence_FFE" in df_admin.columns: 
+                df_admin = df_admin[df_admin["Licence_FFE"] == "Non croisé"]
+                
             if filtre_allergie and "Allergies / Médical" in df_admin.columns:
                 mots_sains = ["non", "ras", "rien", "néant", "neant", "aucun", "aucune", "-"]
                 df_admin = df_admin[(df_admin["Allergies / Médical"] != "") & (~df_admin["Allergies / Médical"].str.lower().isin(mots_sains))]
                 
-            if sans_licence and "Licence_FFE" in df_admin.columns: df_admin = df_admin[df_admin["Licence_FFE"] == "Non croisé"]
+            if filtre_sortie:
+                # On lit la donnée depuis les modifications manuelles de la DB
+                df_admin = df_admin[df_admin.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Identité'], r['Sortie Seul']) == "✅ OUI", axis=1)]
+                
+            if filtre_carte:
+                def is_carte_manquante(row):
+                    identite = row["Identité"]
+                    camp = str(row.get("Campagne", "")).lower()
+                    ville = str(row.get("Dans quel ville sera votre créneaux principale", "")).lower()
+                    besoin_cassis = "cassis" in camp or "cassis" in ville
+                    besoin_carnoux = "carnoux" in camp or "carnoux" in ville
+                    if besoin_cassis and not st.session_state['db']['cartes_membres'].get(identite, {}).get("Cassis", False): return True
+                    if besoin_carnoux and not st.session_state['db']['cartes_membres'].get(identite, {}).get("Carnoux", False): return True
+                    return False
+                df_admin = df_admin[df_admin.apply(is_carte_manquante, axis=1)]
 
             df_admin['Elo Crevette 🦐'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['elos_crevette'].get(x, 400))
             df_admin['Promo Validée ✅'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['validations_promo'].get(x, False))
             df_admin['Sortie Seul'] = df_admin.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Identité'], r['Sortie Seul']), axis=1)
             
+            # --- COLONNE LICENCE EN PREMIER ---
             colonnes_prioritaires = [
-                "Promo Validée ✅", "Sortie Seul", "Code Promo", "Allergies / Médical", 
-                "Montant Payé", "Formule", "Licence_FFE", "Campagne",
+                "Licence_FFE", "Promo Validée ✅", "Sortie Seul", "Code Promo", "Allergies / Médical", 
+                "Montant Payé", "Formule", "Campagne",
                 "Nom et prénom du responsable légal", "N° Portable", "N° Portable 2 (en cas d'urgence)", 
                 "EMail", "Adresse", "Ville", "Classe", "Date de naissance", "Taille du t-shirt", 
                 "Dans quel ville sera votre créneaux principale",
@@ -580,18 +614,15 @@ else:
                     colonnes_ecole = [c for c in colonnes_ecole if c in df_ec_display.columns]
                     st.dataframe(df_ec_display[colonnes_ecole], use_container_width=True)
 
-                    # --- EXPORT POUR DIRECTEURS / PROFS ---
                     st.markdown("---")
                     st.markdown("#### 📥 Exporter cette liste")
                     col_dl1, col_dl2 = st.columns(2)
                     
                     nom_fich = f"Liste_{ecole_choisie}_{formule_choisie}".replace(" ", "_").replace("/", "-")
                     
-                    # CSV
                     csv_data = df_ec_display[colonnes_ecole].to_csv(index=True).encode('utf-8')
                     col_dl1.download_button(label="📄 Exporter en CSV", data=csv_data, file_name=f"{nom_fich}.csv", mime="text/csv")
                     
-                    # EXCEL
                     try:
                         buffer = io.BytesIO()
                         with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
@@ -636,7 +667,7 @@ else:
 
     elif module_choisi == "♟️ Module Entraîneur":
         st.subheader("♟️ Espace Entraîneur")
-        tab_appel, tab_tournoi, tab_classement, tab_affectations = st.tabs(["📋 Faire l'Appel", "⚔️ Tournoi & Elo", "🏆 Classement Elo Crevette", "⚙️ Affecter Élèves"])
+        tab_appel, tab_tournoi, tab_classement, tab_affectations = st.tabs(["📋 Faire l'Appel", "⚔️ Tournoi & Elo", "🏆 Classement", "⚙️ Affecter Élèves"])
 
         with tab_affectations:
             st.markdown("### ⚙️ Création Manuelle des listes de Créneaux")
@@ -699,7 +730,6 @@ else:
                     sauvegarder_base(st.session_state['db'])
                     st.success("Appel enregistré !")
 
-                # --- EXPORT DE LA LISTE D'APPEL ---
                 st.markdown("---")
                 st.markdown("#### 📥 Exporter la liste d'appel")
                 col_ap1, col_ap2 = st.columns(2)
@@ -726,7 +756,7 @@ else:
                         col_ap2.info("⚠️ L'export Excel nécessite le module 'openpyxl' ou 'xlsxwriter'. Utilisez le CSV.")
 
         with tab_tournoi:
-            st.markdown("### ⚔️ Tournoi Suisse & Elo Crevette 🦐")
+            st.markdown("### ⚔️ Tournoi Suisse & Elos")
             creneaux_remplis = [k for k, v in st.session_state['db']['affectations_creneaux'].items() if len(v) > 0]
             if not creneaux_remplis: st.info("Aucun créneau disponible pour lancer un tournoi.")
             else:
@@ -736,6 +766,14 @@ else:
                 st.markdown("**Retirez les élèves absents pour ne pas les apparier :**")
                 joueurs_presents = st.multiselect("", options=joueurs_inscrits, default=joueurs_inscrits)
                 
+                # --- PRÉPARATION DES ELOS ACTIFS POUR LE TOURNOI ---
+                elos_actifs = {}
+                types_elos = {}
+                for j in joueurs_presents:
+                    e_val, e_type = get_elo_actif(j, df, st.session_state['db'])
+                    elos_actifs[j] = e_val
+                    types_elos[j] = e_type
+
                 if 'scores_tournoi' not in st.session_state or st.session_state.get('tournoi_en_cours') != creneau_tournoi:
                     st.session_state['scores_tournoi'] = {}
                     st.session_state['historique_rencontres'] = set()
@@ -760,8 +798,9 @@ else:
                 st.markdown("---")
                 if st.button("🎲 Générer la Ronde"):
                     scores_actifs = {j: st.session_state['scores_tournoi'][j] for j in joueurs_presents}
+                    # Le moteur suisse utilise maintenant les vrais Elos (FIDE ou Crevette)
                     pairs, exempt, st.session_state['historique_rencontres'] = generer_appariements_suisses(
-                        scores_actifs, st.session_state['db']['elos_crevette'], st.session_state['historique_rencontres']
+                        scores_actifs, elos_actifs, st.session_state['historique_rencontres']
                     )
                     st.session_state['appariements_ronde'], st.session_state['exempt_ronde'] = pairs, exempt
 
@@ -769,72 +808,84 @@ else:
                     st.subheader(f"♟️ Matchs — Ronde {st.session_state['ronde_actuelle']}")
                     resultats_saisis = []
                     for i, (j1, j2) in enumerate(st.session_state['appariements_ronde'], 1):
-                        elo1 = st.session_state['db']['elos_crevette'].get(j1, 400)
-                        elo2 = st.session_state['db']['elos_crevette'].get(j2, 400)
+                        elo1, t1 = elos_actifs[j1], types_elos[j1]
+                        elo2, t2 = elos_actifs[j2], types_elos[j2]
+                        
+                        sym1 = "⚡" if "FIDE" in t1 else "🦐"
+                        sym2 = "⚡" if "FIDE" in t2 else "🦐"
+                        
                         c_ech, c_res = st.columns([3, 2])
-                        c_ech.markdown(f"**Échiquier {i} :** ⚪ **{j1}** ({elo1}🦐)  🆚  ⚫ **{j2}** ({elo2}🦐)")
+                        c_ech.markdown(f"**Échiquier {i} :** ⚪ **{j1}** ({elo1} {sym1})  🆚  ⚫ **{j2}** ({elo2} {sym2})")
                         res = c_res.selectbox(f"Résultat", ["Sélectionner...", "1 - 0 (Blancs)", "0 - 1 (Noirs)", "0.5 - 0.5 (Nulle)"], key=f"res_{i}", label_visibility="collapsed")
                         resultats_saisis.append((j1, j2, res))
-                    if st.session_state.get('exempt_ronde'): st.warning(f"👑 **Exempt (1 pt) :** {st.session_state['exempt_ronde']}")
+                        
+                    if st.session_state.get('exempt_ronde'): 
+                        j_ex = st.session_state['exempt_ronde']
+                        st.warning(f"👑 **Exempt (1 pt) :** {j_ex} ({elos_actifs[j_ex]} {types_elos[j_ex][:2]})")
 
                     st.markdown("---")
-                    if st.button("💾 Valider les résultats et sauvegarder les Elo Crevette"):
+                    if st.button("💾 Valider les résultats"):
                         if any(r[2] == "Sélectionner..." for r in resultats_saisis): st.error("⚠️ Saisissez tous les résultats.")
                         else:
                             for j1, j2, res in resultats_saisis:
-                                elo1 = st.session_state['db']['elos_crevette'].get(j1, 400)
-                                elo2 = st.session_state['db']['elos_crevette'].get(j2, 400)
+                                elo1 = elos_actifs[j1]
+                                elo2 = elos_actifs[j2]
+                                
                                 if res == "1 - 0 (Blancs)":
                                     st.session_state['scores_tournoi'][j1] += 1.0
-                                    st.session_state['db']['elos_crevette'][j1] = calculer_nouveau_elo(elo1, elo2, 1.0)
-                                    st.session_state['db']['elos_crevette'][j2] = calculer_nouveau_elo(elo2, elo1, 0.0)
+                                    new_e1 = calculer_nouveau_elo(elo1, elo2, 1.0)
+                                    new_e2 = calculer_nouveau_elo(elo2, elo1, 0.0)
                                 elif res == "0 - 1 (Noirs)":
                                     st.session_state['scores_tournoi'][j2] += 1.0
-                                    st.session_state['db']['elos_crevette'][j1] = calculer_nouveau_elo(elo1, elo2, 0.0)
-                                    st.session_state['db']['elos_crevette'][j2] = calculer_nouveau_elo(elo2, elo1, 1.0)
+                                    new_e1 = calculer_nouveau_elo(elo1, elo2, 0.0)
+                                    new_e2 = calculer_nouveau_elo(elo2, elo1, 1.0)
                                 else:
                                     st.session_state['scores_tournoi'][j1] += 0.5
                                     st.session_state['scores_tournoi'][j2] += 0.5
-                                    st.session_state['db']['elos_crevette'][j1] = calculer_nouveau_elo(elo1, elo2, 0.5)
-                                    st.session_state['db']['elos_crevette'][j2] = calculer_nouveau_elo(elo2, elo1, 0.5)
+                                    new_e1 = calculer_nouveau_elo(elo1, elo2, 0.5)
+                                    new_e2 = calculer_nouveau_elo(elo2, elo1, 0.5)
+                                    
+                                # On met à jour uniquement si c'est un joueur Crevette
+                                if "Crevette" in types_elos[j1]: st.session_state['db']['elos_crevette'][j1] = new_e1
+                                if "Crevette" in types_elos[j2]: st.session_state['db']['elos_crevette'][j2] = new_e2
 
                             if st.session_state.get('exempt_ronde'): st.session_state['scores_tournoi'][st.session_state['exempt_ronde']] += 1.0
                             sauvegarder_base(st.session_state['db'])
                             st.session_state['ronde_actuelle'] += 1
                             st.session_state['appariements_ronde'] = []
-                            st.success("Résultats et Elos Crevette sauvegardés !")
+                            st.success("Résultats et Elos sauvegardés !")
                             st.rerun()
                             
         with tab_classement:
-            st.markdown("### 🏆 Classement Général Elo Crevette 🦐")
+            st.markdown("### 🏆 Classement Général (FIDE & Crevette)")
             
             creneaux_remplis_classement = [k for k, v in st.session_state['db']['affectations_creneaux'].items() if len(v) > 0]
             filtre_c = st.selectbox("Filtrer par liste / créneau :", ["Tous les élèves"] + sorted(creneaux_remplis_classement))
             
             if filtre_c == "Tous les élèves":
-                joueurs_a_afficher = list(st.session_state['db']['elos_crevette'].keys())
+                joueurs_a_afficher = list(df["Identité"].unique())
             else:
                 joueurs_a_afficher = list(set(st.session_state['db']['affectations_creneaux'][filtre_c]))
             
             data_classement = []
             for j in joueurs_a_afficher:
-                elo = st.session_state['db']['elos_crevette'].get(j, 400)
-                data_classement.append({"Élève": j, "Elo Crevette 🦐": elo})
+                e_val, e_type = get_elo_actif(j, df, st.session_state['db'])
+                data_classement.append({"Élève": j, "Catégorie": e_type, "Elo ⚡🦐": e_val})
                 
             if data_classement:
-                df_classement = pd.DataFrame(data_classement).sort_values(by="Elo Crevette 🦐", ascending=False).reset_index(drop=True)
+                df_classement = pd.DataFrame(data_classement).sort_values(by="Elo ⚡🦐", ascending=False).reset_index(drop=True)
                 df_classement.index += 1
                 
-                max_elo = max(1000, df_classement["Elo Crevette 🦐"].max())
+                max_elo = max(1000, df_classement["Elo ⚡🦐"].max())
                 
                 st.dataframe(
                     df_classement,
                     use_container_width=True,
                     column_config={
-                        "Elo Crevette 🦐": st.column_config.ProgressColumn(
-                            "Niveau de puissance 🦐",
+                        "Elo ⚡🦐": st.column_config.ProgressColumn(
+                            "Niveau de puissance",
                             help="Progression actuelle",
-                            format="%d 🦐",
+                            format="%d",
                             min_value=100,
                             max_value=int(max_elo)
                         )
