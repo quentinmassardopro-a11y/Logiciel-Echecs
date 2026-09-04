@@ -71,8 +71,10 @@ if not st.session_state["authentifie"]:
                 st.error("Mot de passe incorrect.")
     st.stop()
 
+# --- FICHIERS DE SAUVEGARDE PERMANENTS ---
 DB_FILE = "base_calanques.json"
 FFE_LOCAL_FILE = "base_ffe_locale.csv"
+ADHERENTS_FILE = "base_adherents.csv"
 
 def charger_base():
     default_db = {
@@ -95,8 +97,22 @@ def sauvegarder_base(db):
     with open(DB_FILE, "w", encoding="utf-8") as f:
         json.dump(db, f, ensure_ascii=False, indent=4)
 
+def charger_adherents():
+    if os.path.exists(ADHERENTS_FILE):
+        return pd.read_csv(ADHERENTS_FILE)
+    return pd.DataFrame()
+
+def sauvegarder_adherents(df):
+    df.to_csv(ADHERENTS_FILE, index=False)
+
 if 'db' not in st.session_state: 
     st.session_state['db'] = charger_base()
+    
+# DÉMARRAGE INSTANTANÉ (Chargement de la mémoire sans API)
+if 'df_adherents' not in st.session_state:
+    df_loaded = charger_adherents()
+    if not df_loaded.empty:
+        st.session_state['df_adherents'] = df_loaded
 
 for cle in ["validations_promo", "sorties_manuelles", "cartes_membres", "eleves_deja_affectes"]:
     if cle not in st.session_state['db']:
@@ -120,7 +136,6 @@ def normaliser_nom(nom):
     nom = str(nom).lower().strip().replace("*", "")
     return ''.join(c for c in unicodedata.normalize('NFD', nom) if unicodedata.category(c) != 'Mn')
 
-# --- ESTIMATION DU SEXE POUR LA FFE ---
 def estimer_sexe(prenom):
     if not prenom: return "M"
     p = normaliser_nom(str(prenom).split("-")[0].split()[0])
@@ -149,7 +164,6 @@ def estimer_sexe(prenom):
                       "yuri", "tony", "johny", "jonny", "dany", "sami", "fadi"]
         if p in hommes_i_y: return "M"
         return "F"
-        
     return "M"
 
 def generer_appariements_suisses(joueurs_scores, elos_dict, historique_rencontres):
@@ -292,7 +306,6 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
                 "Nom payeur": payer.get("lastName", "").replace("*", "").strip(),
                 "Prénom payeur": payer.get("firstName", "").replace("*", "").strip(),
                 "Email payeur": email_def,
-                
                 "N° Portable": "",
                 "N° Portable 2 (en cas d'urgence)": "",
                 "EMail": email_def,
@@ -427,7 +440,7 @@ client_secret = st.sidebar.text_input("Client Secret", value=saved_secret, type=
 
 if st.sidebar.button("🔄 Lancer la Synchronisation"):
     if client_id and client_secret:
-        with st.spinner("Téléchargement des données..."):
+        with st.spinner("Recherche de nouveaux inscrits..."):
             token = get_helloasso_token(client_id, client_secret)
             if token:
                 campagnes = [
@@ -442,61 +455,73 @@ if st.sidebar.button("🔄 Lancer la Synchronisation"):
                 all_data.extend(st.session_state['db']['eleves_essai'])
                 
                 if all_data:
-                    df_base = pd.DataFrame(all_data)
+                    df_new_fetch = pd.DataFrame(all_data)
                     
-                    if 'df_ffe' in st.session_state and not st.session_state['df_ffe'].empty:
-                        df_base['Nom_Norm'] = df_base['Nom'].apply(normaliser_nom)
-                        df_base['Prenom_Norm'] = df_base['Prénom'].apply(normaliser_nom)
-                        df_base['Annee_HA'] = df_base['Date de naissance'].astype(str).str.extract(r'(\d{4})')[0].fillna("")
-                        
-                        df_base['Cle_Forte'] = df_base['Nom_Norm'] + df_base['Prenom_Norm'] + df_base['Annee_HA']
-                        df_base['Cle_Souple'] = df_base['Nom_Norm'] + df_base['Prenom_Norm']
-                        
-                        df_ffe_strict = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Forte'])
-                        df_ffe_souple = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Souple'])
-                        
-                        # PATCH CLES EN DOUBLE 
-                        df_base = df_base.drop(columns=['Elo_FFE', 'Licence_FFE'], errors='ignore')
-                        
-                        df_base = pd.merge(df_base, df_ffe_strict[['Cle_Forte', 'Elo_FFE', 'Licence_FFE']], on='Cle_Forte', how='left')
-                        
-                        manquants = df_base['Licence_FFE'].isna()
-                        if manquants.any():
-                            df_base_m = df_base[manquants].drop(columns=['Elo_FFE', 'Licence_FFE'])
-                            df_base_m = pd.merge(df_base_m, df_ffe_souple[['Cle_Souple', 'Elo_FFE', 'Licence_FFE']], on='Cle_Souple', how='left')
-                            df_base.loc[manquants, 'Elo_FFE'] = df_base_m['Elo_FFE'].values
-                            df_base.loc[manquants, 'Licence_FFE'] = df_base_m['Licence_FFE'].values
-
-                        df_base['Elo_FFE'] = df_base['Elo_FFE'].fillna(0).astype(int)
-                        df_base['Licence_FFE'] = df_base['Licence_FFE'].fillna("Non croisé")
-                        df_base = df_base.drop(columns=['Cle_Forte', 'Cle_Souple', 'Nom_Norm', 'Prenom_Norm', 'Annee_HA'])
+                    # --- FILTRAGE INTELLIGENT DES NOUVEAUX ---
+                    if 'df_adherents' in st.session_state and not st.session_state['df_adherents'].empty:
+                        df_local = st.session_state['df_adherents']
+                        nouveaux = df_new_fetch[~df_new_fetch['Identité'].isin(df_local['Identité'])].copy()
                     else:
-                        if 'Elo_FFE' not in df_base.columns: df_base['Elo_FFE'] = 0
-                        if 'Licence_FFE' not in df_base.columns: df_base['Licence_FFE'] = "Non croisé"
+                        df_local = pd.DataFrame()
+                        nouveaux = df_new_fetch.copy()
 
-                    for _, row in df_base.iterrows():
-                        identite = row['Identité']
-                        if identite not in st.session_state['db']['elos_crevette']:
-                            st.session_state['db']['elos_crevette'][identite] = 400
-                        
-                        if identite not in st.session_state['db'].get('eleves_deja_affectes', []):
-                            creneaux_autos = affectations_automatiques(row)
-                            for c_auto in creneaux_autos:
-                                if c_auto not in st.session_state['db']['affectations_creneaux']:
-                                    st.session_state['db']['affectations_creneaux'][c_auto] = []
-                                if identite not in st.session_state['db']['affectations_creneaux'][c_auto]:
-                                    st.session_state['db']['affectations_creneaux'][c_auto].append(identite)
+                    if not nouveaux.empty:
+                        if 'df_ffe' in st.session_state and not st.session_state['df_ffe'].empty:
+                            nouveaux['Nom_Norm'] = nouveaux['Nom'].apply(normaliser_nom)
+                            nouveaux['Prenom_Norm'] = nouveaux['Prénom'].apply(normaliser_nom)
+                            nouveaux['Annee_HA'] = nouveaux['Date de naissance'].astype(str).str.extract(r'(\d{4})')[0].fillna("")
                             
-                            st.session_state['db']['eleves_deja_affectes'].append(identite)
+                            nouveaux['Cle_Forte'] = nouveaux['Nom_Norm'] + nouveaux['Prenom_Norm'] + nouveaux['Annee_HA']
+                            nouveaux['Cle_Souple'] = nouveaux['Nom_Norm'] + nouveaux['Prenom_Norm']
+                            
+                            df_ffe_strict = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Forte'])
+                            df_ffe_souple = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Souple'])
+                            
+                            # Patch pour éviter la duplication des colonnes FFE
+                            nouveaux = nouveaux.drop(columns=['Elo_FFE', 'Licence_FFE'], errors='ignore')
+                            nouveaux = pd.merge(nouveaux, df_ffe_strict[['Cle_Forte', 'Elo_FFE', 'Licence_FFE']], on='Cle_Forte', how='left')
+                            
+                            manquants = nouveaux['Licence_FFE'].isna()
+                            if manquants.any():
+                                df_base_m = nouveaux[manquants].drop(columns=['Elo_FFE', 'Licence_FFE'])
+                                df_base_m = pd.merge(df_base_m, df_ffe_souple[['Cle_Souple', 'Elo_FFE', 'Licence_FFE']], on='Cle_Souple', how='left')
+                                nouveaux.loc[manquants, 'Elo_FFE'] = df_base_m['Elo_FFE'].values
+                                nouveaux.loc[manquants, 'Licence_FFE'] = df_base_m['Licence_FFE'].values
+
+                            nouveaux['Elo_FFE'] = nouveaux['Elo_FFE'].fillna(0).astype(int)
+                            nouveaux['Licence_FFE'] = nouveaux['Licence_FFE'].fillna("Non croisé")
+                            nouveaux = nouveaux.drop(columns=['Cle_Forte', 'Cle_Souple', 'Nom_Norm', 'Prenom_Norm', 'Annee_HA'])
+                        else:
+                            nouveaux['Elo_FFE'] = 0
+                            nouveaux['Licence_FFE'] = "Non croisé"
+
+                        for _, row in nouveaux.iterrows():
+                            identite = row['Identité']
+                            if identite not in st.session_state['db']['elos_crevette']:
+                                st.session_state['db']['elos_crevette'][identite] = 400
+                            
+                            if identite not in st.session_state['db'].get('eleves_deja_affectes', []):
+                                creneaux_autos = affectations_automatiques(row)
+                                for c_auto in creneaux_autos:
+                                    if c_auto not in st.session_state['db']['affectations_creneaux']:
+                                        st.session_state['db']['affectations_creneaux'][c_auto] = []
+                                    if identite not in st.session_state['db']['affectations_creneaux'][c_auto]:
+                                        st.session_state['db']['affectations_creneaux'][c_auto].append(identite)
                                 
-                    sauvegarder_base(st.session_state['db'])
-                    st.session_state['df_adherents'] = df_base
-                    st.sidebar.success(f"Base à jour ! {len(df_base)} dossiers actifs.")
+                                st.session_state['db']['eleves_deja_affectes'].append(identite)
+                                    
+                        df_final = pd.concat([df_local, nouveaux], ignore_index=True)
+                        st.session_state['df_adherents'] = df_final
+                        sauvegarder_adherents(df_final)
+                        sauvegarder_base(st.session_state['db'])
+                        st.sidebar.success(f"Synchronisation réussie ! {len(nouveaux)} nouveaux ajoutés.")
+                    else:
+                        st.sidebar.info("Aucun nouvel inscrit détecté. Modifications préservées.")
                 else: st.sidebar.warning("Aucune donnée trouvée.")
             else: st.sidebar.error("Erreur API HelloAsso.")
 
-if 'df_adherents' not in st.session_state:
-    st.info("👈 Cliquez sur **Lancer la Synchronisation** dans le menu de gauche pour démarrer.")
+if 'df_adherents' not in st.session_state or st.session_state['df_adherents'].empty:
+    st.info("👋 **Bienvenue !** Cliquez sur **Lancer la Synchronisation** pour importer vos premiers élèves.")
 else:
     df = st.session_state['df_adherents']
     date_jour = datetime.now().strftime("%d/%m/%Y")
@@ -564,7 +589,7 @@ else:
             df_admin['Sortie Seul'] = df_admin.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Identité'], r['Sortie Seul']), axis=1)
             
             colonnes_prioritaires = [
-                "Licence_FFE", "Promo Validée ✅", "Sortie Seul", "Code Promo", "Allergies / Médical", 
+                "Nom", "Prénom", "Licence_FFE", "Promo Validée ✅", "Sortie Seul", "Code Promo", "Allergies / Médical", 
                 "Montant Payé", "Formule", "Campagne",
                 "Nom et prénom du responsable légal", "N° Portable", "N° Portable 2 (en cas d'urgence)", 
                 "EMail", "Adresse", "Ville", "Classe", "Date de naissance", "Taille du t-shirt", 
@@ -576,43 +601,54 @@ else:
             ]
             
             colonnes_presentes = [c for c in colonnes_prioritaires if c in df_admin.columns]
-            colonnes_a_exclure = ["Identité", "Nom", "Prénom", "Type", "Elo_FFE", "Nom payeur", "Prénom payeur", "Email payeur"]
+            colonnes_a_exclure = ["Identité", "Type", "Elo_FFE", "Nom payeur", "Prénom payeur", "Email payeur"]
             autres_colonnes = [c for c in df_admin.columns if c not in colonnes_presentes and c not in colonnes_a_exclure]
             
             colonnes_finales = colonnes_presentes + autres_colonnes + ["Elo Crevette 🦐", "Identité"]
             colonnes_finales = list(dict.fromkeys(colonnes_finales))
             
+            # --- GEL DOUBLE : Création d'un Index factice ---
             df_admin.insert(0, "👤 Élève (Fige)", df_admin["Nom"] + " " + df_admin["Prénom"])
             df_display = df_admin.set_index("👤 Élève (Fige)")
             
-            cols_to_use = [c for c in colonnes_finales if c in df_display.columns and c not in ["Nom", "Prénom"]]
+            # On inclut "Nom" et "Prénom" dans la liste des colonnes modifiables !
+            cols_to_use = [c for c in colonnes_finales if c in df_display.columns]
             
             st.metric("Dossiers affichés", len(df_display))
             
+            # --- MODIFICATION SAUVEGARDÉE SUR TOUT LE TABLEAU ---
             edited_df = st.data_editor(
                 df_display[cols_to_use],
                 use_container_width=True,
                 column_config={
                     "Identité": None,
-                    "Promo Validée ✅": st.column_config.CheckboxColumn("Promo Validée ✅", default=False),
+                    "Promo Validée ✅": st.column_config.CheckboxColumn("Promo Validée ✅"),
                     "Sortie Seul": st.column_config.SelectboxColumn("Sortie Seul", options=["✅ OUI", "❌ NON", "N/A (École)", "-"])
-                },
-                disabled=[c for c in cols_to_use if c not in ["Promo Validée ✅", "Sortie Seul"]]
+                }
             )
             
-            changements_faits = False
-            for index_eleve, row in edited_df.iterrows():
-                identite_eleve = row["Identité"]
-                
-                if st.session_state['db']['validations_promo'].get(identite_eleve, False) != row["Promo Validée ✅"]:
-                    st.session_state['db']['validations_promo'][identite_eleve] = row["Promo Validée ✅"]
-                    changements_faits = True
+            if not edited_df.equals(df_display[cols_to_use]):
+                differences = edited_df.compare(df_display[cols_to_use])
+                for index_fige, row_diff in differences.iterrows():
+                    identite = df_display.loc[index_fige, "Identité"]
+                    idx_main = st.session_state['df_adherents'][st.session_state['df_adherents']['Identité'] == identite].index[0]
                     
-                if st.session_state['db']['sorties_manuelles'].get(identite_eleve) != row["Sortie Seul"]:
-                    st.session_state['db']['sorties_manuelles'][identite_eleve] = row["Sortie Seul"]
-                    changements_faits = True
-                    
-            if changements_faits: sauvegarder_base(st.session_state['db'])
+                    for col in differences.columns.levels[0]:
+                        new_val = edited_df.loc[index_fige, col]
+                        if pd.isna(new_val): new_val = ""
+                        
+                        if col == "Promo Validée ✅":
+                            st.session_state['db']['validations_promo'][identite] = new_val
+                        elif col == "Sortie Seul":
+                            st.session_state['db']['sorties_manuelles'][identite] = new_val
+                        elif col == "Elo Crevette 🦐":
+                            st.session_state['db']['elos_crevette'][identite] = int(new_val) if str(new_val).isdigit() else 400
+                        else:
+                            st.session_state['df_adherents'].at[idx_main, col] = new_val
+                            
+                sauvegarder_base(st.session_state['db'])
+                sauvegarder_adherents(st.session_state['df_adherents'])
+                st.rerun()
 
             # --- EXPORTS GLOBAUX & FFE ---
             st.markdown("---")
@@ -637,7 +673,7 @@ else:
                 except:
                     pass
 
-            # Fichier spécial FFE basé strict sur le Modele-Import
+            # Fichier spécial FFE
             df_ffe_export = pd.DataFrame()
             df_ffe_export['FFE Identifiant'] = ""
             df_ffe_export['Nom'] = df_admin['Nom']
