@@ -125,7 +125,6 @@ def estimer_sexe(prenom):
     if not prenom: return "M"
     p = normaliser_nom(str(prenom).split("-")[0].split()[0])
     
-    # Prénoms masculins classiques finissant par E ou A
     hommes_exceptions = ["baptiste", "alexandre", "pierre", "guillaume", "antoine", "maxime", 
                 "stephane", "rene", "jules", "charles", "georges", "luc", "emile", 
                 "philippe", "cyrille", "auguste", "aime", "gilles", "patrice", 
@@ -135,7 +134,6 @@ def estimer_sexe(prenom):
                 "baudouin", "come", "ulysse", "gaspard", "theodore", "zacharie",
                 "claude", "dominique"]
                 
-    # Prénoms féminins ne finissant pas par une voyelle classique
     femmes_exceptions = ["manon", "carmen", "iris", "margaux", "margot", "maud", 
                        "astrid", "sarah", "esther", "fleur", "marion", "lison", 
                        "ninon", "suzon", "lou", "alison", "myriam", "sharon", "eden", 
@@ -254,8 +252,6 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
         items = r.json().get("data", [])
         rows = []
         for item in items:
-            
-            # --- FILTRE DES DONS ---
             if item.get("type") == "Donation":
                 continue
             nom_tarif = str(item.get("name", "")).strip()
@@ -459,6 +455,9 @@ if st.sidebar.button("🔄 Lancer la Synchronisation"):
                         df_ffe_strict = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Forte'])
                         df_ffe_souple = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Souple'])
                         
+                        # PATCH CLES EN DOUBLE 
+                        df_base = df_base.drop(columns=['Elo_FFE', 'Licence_FFE'], errors='ignore')
+                        
                         df_base = pd.merge(df_base, df_ffe_strict[['Cle_Forte', 'Elo_FFE', 'Licence_FFE']], on='Cle_Forte', how='left')
                         
                         manquants = df_base['Licence_FFE'].isna()
@@ -472,7 +471,8 @@ if st.sidebar.button("🔄 Lancer la Synchronisation"):
                         df_base['Licence_FFE'] = df_base['Licence_FFE'].fillna("Non croisé")
                         df_base = df_base.drop(columns=['Cle_Forte', 'Cle_Souple', 'Nom_Norm', 'Prenom_Norm', 'Annee_HA'])
                     else:
-                        df_base['Elo_FFE'], df_base['Licence_FFE'] = 0, "Non croisé"
+                        if 'Elo_FFE' not in df_base.columns: df_base['Elo_FFE'] = 0
+                        if 'Licence_FFE' not in df_base.columns: df_base['Licence_FFE'] = "Non croisé"
 
                     for _, row in df_base.iterrows():
                         identite = row['Identité']
@@ -491,7 +491,7 @@ if st.sidebar.button("🔄 Lancer la Synchronisation"):
                                 
                     sauvegarder_base(st.session_state['db'])
                     st.session_state['df_adherents'] = df_base
-                    st.sidebar.success(f"Base à jour ! {len(all_data)} dossiers actifs.")
+                    st.sidebar.success(f"Base à jour ! {len(df_base)} dossiers actifs.")
                 else: st.sidebar.warning("Aucune donnée trouvée.")
             else: st.sidebar.error("Erreur API HelloAsso.")
 
@@ -637,7 +637,7 @@ else:
                 except:
                     pass
 
-            # Fichier spécial FFE
+            # Fichier spécial FFE basé strict sur le Modele-Import
             df_ffe_export = pd.DataFrame()
             df_ffe_export['FFE Identifiant'] = ""
             df_ffe_export['Nom'] = df_admin['Nom']
