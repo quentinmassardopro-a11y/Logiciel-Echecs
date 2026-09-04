@@ -120,6 +120,40 @@ def normaliser_nom(nom):
     nom = str(nom).lower().strip().replace("*", "")
     return ''.join(c for c in unicodedata.normalize('NFD', nom) if unicodedata.category(c) != 'Mn')
 
+# --- ESTIMATION DU SEXE POUR LA FFE ---
+def estimer_sexe(prenom):
+    if not prenom: return "M"
+    p = normaliser_nom(str(prenom).split("-")[0].split()[0])
+    
+    # Prénoms masculins classiques finissant par E ou A
+    hommes_exceptions = ["baptiste", "alexandre", "pierre", "guillaume", "antoine", "maxime", 
+                "stephane", "rene", "jules", "charles", "georges", "luc", "emile", 
+                "philippe", "cyrille", "auguste", "aime", "gilles", "patrice", 
+                "eugene", "serge", "hippolyte", "nicolas", "theophile", "timothee", 
+                "jerome", "gregoire", "etienne", "matteo", "mathis", "louis", "sacha", 
+                "noa", "luca", "andrea", "ange", "aristide", "arsene", "barthelemy", 
+                "baudouin", "come", "ulysse", "gaspard", "theodore", "zacharie",
+                "claude", "dominique"]
+                
+    # Prénoms féminins ne finissant pas par une voyelle classique
+    femmes_exceptions = ["manon", "carmen", "iris", "margaux", "margot", "maud", 
+                       "astrid", "sarah", "esther", "fleur", "marion", "lison", 
+                       "ninon", "suzon", "lou", "alison", "myriam", "sharon", "eden", 
+                       "ines", "anais", "agnes", "charlotte", "marianne"]
+                       
+    if p in hommes_exceptions: return "M"
+    if p in femmes_exceptions: return "F"
+    if p.endswith(('a', 'e', 'ine', 'elle', 'ette', 'ie', 'ia')): return "F"
+    
+    if p.endswith(('i', 'y')):
+        hommes_i_y = ["anthony", "jeremy", "willy", "jimmy", "gregory", "remi", "henri", 
+                      "dmitri", "ali", "mehdi", "valery", "thierry", "charley", "guy", 
+                      "yuri", "tony", "johny", "jonny", "dany", "sami", "fadi"]
+        if p in hommes_i_y: return "M"
+        return "F"
+        
+    return "M"
+
 def generer_appariements_suisses(joueurs_scores, elos_dict, historique_rencontres):
     joueurs_tries = sorted(joueurs_scores.keys(), key=lambda j: (joueurs_scores[j], elos_dict.get(j, 400), random.random()), reverse=True)
     appariements, non_apparies, exempt = [], list(joueurs_tries), None
@@ -145,12 +179,10 @@ def get_elo_actif(identite, df_adherents, db):
         row = df_adherents[df_adherents["Identité"] == identite].iloc[0]
         elo_ffe = int(row.get("Elo_FFE", 0))
         licence = str(row.get("Licence_FFE", "Non croisé"))
-        
         if licence != "Non croisé" and elo_ffe > 0:
             return elo_ffe, "⚡ FFE/FIDE"
     except:
         pass
-    
     return db['elos_crevette'].get(identite, 400), "🦐 Crevette"
 
 def affectations_automatiques(row):
@@ -222,8 +254,15 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
         items = r.json().get("data", [])
         rows = []
         for item in items:
+            
+            # --- FILTRE DES DONS ---
+            if item.get("type") == "Donation":
+                continue
+            nom_tarif = str(item.get("name", "")).strip()
+            if "don " in nom_tarif.lower() or nom_tarif.lower() == "don":
+                continue
+                
             user, payer = item.get("user", {}), item.get("payer", {})
-            nom_tarif = str(item.get("name", ""))
             
             discount = item.get("discount")
             if discount and isinstance(discount, dict):
@@ -452,7 +491,7 @@ if st.sidebar.button("🔄 Lancer la Synchronisation"):
                                 
                     sauvegarder_base(st.session_state['db'])
                     st.session_state['df_adherents'] = df_base
-                    st.sidebar.success(f"Base à jour ! {len(all_data)} dossiers.")
+                    st.sidebar.success(f"Base à jour ! {len(all_data)} dossiers actifs.")
                 else: st.sidebar.warning("Aucune donnée trouvée.")
             else: st.sidebar.error("Erreur API HelloAsso.")
 
@@ -577,7 +616,7 @@ else:
 
             # --- EXPORTS GLOBAUX & FFE ---
             st.markdown("---")
-            st.markdown("#### 📥 Exports & Licences")
+            st.markdown("#### 📥 Exports & Licences FFE")
             col_ex1, col_ex2, col_ex3 = st.columns(3)
             
             nom_fich_admin = f"Administration_Club_{date_jour.replace('/', '-')}"
@@ -604,7 +643,7 @@ else:
             df_ffe_export['Nom'] = df_admin['Nom']
             df_ffe_export['Prénom'] = df_admin['Prénom']
             df_ffe_export['Date de Naissance (AAAA-MM-JJ)'] = df_admin['Date de naissance']
-            df_ffe_export['Sexe (M ou F)'] = "" # À remplir par l'admin
+            df_ffe_export['Sexe (M ou F)'] = df_admin['Prénom'].apply(estimer_sexe)
             df_ffe_export['Email'] = df_admin['EMail']
             df_ffe_export['Pays (ISO 3, FRA pour France)'] = "FRA"
             
@@ -618,7 +657,7 @@ else:
                 
             df_ffe_export['Licence (A ou B)'] = "B" 
             
-            csv_ffe = df_ffe_export.to_csv(index=False, sep=";").encode('utf-8-sig') # Séparateur point-virgule obligatoire
+            csv_ffe = df_ffe_export.to_csv(index=False, sep=";").encode('utf-8-sig')
             col_ex3.download_button(label="♟️ Fichier Prise de Licence FFE", data=csv_ffe, file_name=f"import_ffe_{date_jour.replace('/', '-')}.csv", mime="text/csv")
             
         with tab_ecoles:
