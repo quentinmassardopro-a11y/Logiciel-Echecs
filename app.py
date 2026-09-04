@@ -140,20 +140,17 @@ def generer_appariements_suisses(joueurs_scores, elos_dict, historique_rencontre
             appariements.append((j1, j2_trouve))
     return appariements, exempt, historique_rencontres
 
-# --- MOTEUR INTELLIGENT ELO (FIDE vs CREVETTE) ---
 def get_elo_actif(identite, df_adherents, db):
     try:
         row = df_adherents[df_adherents["Identité"] == identite].iloc[0]
         elo_ffe = int(row.get("Elo_FFE", 0))
         licence = str(row.get("Licence_FFE", "Non croisé"))
         
-        # S'il a une vraie licence croisée et un Elo rapide renseigné
         if licence != "Non croisé" and elo_ffe > 0:
             return elo_ffe, "⚡ FFE/FIDE"
     except:
         pass
     
-    # Sinon, il utilise le système local Elo Crevette
     return db['elos_crevette'].get(identite, 400), "🦐 Crevette"
 
 def affectations_automatiques(row):
@@ -492,7 +489,6 @@ else:
             with col_ad1: filtre_camp_admin = st.multiselect("Campagnes :", options=df["Campagne"].unique(), default=df["Campagne"].unique())
             with col_ad2: filtre_type_admin = st.multiselect("Types :", options=df["Type"].unique(), default=df["Type"].unique())
             
-            # --- LES 4 FILTRES RAPIDES PUISSANTS ---
             st.markdown("##### ⚡ Filtres d'Action Rapide")
             c_f1, c_f2, c_f3, c_f4 = st.columns(4)
             with c_f1: filtre_licence = st.checkbox("🚫 Sans Licence")
@@ -502,7 +498,6 @@ else:
                 
             df_admin = df[(df["Campagne"].isin(filtre_camp_admin)) & (df["Type"].isin(filtre_type_admin))].copy()
             
-            # Application des filtres magiques
             if filtre_licence and "Licence_FFE" in df_admin.columns: 
                 df_admin = df_admin[df_admin["Licence_FFE"] == "Non croisé"]
                 
@@ -511,7 +506,6 @@ else:
                 df_admin = df_admin[(df_admin["Allergies / Médical"] != "") & (~df_admin["Allergies / Médical"].str.lower().isin(mots_sains))]
                 
             if filtre_sortie:
-                # On lit la donnée depuis les modifications manuelles de la DB
                 df_admin = df_admin[df_admin.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Identité'], r['Sortie Seul']) == "✅ OUI", axis=1)]
                 
             if filtre_carte:
@@ -530,7 +524,6 @@ else:
             df_admin['Promo Validée ✅'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['validations_promo'].get(x, False))
             df_admin['Sortie Seul'] = df_admin.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Identité'], r['Sortie Seul']), axis=1)
             
-            # --- COLONNE LICENCE EN PREMIER ---
             colonnes_prioritaires = [
                 "Licence_FFE", "Promo Validée ✅", "Sortie Seul", "Code Promo", "Allergies / Médical", 
                 "Montant Payé", "Formule", "Campagne",
@@ -581,6 +574,52 @@ else:
                     changements_faits = True
                     
             if changements_faits: sauvegarder_base(st.session_state['db'])
+
+            # --- EXPORTS GLOBAUX & FFE ---
+            st.markdown("---")
+            st.markdown("#### 📥 Exports & Licences")
+            col_ex1, col_ex2, col_ex3 = st.columns(3)
+            
+            nom_fich_admin = f"Administration_Club_{date_jour.replace('/', '-')}"
+            csv_data_admin = df_display[cols_to_use].to_csv(index=True).encode('utf-8')
+            col_ex1.download_button(label="📄 Export Tableau (CSV)", data=csv_data_admin, file_name=f"{nom_fich_admin}.csv", mime="text/csv")
+            
+            try:
+                buffer_admin = io.BytesIO()
+                with pd.ExcelWriter(buffer_admin, engine='xlsxwriter') as writer:
+                    df_display[cols_to_use].to_excel(writer, index=True, sheet_name='Base')
+                col_ex2.download_button(label="📊 Export Tableau (Excel)", data=buffer_admin.getvalue(), file_name=f"{nom_fich_admin}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            except:
+                try:
+                    buffer_admin = io.BytesIO()
+                    with pd.ExcelWriter(buffer_admin, engine='openpyxl') as writer:
+                        df_display[cols_to_use].to_excel(writer, index=True, sheet_name='Base')
+                    col_ex2.download_button(label="📊 Export Tableau (Excel)", data=buffer_admin.getvalue(), file_name=f"{nom_fich_admin}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                except:
+                    pass
+
+            # Fichier spécial FFE
+            df_ffe_export = pd.DataFrame()
+            df_ffe_export['FFE Identifiant'] = ""
+            df_ffe_export['Nom'] = df_admin['Nom']
+            df_ffe_export['Prénom'] = df_admin['Prénom']
+            df_ffe_export['Date de Naissance (AAAA-MM-JJ)'] = df_admin['Date de naissance']
+            df_ffe_export['Sexe (M ou F)'] = "" # À remplir par l'admin
+            df_ffe_export['Email'] = df_admin['EMail']
+            df_ffe_export['Pays (ISO 3, FRA pour France)'] = "FRA"
+            
+            col_qs = 'e confirme avoir renseigné le questionnaire de santé "Sport" (mineurs) https://www.echecs.asso.fr/Actus/14098/questionnaire_mineur.pdf'
+            if col_qs in df_admin.columns:
+                df_ffe_export['Attestation Médicale (Oui/Non)'] = df_admin[col_qs].apply(
+                    lambda x: "Oui" if str(x).lower() in ['true', 'oui', 'yes', 'vrai', 'on', '1'] else "Non"
+                )
+            else:
+                df_ffe_export['Attestation Médicale (Oui/Non)'] = "Non"
+                
+            df_ffe_export['Licence (A ou B)'] = "B" 
+            
+            csv_ffe = df_ffe_export.to_csv(index=False, sep=";").encode('utf-8-sig') # Séparateur point-virgule obligatoire
+            col_ex3.download_button(label="♟️ Fichier Prise de Licence FFE", data=csv_ffe, file_name=f"import_ffe_{date_jour.replace('/', '-')}.csv", mime="text/csv")
             
         with tab_ecoles:
             st.markdown("### 🏫 Pilotage des Établissements Scolaires")
@@ -766,7 +805,6 @@ else:
                 st.markdown("**Retirez les élèves absents pour ne pas les apparier :**")
                 joueurs_presents = st.multiselect("", options=joueurs_inscrits, default=joueurs_inscrits)
                 
-                # --- PRÉPARATION DES ELOS ACTIFS POUR LE TOURNOI ---
                 elos_actifs = {}
                 types_elos = {}
                 for j in joueurs_presents:
@@ -798,7 +836,6 @@ else:
                 st.markdown("---")
                 if st.button("🎲 Générer la Ronde"):
                     scores_actifs = {j: st.session_state['scores_tournoi'][j] for j in joueurs_presents}
-                    # Le moteur suisse utilise maintenant les vrais Elos (FIDE ou Crevette)
                     pairs, exempt, st.session_state['historique_rencontres'] = generer_appariements_suisses(
                         scores_actifs, elos_actifs, st.session_state['historique_rencontres']
                     )
@@ -845,7 +882,6 @@ else:
                                     new_e1 = calculer_nouveau_elo(elo1, elo2, 0.5)
                                     new_e2 = calculer_nouveau_elo(elo2, elo1, 0.5)
                                     
-                                # On met à jour uniquement si c'est un joueur Crevette
                                 if "Crevette" in types_elos[j1]: st.session_state['db']['elos_crevette'][j1] = new_e1
                                 if "Crevette" in types_elos[j2]: st.session_state['db']['elos_crevette'][j2] = new_e2
 
