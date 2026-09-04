@@ -5,6 +5,7 @@ import random
 import unicodedata
 import json
 import os
+import io
 from datetime import datetime
 
 st.set_page_config(page_title="Académie d'Échecs des Calanques", layout="wide", page_icon="♟️")
@@ -579,6 +580,32 @@ else:
                     colonnes_ecole = [c for c in colonnes_ecole if c in df_ec_display.columns]
                     st.dataframe(df_ec_display[colonnes_ecole], use_container_width=True)
 
+                    # --- EXPORT POUR DIRECTEURS / PROFS ---
+                    st.markdown("---")
+                    st.markdown("#### 📥 Exporter cette liste")
+                    col_dl1, col_dl2 = st.columns(2)
+                    
+                    nom_fich = f"Liste_{ecole_choisie}_{formule_choisie}".replace(" ", "_").replace("/", "-")
+                    
+                    # CSV
+                    csv_data = df_ec_display[colonnes_ecole].to_csv(index=True).encode('utf-8')
+                    col_dl1.download_button(label="📄 Exporter en CSV", data=csv_data, file_name=f"{nom_fich}.csv", mime="text/csv")
+                    
+                    # EXCEL
+                    try:
+                        buffer = io.BytesIO()
+                        with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+                            df_ec_display[colonnes_ecole].to_excel(writer, index=True, sheet_name='Liste')
+                        col_dl2.download_button(label="📊 Exporter en Excel", data=buffer.getvalue(), file_name=f"{nom_fich}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                    except:
+                        try:
+                            buffer = io.BytesIO()
+                            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                                df_ec_display[colonnes_ecole].to_excel(writer, index=True, sheet_name='Liste')
+                            col_dl2.download_button(label="📊 Exporter en Excel", data=buffer.getvalue(), file_name=f"{nom_fich}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                        except:
+                            col_dl2.info("⚠️ L'export Excel nécessite le module 'openpyxl' ou 'xlsxwriter' sur le serveur. Utilisez le CSV.")
+
         with tab_cartes:
             st.markdown("### 🎟️ Suivi des Cartes de Centres (Cassis & Carnoux)")
             ville_carte = st.radio("Sélectionner la commune à vérifier :", ["Cassis (Carte Centre Culturel)", "Carnoux (Carte du Coq)"])
@@ -671,6 +698,32 @@ else:
                     st.session_state['db']['historique_appels'][date_jour][lieu_appel] = {"entraineur": entraineur_appel, "presents": liste_presents}
                     sauvegarder_base(st.session_state['db'])
                     st.success("Appel enregistré !")
+
+                # --- EXPORT DE LA LISTE D'APPEL ---
+                st.markdown("---")
+                st.markdown("#### 📥 Exporter la liste d'appel")
+                col_ap1, col_ap2 = st.columns(2)
+                nom_fich_ap = f"Appel_{lieu_appel}".replace(" ", "_").replace("/", "-")
+                
+                df_appel_export = df_groupe[["Nom", "Prénom", "N° Portable", "N° Portable 2 (en cas d'urgence)", "Campagne"]].copy()
+                df_appel_export['Sortie Seul'] = df_appel_export.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Nom']+" "+r['Prénom'], "-"), axis=1)
+                
+                csv_ap = df_appel_export.to_csv(index=False).encode('utf-8')
+                col_ap1.download_button(label="📄 Exporter en CSV", data=csv_ap, file_name=f"{nom_fich_ap}.csv", mime="text/csv")
+                
+                try:
+                    buffer_ap = io.BytesIO()
+                    with pd.ExcelWriter(buffer_ap, engine='xlsxwriter') as writer:
+                        df_appel_export.to_excel(writer, index=False, sheet_name='Appel')
+                    col_ap2.download_button(label="📊 Exporter en Excel", data=buffer_ap.getvalue(), file_name=f"{nom_fich_ap}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                except:
+                    try:
+                        buffer_ap = io.BytesIO()
+                        with pd.ExcelWriter(buffer_ap, engine='openpyxl') as writer:
+                            df_appel_export.to_excel(writer, index=False, sheet_name='Appel')
+                        col_ap2.download_button(label="📊 Exporter en Excel", data=buffer_ap.getvalue(), file_name=f"{nom_fich_ap}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                    except:
+                        col_ap2.info("⚠️ L'export Excel nécessite le module 'openpyxl' ou 'xlsxwriter'. Utilisez le CSV.")
 
         with tab_tournoi:
             st.markdown("### ⚔️ Tournoi Suisse & Elo Crevette 🦐")
