@@ -1,2 +1,7 @@
+streamlit
 pandas
 requests
+gspread>=6.0.0
+google-auth
+openpyxl
+xlsxwriter
