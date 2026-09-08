@@ -68,9 +68,6 @@ def charger_base_cloud():
         vals = ws.col_values(1)
         if vals:
             db = json.loads("".join(vals))
-            default_db = initialiser_memoire_vierge()
-            for k, v in default_db.items():
-                if k not in db: db[k] = v
             return db
     except Exception as e:
         st.sidebar.error(f"❌ Erreur lecture DB : {e}")
@@ -113,7 +110,7 @@ def sauvegarder_adherents_cloud(df):
     except Exception as e:
         st.sidebar.error(f"❌ Erreur écriture Adhérents : {e}")
 
-# --- MIGRATION AUTOMATIQUE DES VIEUX FICHIERS (Une seule fois) ---
+# --- MIGRATION AUTOMATIQUE DES VIEUX FICHIERS ---
 if not os.path.exists("migration_cloud_terminee.txt"):
     vieux_fichiers_trouves = False
     db_locale = initialiser_memoire_vierge()
@@ -129,26 +126,30 @@ if not os.path.exists("migration_cloud_terminee.txt"):
         vieux_fichiers_trouves = True
         
     if vieux_fichiers_trouves:
-        with st.spinner("🔄 Récupération de vos anciennes données locales vers le Google Drive..."):
+        with st.spinner("🔄 Migration de vos données vers Google Drive..."):
             sauvegarder_base_cloud(db_locale)
             if not df_local.empty: sauvegarder_adherents_cloud(df_local)
             with open("migration_cloud_terminee.txt", "w") as f: f.write("OK")
-            st.success("✅ Migration des anciennes données terminée !")
+            st.success("✅ Migration terminée !")
             st.rerun()
     else:
         with open("migration_cloud_terminee.txt", "w") as f: f.write("Rien à migrer")
 
-# Initialisation silencieuse
+# --- CHARGEMENT SÉCURISÉ ---
 if 'db' not in st.session_state: 
     with st.spinner("Connexion sécurisée au Cloud Google..."):
         st.session_state['db'] = charger_base_cloud()
-        for cle in ["validations_promo", "sorties_manuelles", "cartes_membres", "eleves_deja_affectes", "identites_helloasso_connues"]:
-            if cle not in st.session_state['db']: st.session_state['db'][cle] = [] if type(initialiser_memoire_vierge()[cle]) is list else {}
 
 if 'df_adherents' not in st.session_state:
     with st.spinner("Récupération de la base adhérents..."):
         df_loaded = charger_adherents_cloud()
         if not df_loaded.empty: st.session_state['df_adherents'] = df_loaded
+
+# --- BOUCLIER ANTI-KEYERROR ABSOLU ---
+default_mem = initialiser_memoire_vierge()
+for cle, val_defaut in default_mem.items():
+    if cle not in st.session_state['db']:
+        st.session_state['db'][cle] = val_defaut
 
 col1, col2 = st.columns([1, 4])
 with col1:
@@ -304,10 +305,11 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
             if row["Date de naissance"] and len(str(row["Date de naissance"])) >= 10: row["Date de naissance"] = str(row["Date de naissance"])[:10]
             
             for field in item.get("customFields", []):
-                nom_champ, reponse = str(field.get("name", "")).strip(), str(field.get("answer", "")).strip()
+                nom_champ = str(field.get("name", "")).strip() 
+                reponse = str(field.get("answer", "")).strip()
                 nom_lower = nom_champ.lower()
-                row[nom_champ] = reponse
                 
+                row[nom_champ] = reponse
                 if "promo" in nom_lower: row["Code Promo"] = reponse
                 if any(mot in nom_lower for mot in ["allergie", "médical", "sante", "santé"]):
                     if row["Allergies / Médical"] == "-": row["Allergies / Médical"] = reponse
@@ -373,6 +375,8 @@ if st.sidebar.button("🔄 Rafraîchir les données (Cloud)"):
         st.session_state['db'] = charger_base_cloud()
         df_loaded = charger_adherents_cloud()
         if not df_loaded.empty: st.session_state['df_adherents'] = df_loaded
+        for cle, val_defaut in initialiser_memoire_vierge().items():
+            if cle not in st.session_state['db']: st.session_state['db'][cle] = val_defaut
         st.rerun()
 
 st.sidebar.markdown("---")
@@ -547,6 +551,7 @@ else:
             
             st.metric("Dossiers affichés", len(df_display))
             
+            # --- TABLEAU ÉDITABLE ---
             edited_df = st.data_editor(
                 df_display[cols_to_use],
                 use_container_width=True,
@@ -557,24 +562,74 @@ else:
                 }
             )
             
-            if not edited_df.equals(df_display[cols_to_use]):
-                differences = edited_df.compare(df_display[cols_to_use])
-                for index_fige, row_diff in differences.iterrows():
-                    identite = df_display.loc[index_fige, "Identité"]
-                    idx_main = st.session_state['df_adherents'][st.session_state['df_adherents']['Identité'] == identite].index[0]
-                    
-                    for col in differences.columns.levels[0]:
-                        new_val = edited_df.loc[index_fige, col]
-                        if pd.isna(new_val): new_val = ""
+            # --- DETECTION INTELLIGENTE DES MODIFICATIONS (CASCADES NOM/PRENOM) ---
+            changement_detecte = False
+            for index_fige in edited_df.index:
+                identite = df_display.loc[index_fige, "Identité"]
+                row_old = df_display.loc[index_fige]
+                row_new = edited_df.loc[index_fige]
+                
+                changed = False
+                for col in cols_to_use:
+                    if str(row_old[col]) != str(row_new[col]):
+                        changed = True
+                        break
                         
-                        if col == "Promo Validée ✅": st.session_state['db']['validations_promo'][identite] = new_val
-                        elif col == "Sortie Seul": st.session_state['db']['sorties_manuelles'][identite] = new_val
-                        elif col == "Elo Crevette 🦐": st.session_state['db']['elos_crevette'][identite] = int(new_val) if str(new_val).isdigit() else 400
-                        else: st.session_state['df_adherents'].at[idx_main, col] = new_val
+                if changed:
+                    changement_detecte = True
+                    idx_main = st.session_state['df_adherents'][st.session_state['df_adherents']['Identité'] == identite].index[0]
+                    for col in cols_to_use:
+                        if str(row_old[col]) != str(row_new[col]):
+                            new_val = row_new[col]
+                            if col == "Promo Validée ✅": st.session_state['db']['validations_promo'][identite] = new_val
+                            elif col == "Sortie Seul": st.session_state['db']['sorties_manuelles'][identite] = new_val
+                            elif col == "Elo Crevette 🦐": st.session_state['db']['elos_crevette'][identite] = int(new_val) if str(new_val).isdigit() else 400
+                            else: st.session_state['df_adherents'].at[idx_main, col] = new_val
                             
+                    # Mécanique de Cascade si changement de Nom/Prénom
+                    new_nom = str(st.session_state['df_adherents'].at[idx_main, "Nom"])
+                    new_prenom = str(st.session_state['df_adherents'].at[idx_main, "Prénom"])
+                    new_identite = f"{new_prenom.strip().title()} {new_nom.strip().upper()}"
+
+                    if new_identite != identite:
+                        st.session_state['df_adherents'].at[idx_main, "Identité"] = new_identite
+                        st.session_state['db']['elos_crevette'][new_identite] = st.session_state['db']['elos_crevette'].pop(identite, 400)
+                        st.session_state['db']['validations_promo'][new_identite] = st.session_state['db']['validations_promo'].pop(identite, False)
+                        st.session_state['db']['sorties_manuelles'][new_identite] = st.session_state['db']['sorties_manuelles'].pop(identite, "-")
+                        
+                        if identite in st.session_state['db'].get('identites_helloasso_connues', []):
+                            st.session_state['db']['identites_helloasso_connues'].remove(identite)
+                            st.session_state['db']['identites_helloasso_connues'].append(new_identite)
+                            
+                        for c in st.session_state['db']['affectations_creneaux']:
+                            if identite in st.session_state['db']['affectations_creneaux'][c]:
+                                st.session_state['db']['affectations_creneaux'][c].remove(identite)
+                                st.session_state['db']['affectations_creneaux'][c].append(new_identite)
+
+            if changement_detecte:
                 sauvegarder_base_cloud(st.session_state['db'])
                 sauvegarder_adherents_cloud(st.session_state['df_adherents'])
                 st.rerun()
+
+            # --- OUTIL DE SUPPRESSION (ZONE DE DANGER) ---
+            st.markdown("---")
+            with st.expander("🗑️ Zone de Danger : Supprimer des élèves"):
+                st.warning("⚠️ Les élèves supprimés ici n'apparaîtront plus dans les listes. Le logiciel conservera leur ID fantôme pour empêcher HelloAsso de les réimporter (utile pour les remboursements).")
+                eleve_a_supprimer = st.selectbox("Sélectionner l'élève à supprimer définitivement :", [""] + sorted(df["Identité"].tolist()))
+                if eleve_a_supprimer and st.button(f"🚨 Supprimer {eleve_a_supprimer}"):
+                    st.session_state['df_adherents'] = df[df["Identité"] != eleve_a_supprimer].copy()
+                    
+                    for c in st.session_state['db']['affectations_creneaux']:
+                        if eleve_a_supprimer in st.session_state['db']['affectations_creneaux'][c]:
+                            st.session_state['db']['affectations_creneaux'][c].remove(eleve_a_supprimer)
+                            
+                    if eleve_a_supprimer in st.session_state['db'].get('eleves_deja_affectes', []):
+                        st.session_state['db']['eleves_deja_affectes'].remove(eleve_a_supprimer)
+                        
+                    sauvegarder_base_cloud(st.session_state['db'])
+                    sauvegarder_adherents_cloud(st.session_state['df_adherents'])
+                    st.success(f"✅ {eleve_a_supprimer} a été supprimé avec succès.")
+                    st.rerun()
 
             st.markdown("---")
             st.markdown("#### 📥 Exports & Licences FFE")
