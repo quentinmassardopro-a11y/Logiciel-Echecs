@@ -57,7 +57,8 @@ def initialiser_memoire_vierge():
         "elos_crevette": {}, "historique_appels": {}, "eleves_essai": [],
         "affectations_creneaux": {}, "cartes_membres": {},
         "validations_promo": {}, "sorties_manuelles": {},
-        "eleves_deja_affectes": [], "identites_helloasso_connues": []
+        "eleves_deja_affectes": [], "identites_helloasso_connues": [],
+        "dossiers_supprimes": [] # LISTE NOIRE DES REMBOURSEMENTS
     }
 
 def charger_base_cloud():
@@ -266,6 +267,7 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
             naissance_def = user.get("birthDate", user.get("dateOfBirth", payer.get("dateOfBirth", "")))
             
             row = {
+                "ID_Dossier": str(item.get("id", random.randint(1000000, 9999999))), # ID UNIQUE PAR PAIEMENT
                 "Campagne": nom_campagne, "Nom": nom_propre, "Prénom": prenom_propre, "Identité": f"{prenom_propre} {nom_propre}",
                 "Montant Payé": f"{item.get('amount', 0) / 100} €", "Code Promo": code_promo_utilise, "Allergies / Médical": "-",
                 "Formule": nom_tarif, "Type": type_formule, "Licence_FFE": "Non croisé", "Nom payeur": payer.get("lastName", "").replace("*", "").strip(),
@@ -391,13 +393,19 @@ if st.sidebar.button("⬇️ Lancer la Synchronisation HelloAsso"):
                 if all_data:
                     df_new_fetch = pd.DataFrame(all_data)
                     
-                    if 'df_adherents' in st.session_state and not st.session_state['df_adherents'].empty:
-                        df_local = st.session_state['df_adherents']
-                        connus = st.session_state['db'].get('identites_helloasso_connues', [])
-                        nouveaux = df_new_fetch[~df_new_fetch['Identité'].isin(connus)].copy()
-                    else:
-                        df_local = pd.DataFrame()
-                        nouveaux = df_new_fetch.copy()
+                    df_local = st.session_state.get('df_adherents', pd.DataFrame())
+                    ids_supprimes = st.session_state['db'].get('dossiers_supprimes', [])
+                    
+                    # LOGIQUE DE DÉDOUBLONNAGE PUISSANTE (Bloque les remboursés, autorise les doublons légitimes)
+                    def est_valide(r):
+                        id_dos = r.get('ID_Dossier')
+                        if id_dos and id_dos in ids_supprimes: return False
+                        if not df_local.empty and 'ID_Dossier' in df_local.columns and id_dos in df_local['ID_Dossier'].values: return False
+                        # Rétro-compatibilité pour les vieux dossiers sans ID
+                        if not df_local.empty and 'ID_Dossier' not in df_local.columns and r['Identité'] in df_local['Identité'].values: return False
+                        return True
+                        
+                    nouveaux = df_new_fetch[df_new_fetch.apply(est_valide, axis=1)].copy()
 
                     if not nouveaux.empty:
                         if 'df_ffe' in st.session_state and not st.session_state['df_ffe'].empty:
@@ -430,7 +438,6 @@ if st.sidebar.button("⬇️ Lancer la Synchronisation HelloAsso"):
 
                         for _, row in nouveaux.iterrows():
                             identite = row['Identité']
-                            if identite not in st.session_state['db']['identites_helloasso_connues']: st.session_state['db']['identites_helloasso_connues'].append(identite)
                             if identite not in st.session_state['db']['elos_crevette']: st.session_state['db']['elos_crevette'][identite] = 400
                             if identite not in st.session_state['db'].get('eleves_deja_affectes', []):
                                 creneaux_autos = affectations_automatiques(row)
@@ -517,11 +524,11 @@ else:
                 'e confirme avoir renseigné le questionnaire de santé "Sport" (mineurs) https://www.echecs.asso.fr/Actus/14098/questionnaire_mineur.pdf'
             ]
             colonnes_presentes = [c for c in colonnes_prioritaires if c in df_admin.columns]
-            colonnes_a_exclure = ["Identité", "Type", "Elo_FFE", "Nom payeur", "Prénom payeur", "Email payeur"]
+            colonnes_a_exclure = ["Identité", "Type", "Elo_FFE", "Nom payeur", "Prénom payeur", "Email payeur", "ID_Dossier"]
             autres_colonnes = [c for c in df_admin.columns if c not in colonnes_presentes and c not in colonnes_a_exclure]
             colonnes_finales = list(dict.fromkeys(colonnes_presentes + autres_colonnes + ["Elo Crevette 🦐", "Identité"]))
             
-            # --- BOUCLIER ANTI-DOUBLONS (GARANTIT UN INDEX UNIQUE) ---
+            # --- BOUCLIER ANTI-DOUBLONS (AFFICHAGE) ---
             df_admin["_orig_index"] = df_admin.index
             noms_bruts = df_admin["Nom"] + " " + df_admin["Prénom"]
             s_counts = df_admin.groupby(noms_bruts).cumcount()
@@ -544,7 +551,7 @@ else:
                 }
             )
             
-            # --- DETECTION INTELLIGENTE DES MODIFICATIONS (CASCADES NOM/PRENOM) ---
+            # --- DETECTION INTELLIGENTE DES MODIFICATIONS ---
             changement_detecte = False
             for index_fige in edited_df.index:
                 row_old = df_display.loc[index_fige]
@@ -566,14 +573,12 @@ else:
                         elif col == "Elo Crevette 🦐": st.session_state['db']['elos_crevette'][identite] = int(new_val) if str(new_val).isdigit() else 400
                         else: st.session_state['df_adherents'].at[idx_main, col] = new_val
                             
-                    # Mécanique de Cascade si changement de Nom ou Prénom
                     if "Nom" in changed_cols or "Prénom" in changed_cols:
                         new_nom = str(st.session_state['df_adherents'].at[idx_main, "Nom"]).strip().upper()
                         new_prenom = str(st.session_state['df_adherents'].at[idx_main, "Prénom"]).strip().title()
                         new_identite = f"{new_prenom} {new_nom}"
 
                         if new_identite != identite:
-                            # Met à jour l'identité pour toutes les lignes appartenant à ce membre
                             mask = st.session_state['df_adherents']['Identité'] == identite
                             st.session_state['df_adherents'].loc[mask, "Nom"] = new_nom
                             st.session_state['df_adherents'].loc[mask, "Prénom"] = new_prenom
@@ -582,20 +587,17 @@ else:
                             st.session_state['db']['elos_crevette'][new_identite] = st.session_state['db']['elos_crevette'].pop(identite, 400)
                             st.session_state['db']['validations_promo'][new_identite] = st.session_state['db']['validations_promo'].pop(identite, False)
                             st.session_state['db']['sorties_manuelles'][new_identite] = st.session_state['db']['sorties_manuelles'].pop(identite, "-")
-                            
-                            if identite in st.session_state['db'].get('identites_helloasso_connues', []):
-                                st.session_state['db']['identites_helloasso_connues'].remove(identite)
-                                if new_identite not in st.session_state['db']['identites_helloasso_connues']:
-                                    st.session_state['db']['identites_helloasso_connues'].append(new_identite)
                                 
                             for c in st.session_state['db']['affectations_creneaux']:
                                 if identite in st.session_state['db']['affectations_creneaux'][c]:
                                     st.session_state['db']['affectations_creneaux'][c].remove(identite)
-                                    st.session_state['db']['affectations_creneaux'][c].append(new_identite)
-                                    
+                                    if new_identite not in st.session_state['db']['affectations_creneaux'][c]:
+                                        st.session_state['db']['affectations_creneaux'][c].append(new_identite)
+                                        
                             if identite in st.session_state['db'].get('eleves_deja_affectes', []):
                                 st.session_state['db']['eleves_deja_affectes'].remove(identite)
-                                st.session_state['db']['eleves_deja_affectes'].append(new_identite)
+                                if new_identite not in st.session_state['db']['eleves_deja_affectes']:
+                                    st.session_state['db']['eleves_deja_affectes'].append(new_identite)
 
             if changement_detecte:
                 sauvegarder_base_cloud(st.session_state['db'])
@@ -604,22 +606,42 @@ else:
 
             # --- OUTIL DE SUPPRESSION (ZONE DE DANGER) ---
             st.markdown("---")
-            with st.expander("🗑️ Zone de Danger : Supprimer des élèves"):
-                st.warning("⚠️ Les élèves supprimés ici n'apparaîtront plus dans les listes. L'application conservera leur ID fantôme pour empêcher HelloAsso de les réimporter (utile pour les remboursements).")
-                eleve_a_supprimer = st.selectbox("Sélectionner l'élève à supprimer définitivement :", [""] + sorted(df["Identité"].tolist()))
-                if eleve_a_supprimer and st.button(f"🚨 Supprimer {eleve_a_supprimer}"):
-                    st.session_state['df_adherents'] = df[df["Identité"] != eleve_a_supprimer].copy()
+            with st.expander("🗑️ Zone de Danger : Supprimer des transactions/élèves"):
+                st.warning("⚠️ Les lignes supprimées ici n'apparaîtront plus. Leurs identifiants seront placés sur Liste Noire pour bloquer les réimportations HelloAsso (Idéal pour les remboursements ou doublons !).")
+                
+                options_suppr = []
+                mapping_suppr = {}
+                for idx, row in df.iterrows():
+                    id_dos = row.get('ID_Dossier', 'Sans ID')
+                    texte = f"👤 {row['Nom']} {row['Prénom']} | 📋 {row.get('Campagne', '-')} | 💰 {row.get('Montant Payé', '-')} (Dossier: {id_dos})"
+                    options_suppr.append(texte)
+                    mapping_suppr[texte] = idx
                     
-                    for c in st.session_state['db']['affectations_creneaux']:
-                        if eleve_a_supprimer in st.session_state['db']['affectations_creneaux'][c]:
-                            st.session_state['db']['affectations_creneaux'][c].remove(eleve_a_supprimer)
+                eleve_a_supprimer = st.selectbox("Sélectionner la transaction à mettre sur Liste Noire :", [""] + sorted(options_suppr))
+                if eleve_a_supprimer and st.button(f"🚨 Supprimer définitivement"):
+                    idx_to_delete = mapping_suppr[eleve_a_supprimer]
+                    row_to_delete = df.loc[idx_to_delete]
+                    
+                    # 1. Ajout de l'ID en liste noire
+                    id_doss = row_to_delete.get('ID_Dossier')
+                    if id_doss and str(id_doss) != "nan":
+                        if id_doss not in st.session_state['db']['dossiers_supprimes']: 
+                            st.session_state['db']['dossiers_supprimes'].append(id_doss)
                             
-                    if eleve_a_supprimer in st.session_state['db'].get('eleves_deja_affectes', []):
-                        st.session_state['db']['eleves_deja_affectes'].remove(eleve_a_supprimer)
-                        
+                    identite = row_to_delete['Identité']
+                    st.session_state['df_adherents'] = df.drop(idx_to_delete).reset_index(drop=True)
+                    
+                    # 2. Nettoyage si c'était sa TOUTE DERNIÈRE transaction
+                    if identite not in st.session_state['df_adherents']['Identité'].values:
+                        for c in st.session_state['db']['affectations_creneaux']:
+                            if identite in st.session_state['db']['affectations_creneaux'][c]:
+                                st.session_state['db']['affectations_creneaux'][c].remove(identite)
+                        if identite in st.session_state['db'].get('eleves_deja_affectes', []):
+                            st.session_state['db']['eleves_deja_affectes'].remove(identite)
+                            
                     sauvegarder_base_cloud(st.session_state['db'])
                     sauvegarder_adherents_cloud(st.session_state['df_adherents'])
-                    st.success(f"✅ {eleve_a_supprimer} a été supprimé avec succès.")
+                    st.success("✅ Transaction supprimée et mise sur Liste Noire avec succès !")
                     st.rerun()
 
             st.markdown("---")
