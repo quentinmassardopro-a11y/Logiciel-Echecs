@@ -384,7 +384,8 @@ if fichier_ffe:
     if not df_ffe.empty:
         st.session_state['df_ffe'] = df_ffe
         st.sidebar.success("Fichier FFE chargé en mémoire !")
-elif 'df_ffe' in st.session_state: 
+
+if 'df_ffe' in st.session_state: 
     st.sidebar.info("✅ FFE en mémoire.")
     
     if st.sidebar.button("🔄 Recroiser les Licences FFE"):
@@ -540,7 +541,6 @@ else:
             if recherche_nom:
                 contact = df[df["Identité"] == recherche_nom].iloc[0].copy()
                 
-                # Ajout des données en temps réel
                 s_actuelle = st.session_state['db']['sorties_manuelles'].get(contact["Identité"], contact.get("Sortie Seul", "-"))
                 elo_crev = st.session_state['db']['elos_crevette'].get(contact["Identité"], 400)
                 promo_val = st.session_state['db']['validations_promo'].get(contact["Identité"], False)
@@ -552,7 +552,6 @@ else:
                 st.markdown("---")
                 c_info1, c_info2 = st.columns(2)
                 
-                # Filtrer intelligemment les infos (pas les colonnes techniques, pas les vides)
                 infos = {k: v for k, v in contact.items() if k not in ["_orig_index", "Identité"] and str(v).strip() and str(v) != "nan"}
                 items = list(infos.items())
                 mid = (len(items) + 1) // 2
