@@ -58,7 +58,7 @@ def initialiser_memoire_vierge():
         "affectations_creneaux": {}, "cartes_membres": {},
         "validations_promo": {}, "sorties_manuelles": {},
         "eleves_deja_affectes": [], "identites_helloasso_connues": [],
-        "dossiers_supprimes": [] # LISTE NOIRE DES REMBOURSEMENTS
+        "dossiers_supprimes": []
     }
 
 def charger_base_cloud():
@@ -71,7 +71,7 @@ def charger_base_cloud():
             db = json.loads("".join(vals))
             return db
     except Exception as e:
-        st.sidebar.error(f"❌ Erreur lecture DB : {e}")
+        pass
     return initialiser_memoire_vierge()
 
 def sauvegarder_base_cloud(db):
@@ -85,7 +85,7 @@ def sauvegarder_base_cloud(db):
         try: ws.update(chunks)
         except: ws.update("A1", chunks)
     except Exception as e:
-        st.sidebar.error(f"❌ Erreur écriture DB : {e}")
+        pass
 
 def charger_adherents_cloud():
     try:
@@ -95,7 +95,7 @@ def charger_adherents_cloud():
         data = ws.get_all_records()
         if data: return pd.DataFrame(data)
     except Exception as e:
-        st.sidebar.error(f"❌ Erreur lecture Adhérents : {e}")
+        pass
     return pd.DataFrame()
 
 def sauvegarder_adherents_cloud(df):
@@ -109,17 +109,31 @@ def sauvegarder_adherents_cloud(df):
             try: ws.update(data)
             except: ws.update("A1", data)
     except Exception as e:
-        st.sidebar.error(f"❌ Erreur écriture Adhérents : {e}")
+        pass
 
-# --- CHARGEMENT SÉCURISÉ ---
+# --- CHARGEMENT SÉCURISÉ & AUTO-NETTOYAGE DES DOUBLONS ---
 if 'db' not in st.session_state: 
     with st.spinner("Connexion sécurisée au Cloud Google..."):
         st.session_state['db'] = charger_base_cloud()
 
 if 'df_adherents' not in st.session_state:
-    with st.spinner("Récupération de la base adhérents..."):
+    with st.spinner("Récupération et nettoyage de la base adhérents..."):
         df_loaded = charger_adherents_cloud()
-        if not df_loaded.empty: st.session_state['df_adherents'] = df_loaded
+        if not df_loaded.empty: 
+            len_avant = len(df_loaded)
+            # Tri pour s'assurer que si un doublon a un ID_Dossier, on garde bien celui avec l'ID
+            if 'ID_Dossier' in df_loaded.columns:
+                df_loaded['ID_Dossier'] = df_loaded['ID_Dossier'].replace('', float('nan'))
+                df_loaded = df_loaded.sort_values('ID_Dossier', na_position='first')
+            
+            # SUPPRESSION MAGIQUE DES CLONES EXACTS
+            df_loaded = df_loaded.drop_duplicates(subset=['Identité', 'Campagne', 'Formule'], keep='last').reset_index(drop=True)
+            
+            st.session_state['df_adherents'] = df_loaded
+            
+            # Sauvegarde silencieuse dans le Cloud si on a nettoyé des fantômes
+            if len(df_loaded) < len_avant:
+                sauvegarder_adherents_cloud(df_loaded)
 
 # --- BOUCLIER ANTI-KEYERROR ABSOLU ---
 default_mem = initialiser_memoire_vierge()
@@ -267,7 +281,7 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
             naissance_def = user.get("birthDate", user.get("dateOfBirth", payer.get("dateOfBirth", "")))
             
             row = {
-                "ID_Dossier": str(item.get("id", random.randint(1000000, 9999999))), # ID UNIQUE PAR PAIEMENT
+                "ID_Dossier": str(item.get("id", random.randint(1000000, 9999999))), 
                 "Campagne": nom_campagne, "Nom": nom_propre, "Prénom": prenom_propre, "Identité": f"{prenom_propre} {nom_propre}",
                 "Montant Payé": f"{item.get('amount', 0) / 100} €", "Code Promo": code_promo_utilise, "Allergies / Médical": "-",
                 "Formule": nom_tarif, "Type": type_formule, "Licence_FFE": "Non croisé", "Nom payeur": payer.get("lastName", "").replace("*", "").strip(),
@@ -392,17 +406,24 @@ if st.sidebar.button("⬇️ Lancer la Synchronisation HelloAsso"):
                 
                 if all_data:
                     df_new_fetch = pd.DataFrame(all_data)
-                    
                     df_local = st.session_state.get('df_adherents', pd.DataFrame())
-                    ids_supprimes = st.session_state['db'].get('dossiers_supprimes', [])
+                    ids_supprimes = [str(x) for x in st.session_state['db'].get('dossiers_supprimes', [])]
                     
-                    # LOGIQUE DE DÉDOUBLONNAGE PUISSANTE (Bloque les remboursés, autorise les doublons légitimes)
                     def est_valide(r):
-                        id_dos = r.get('ID_Dossier')
-                        if id_dos and id_dos in ids_supprimes: return False
-                        if not df_local.empty and 'ID_Dossier' in df_local.columns and id_dos in df_local['ID_Dossier'].values: return False
-                        # Rétro-compatibilité pour les vieux dossiers sans ID
-                        if not df_local.empty and 'ID_Dossier' not in df_local.columns and r['Identité'] in df_local['Identité'].values: return False
+                        id_dos = str(r.get('ID_Dossier', ''))
+                        identite = r.get('Identité')
+                        
+                        # 1. Vérif liste noire des dossiers remboursés
+                        if id_dos and id_dos != 'nan' and id_dos in ids_supprimes: return False
+                        
+                        if not df_local.empty:
+                            # 2. Vérif si ID déjà présent dans la base locale
+                            if 'ID_Dossier' in df_local.columns and id_dos in df_local['ID_Dossier'].dropna().astype(str).values: 
+                                return False
+                            # 3. Sécurité contre les vieux doublons (Même nom, même campagne, même formule = Bloqué)
+                            masque = (df_local['Identité'] == identite) & (df_local['Campagne'] == r['Campagne']) & (df_local['Formule'] == r['Formule'])
+                            if masque.any(): 
+                                return False
                         return True
                         
                     nouveaux = df_new_fetch[df_new_fetch.apply(est_valide, axis=1)].copy()
@@ -528,7 +549,6 @@ else:
             autres_colonnes = [c for c in df_admin.columns if c not in colonnes_presentes and c not in colonnes_a_exclure]
             colonnes_finales = list(dict.fromkeys(colonnes_presentes + autres_colonnes + ["Elo Crevette 🦐", "Identité"]))
             
-            # --- BOUCLIER ANTI-DOUBLONS (AFFICHAGE) ---
             df_admin["_orig_index"] = df_admin.index
             noms_bruts = df_admin["Nom"] + " " + df_admin["Prénom"]
             s_counts = df_admin.groupby(noms_bruts).cumcount()
@@ -551,12 +571,11 @@ else:
                 }
             )
             
-            # --- DETECTION INTELLIGENTE DES MODIFICATIONS ---
+            # --- DETECTION DES MODIFICATIONS ---
             changement_detecte = False
             for index_fige in edited_df.index:
                 row_old = df_display.loc[index_fige]
                 row_new = edited_df.loc[index_fige]
-                
                 changed_cols = [c for c in cols_to_use if str(row_old[c]) != str(row_new[c])]
                 
                 if changed_cols:
@@ -622,16 +641,14 @@ else:
                     idx_to_delete = mapping_suppr[eleve_a_supprimer]
                     row_to_delete = df.loc[idx_to_delete]
                     
-                    # 1. Ajout de l'ID en liste noire
                     id_doss = row_to_delete.get('ID_Dossier')
                     if id_doss and str(id_doss) != "nan":
-                        if id_doss not in st.session_state['db']['dossiers_supprimes']: 
-                            st.session_state['db']['dossiers_supprimes'].append(id_doss)
+                        if str(id_doss) not in st.session_state['db']['dossiers_supprimes']: 
+                            st.session_state['db']['dossiers_supprimes'].append(str(id_doss))
                             
                     identite = row_to_delete['Identité']
                     st.session_state['df_adherents'] = df.drop(idx_to_delete).reset_index(drop=True)
                     
-                    # 2. Nettoyage si c'était sa TOUTE DERNIÈRE transaction
                     if identite not in st.session_state['df_adherents']['Identité'].values:
                         for c in st.session_state['db']['affectations_creneaux']:
                             if identite in st.session_state['db']['affectations_creneaux'][c]:
