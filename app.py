@@ -121,17 +121,12 @@ if 'df_adherents' not in st.session_state:
         df_loaded = charger_adherents_cloud()
         if not df_loaded.empty: 
             len_avant = len(df_loaded)
-            # Tri pour s'assurer que si un doublon a un ID_Dossier, on garde bien celui avec l'ID
             if 'ID_Dossier' in df_loaded.columns:
                 df_loaded['ID_Dossier'] = df_loaded['ID_Dossier'].replace('', float('nan'))
                 df_loaded = df_loaded.sort_values('ID_Dossier', na_position='first')
             
-            # SUPPRESSION MAGIQUE DES CLONES EXACTS
             df_loaded = df_loaded.drop_duplicates(subset=['Identité', 'Campagne', 'Formule'], keep='last').reset_index(drop=True)
-            
             st.session_state['df_adherents'] = df_loaded
-            
-            # Sauvegarde silencieuse dans le Cloud si on a nettoyé des fantômes
             if len(df_loaded) < len_avant:
                 sauvegarder_adherents_cloud(df_loaded)
 
@@ -338,7 +333,9 @@ def analyser_fichier_ffe(fichier):
         col_nom = next((c for c in df_ffe.columns if "nom" in c.lower() and "prenom" not in c.lower()), None)
         col_prenom = next((c for c in df_ffe.columns if "prenom" in str(c).lower() or "prénom" in str(c).lower()), None)
         col_elo = next((c for c in df_ffe.columns if "elo" in str(c).lower() or "rapide" in str(c).lower()), None)
-        col_licence = next((c for c in df_ffe.columns if "licence" in str(c).lower() or "code" in str(c).lower() or "ref" in str(c).lower()), None)
+        
+        # Amélioration de la détection de la colonne Licence
+        col_licence = next((c for c in df_ffe.columns if any(mot in str(c).lower() for mot in ["licence", "code", "ref", "identifiant"])), None)
         col_dna = next((c for c in df_ffe.columns if "dna" in str(c).lower() or "né" in str(c).lower() or "naissance" in str(c).lower()), None)
 
         if col_nom and col_prenom:
@@ -349,7 +346,7 @@ def analyser_fichier_ffe(fichier):
             df_ffe['Cle_Forte'] = df_ffe['Nom_Norm'] + df_ffe['Prenom_Norm'] + df_ffe['Annee_FFE']
             df_ffe['Cle_Souple'] = df_ffe['Nom_Norm'] + df_ffe['Prenom_Norm']
             df_ffe['Elo_FFE'] = df_ffe[col_elo] if col_elo else 0
-            df_ffe['Licence_FFE'] = df_ffe[col_licence] if col_licence else "Non croisé"
+            df_ffe['Licence_FFE'] = df_ffe[col_licence].astype(str) if col_licence else "Non croisé"
             return df_ffe[['Cle_Forte', 'Cle_Souple', 'Elo_FFE', 'Licence_FFE']]
     except: return pd.DataFrame()
     return pd.DataFrame()
@@ -379,7 +376,45 @@ if fichier_ffe:
     if not df_ffe.empty:
         st.session_state['df_ffe'] = df_ffe
         st.sidebar.success("Fichier FFE prêt pour le prochain croisement !")
-elif 'df_ffe' in st.session_state: st.sidebar.info("✅ FFE en mémoire.")
+elif 'df_ffe' in st.session_state: 
+    st.sidebar.info("✅ FFE en mémoire.")
+    
+    # --- NOUVEAU BOUTON : RECROISER LES LICENCES ---
+    if st.sidebar.button("🔄 Recroiser les Licences FFE"):
+        if 'df_adherents' in st.session_state and not st.session_state['df_adherents'].empty:
+            with st.spinner("Recroisement en cours avec la base FFE..."):
+                df_base = st.session_state['df_adherents'].copy()
+                
+                df_base['Nom_Norm'] = df_base['Nom'].apply(normaliser_nom)
+                df_base['Prenom_Norm'] = df_base['Prénom'].apply(normaliser_nom)
+                df_base['Annee_HA'] = df_base['Date de naissance'].astype(str).str.extract(r'(\d{4})')[0].fillna("")
+                
+                df_base['Cle_Forte'] = df_base['Nom_Norm'] + df_base['Prenom_Norm'] + df_base['Annee_HA']
+                df_base['Cle_Souple'] = df_base['Nom_Norm'] + df_base['Prenom_Norm']
+                
+                df_ffe_strict = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Forte'])
+                df_ffe_souple = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Souple'])
+                
+                df_base = df_base.drop(columns=['Elo_FFE', 'Licence_FFE'], errors='ignore')
+                df_base = pd.merge(df_base, df_ffe_strict[['Cle_Forte', 'Elo_FFE', 'Licence_FFE']], on='Cle_Forte', how='left')
+                
+                manquants = df_base['Licence_FFE'].isna() | (df_base['Licence_FFE'] == "Non croisé")
+                if manquants.any():
+                    df_base_m = df_base[manquants].drop(columns=['Elo_FFE', 'Licence_FFE'], errors='ignore')
+                    df_base_m = pd.merge(df_base_m, df_ffe_souple[['Cle_Souple', 'Elo_FFE', 'Licence_FFE']], on='Cle_Souple', how='left')
+                    df_base.loc[manquants, 'Elo_FFE'] = df_base_m['Elo_FFE'].values
+                    df_base.loc[manquants, 'Licence_FFE'] = df_base_m['Licence_FFE'].values
+
+                df_base['Elo_FFE'] = df_base['Elo_FFE'].fillna(0).astype(int)
+                df_base['Licence_FFE'] = df_base['Licence_FFE'].fillna("Non croisé")
+                df_base = df_base.drop(columns=['Cle_Forte', 'Cle_Souple', 'Nom_Norm', 'Prenom_Norm', 'Annee_HA'])
+                
+                st.session_state['df_adherents'] = df_base
+                sauvegarder_adherents_cloud(df_base)
+                st.sidebar.success("✅ Licences recroisées avec succès !")
+                st.rerun()
+        else:
+            st.sidebar.warning("Aucun adhérent à croiser.")
 
 st.sidebar.markdown("---")
 st.sidebar.header("2️⃣ HelloAsso (Nouveaux Inscrits)")
@@ -413,17 +448,12 @@ if st.sidebar.button("⬇️ Lancer la Synchronisation HelloAsso"):
                         id_dos = str(r.get('ID_Dossier', ''))
                         identite = r.get('Identité')
                         
-                        # 1. Vérif liste noire des dossiers remboursés
                         if id_dos and id_dos != 'nan' and id_dos in ids_supprimes: return False
                         
                         if not df_local.empty:
-                            # 2. Vérif si ID déjà présent dans la base locale
-                            if 'ID_Dossier' in df_local.columns and id_dos in df_local['ID_Dossier'].dropna().astype(str).values: 
-                                return False
-                            # 3. Sécurité contre les vieux doublons (Même nom, même campagne, même formule = Bloqué)
+                            if 'ID_Dossier' in df_local.columns and id_dos in df_local['ID_Dossier'].dropna().astype(str).values: return False
                             masque = (df_local['Identité'] == identite) & (df_local['Campagne'] == r['Campagne']) & (df_local['Formule'] == r['Formule'])
-                            if masque.any(): 
-                                return False
+                            if masque.any(): return False
                         return True
                         
                     nouveaux = df_new_fetch[df_new_fetch.apply(est_valide, axis=1)].copy()
@@ -459,6 +489,7 @@ if st.sidebar.button("⬇️ Lancer la Synchronisation HelloAsso"):
 
                         for _, row in nouveaux.iterrows():
                             identite = row['Identité']
+                            if identite not in st.session_state['db']['identites_helloasso_connues']: st.session_state['db']['identites_helloasso_connues'].append(identite)
                             if identite not in st.session_state['db']['elos_crevette']: st.session_state['db']['elos_crevette'][identite] = 400
                             if identite not in st.session_state['db'].get('eleves_deja_affectes', []):
                                 creneaux_autos = affectations_automatiques(row)
@@ -625,9 +656,26 @@ else:
 
             # --- OUTIL DE SUPPRESSION (ZONE DE DANGER) ---
             st.markdown("---")
-            with st.expander("🗑️ Zone de Danger : Supprimer des transactions/élèves"):
-                st.warning("⚠️ Les lignes supprimées ici n'apparaîtront plus. Leurs identifiants seront placés sur Liste Noire pour bloquer les réimportations HelloAsso (Idéal pour les remboursements ou doublons !).")
+            with st.expander("🗑️ Zone de Danger : Nettoyage et Suppressions"):
+                st.warning("Les élèves supprimés n'apparaîtront plus. Leur identifiant est mis sur Liste Noire.")
                 
+                if st.button("🧹 Nettoyer les doublons fantômes automatiquement"):
+                    df_nettoye = st.session_state['df_adherents'].copy()
+                    if 'ID_Dossier' in df_nettoye.columns:
+                        df_nettoye['has_id'] = df_nettoye['ID_Dossier'].apply(lambda x: 1 if str(x) not in ['nan', '', 'None'] else 0)
+                        df_nettoye = df_nettoye.sort_values('has_id')
+                        df_nettoye = df_nettoye.drop(columns=['has_id'])
+                    
+                    taille_avant = len(df_nettoye)
+                    df_nettoye = df_nettoye.drop_duplicates(subset=['Identité', 'Campagne', 'Formule'], keep='last').reset_index(drop=True)
+                    taille_apres = len(df_nettoye)
+                    
+                    st.session_state['df_adherents'] = df_nettoye
+                    sauvegarder_adherents_cloud(df_nettoye)
+                    st.success(f"Nettoyage parfait ! {taille_avant - taille_apres} doublons supprimés.")
+                    st.rerun()
+                
+                st.markdown("---")
                 options_suppr = []
                 mapping_suppr = {}
                 for idx, row in df.iterrows():
@@ -637,7 +685,7 @@ else:
                     mapping_suppr[texte] = idx
                     
                 eleve_a_supprimer = st.selectbox("Sélectionner la transaction à mettre sur Liste Noire :", [""] + sorted(options_suppr))
-                if eleve_a_supprimer and st.button(f"🚨 Supprimer définitivement"):
+                if eleve_a_supprimer and st.button(f"🚨 Supprimer définitivement cette ligne"):
                     idx_to_delete = mapping_suppr[eleve_a_supprimer]
                     row_to_delete = df.loc[idx_to_delete]
                     
