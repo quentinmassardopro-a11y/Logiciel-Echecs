@@ -454,6 +454,7 @@ if st.sidebar.button("⬇️ Lancer la Synchronisation HelloAsso"):
                     def est_valide(r):
                         id_dos = str(r.get('ID_Dossier', ''))
                         identite = r.get('Identité')
+                        
                         if id_dos and id_dos != 'nan' and id_dos in ids_supprimes: return False
                         if not df_local.empty:
                             if 'ID_Dossier' in df_local.columns and id_dos in df_local['ID_Dossier'].dropna().astype(str).values: return False
@@ -531,14 +532,34 @@ else:
         tab_admin, tab_ecoles, tab_cartes, tab_historique = st.tabs(["📊 Base Adhérents", "🏫 Écoles", "🎟️ Cartes de Centres", "📅 Historique Appels"])
         
         with tab_admin:
+            # --- NOUVEAU DOSSIER ÉLÈVE DÉTAILLÉ ---
             st.markdown('<div class="recherche-rapide">', unsafe_allow_html=True)
-            st.markdown("#### 🔍 Recherche rapide de contact")
-            recherche_nom = st.selectbox("Taper un nom/prénom pour obtenir ses coordonnées :", options=[""] + sorted(df["Identité"].tolist()))
+            st.markdown("#### 🔍 Dossier Complet de l'Élève")
+            recherche_nom = st.selectbox("Taper un nom/prénom pour ouvrir le dossier complet :", options=[""] + sorted(df["Identité"].tolist()), label_visibility="collapsed")
+            
             if recherche_nom:
-                contact = df[df["Identité"] == recherche_nom].iloc[0]
-                tel = contact.get('N° Portable', contact.get('EMail', 'Non renseigné'))
+                contact = df[df["Identité"] == recherche_nom].iloc[0].copy()
+                
+                # Ajout des données en temps réel
                 s_actuelle = st.session_state['db']['sorties_manuelles'].get(contact["Identité"], contact.get("Sortie Seul", "-"))
-                st.write(f"📞 **Contact :** {tel} | 🚨 **Sortie :** {s_actuelle} | 🏫 **Campagne :** {contact.get('Campagne', '-')}")
+                elo_crev = st.session_state['db']['elos_crevette'].get(contact["Identité"], 400)
+                promo_val = st.session_state['db']['validations_promo'].get(contact["Identité"], False)
+                
+                contact["Sortie Seul (Temps Réel)"] = s_actuelle
+                contact["Elo Crevette 🦐"] = elo_crev
+                contact["Promo Validée ✅"] = "Oui" if promo_val else "Non"
+                
+                st.markdown("---")
+                c_info1, c_info2 = st.columns(2)
+                
+                # Filtrer intelligemment les infos (pas les colonnes techniques, pas les vides)
+                infos = {k: v for k, v in contact.items() if k not in ["_orig_index", "Identité"] and str(v).strip() and str(v) != "nan"}
+                items = list(infos.items())
+                mid = (len(items) + 1) // 2
+                
+                for i, (k, v) in enumerate(items):
+                    if i < mid: c_info1.markdown(f"**{k}:** {v}")
+                    else: c_info2.markdown(f"**{k}:** {v}")
             st.markdown('</div>', unsafe_allow_html=True)
 
             col_ad1, col_ad2 = st.columns(2)
@@ -571,7 +592,6 @@ else:
             df_admin['Promo Validée ✅'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['validations_promo'].get(x, False))
             df_admin['Sortie Seul'] = df_admin.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Identité'], r['Sortie Seul']), axis=1)
             
-            # Index unique "Élève (Fige)"
             df_admin["_orig_index"] = df_admin.index
             noms_bruts = df_admin["Nom"] + " " + df_admin["Prénom"]
             s_counts = df_admin.groupby(noms_bruts).cumcount()
@@ -584,7 +604,6 @@ else:
             colonnes_a_cacher = ["Identité", "Nom payeur", "Prénom payeur", "Email payeur", "ID_Dossier", "_orig_index"]
             colonnes_possibles = [c for c in df_display.columns if c not in colonnes_a_cacher]
             
-            # Tri des colonnes pour avoir les plus importantes en premier dans le sélecteur
             ordre_prefere = ["Nom", "Prénom", "Licence_FFE", "Type", "Elo_FFE", "Elo Crevette 🦐", "Formule", "Campagne", "Sortie Seul", "Promo Validée ✅", "N° Portable", "EMail"]
             colonnes_possibles = sorted(colonnes_possibles, key=lambda x: ordre_prefere.index(x) if x in ordre_prefere else 999)
 
@@ -616,7 +635,6 @@ else:
                 row_old = df_display.loc[index_fige]
                 row_new = edited_df.loc[index_fige]
                 
-                # On ne vérifie que les colonnes qui sont actuellement affichées et potentiellement modifiées
                 changed_cols = [c for c in colonnes_choisies if str(row_old[c]) != str(row_new[c])]
                 
                 if changed_cols:
@@ -724,8 +742,6 @@ else:
             col_ex1, col_ex2, col_ex3 = st.columns(3)
             
             nom_fich_admin = f"Administration_Club_{date_jour.replace('/', '-')}"
-            
-            # Les exports s'adaptent désormais aux colonnes choisies !
             csv_data_admin = df_display[colonnes_choisies].to_csv(index=True).encode('utf-8')
             col_ex1.download_button("📄 Export Tableau (CSV)", data=csv_data_admin, file_name=f"{nom_fich_admin}.csv", mime="text/csv")
             
