@@ -325,18 +325,30 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
         return rows
     except: return []
 
+# --- ANALYSE ULTRA-ROBUSTE DU FICHIER FFE ---
 def analyser_fichier_ffe(fichier):
+    FFE_LOCAL = "base_ffe_locale_tmp.csv"
     try:
-        if isinstance(fichier, str): df_ffe = pd.read_csv(fichier, sep=None, engine='python') if fichier.endswith('.csv') else pd.read_excel(fichier)
-        else: df_ffe = pd.read_csv(fichier, sep=None, engine='python') if fichier.name.endswith('.csv') else pd.read_excel(fichier)
+        # Enregistrement local temporaire pour forcer une lecture propre
+        if not isinstance(fichier, str):
+            with open(FFE_LOCAL, "wb") as f: f.write(fichier.getbuffer())
+            fichier_a_lire = FFE_LOCAL
+        else:
+            fichier_a_lire = fichier
             
-        col_nom = next((c for c in df_ffe.columns if "nom" in c.lower() and "prenom" not in c.lower()), None)
+        try: df_ffe = pd.read_csv(fichier_a_lire, sep=None, engine='python', encoding='utf-8')
+        except UnicodeDecodeError: df_ffe = pd.read_csv(fichier_a_lire, sep=None, engine='python', encoding='latin1')
+            
+        col_nom = next((c for c in df_ffe.columns if "nom" in str(c).lower() and "prenom" not in str(c).lower() and "prénom" not in str(c).lower()), None)
         col_prenom = next((c for c in df_ffe.columns if "prenom" in str(c).lower() or "prénom" in str(c).lower()), None)
-        col_elo = next((c for c in df_ffe.columns if "elo" in str(c).lower() or "rapide" in str(c).lower()), None)
         
-        # Amélioration de la détection de la colonne Licence
-        col_licence = next((c for c in df_ffe.columns if any(mot in str(c).lower() for mot in ["licence", "code", "ref", "identifiant"])), None)
-        col_dna = next((c for c in df_ffe.columns if "dna" in str(c).lower() or "né" in str(c).lower() or "naissance" in str(c).lower()), None)
+        # Priorité absolue au Rapide, sinon on cherche le standard
+        col_elo = next((c for c in df_ffe.columns if "rapide" in str(c).lower()), None)
+        if not col_elo: col_elo = next((c for c in df_ffe.columns if "elo" in str(c).lower()), None)
+        
+        # RECHERCHE "N° FFE" ou "Licence"
+        col_licence = next((c for c in df_ffe.columns if any(mot in str(c).lower() for mot in ["n° ffe", "licence", "code", "ref", "identifiant"])), None)
+        col_dna = next((c for c in df_ffe.columns if any(mot in str(c).lower() for mot in ["dna", "né", "naissance"])), None)
 
         if col_nom and col_prenom:
             df_ffe['Nom_Norm'] = df_ffe[col_nom].apply(normaliser_nom)
@@ -348,7 +360,9 @@ def analyser_fichier_ffe(fichier):
             df_ffe['Elo_FFE'] = df_ffe[col_elo] if col_elo else 0
             df_ffe['Licence_FFE'] = df_ffe[col_licence].astype(str) if col_licence else "Non croisé"
             return df_ffe[['Cle_Forte', 'Cle_Souple', 'Elo_FFE', 'Licence_FFE']]
-    except: return pd.DataFrame()
+    except Exception as e: 
+        st.sidebar.error(f"Erreur d'analyse du fichier FFE: {e}")
+        return pd.DataFrame()
     return pd.DataFrame()
 
 # --- BARRE LATÉRALE ---
@@ -370,19 +384,19 @@ if st.sidebar.button("🔄 Rafraîchir les données (Cloud)"):
 
 st.sidebar.markdown("---")
 st.sidebar.header("1️⃣ Base FFE (Licences)")
-fichier_ffe = st.sidebar.file_uploader("Fichier FFE (Glissez pour croiser)", type=['csv', 'xls', 'xlsx'])
+fichier_ffe = st.sidebar.file_uploader("Fichier FFE (Glissez votre CSV ici)", type=['csv', 'xls', 'xlsx'])
 if fichier_ffe:
     df_ffe = analyser_fichier_ffe(fichier_ffe)
     if not df_ffe.empty:
         st.session_state['df_ffe'] = df_ffe
-        st.sidebar.success("Fichier FFE prêt pour le prochain croisement !")
+        st.sidebar.success("Fichier FFE chargé en mémoire !")
 elif 'df_ffe' in st.session_state: 
     st.sidebar.info("✅ FFE en mémoire.")
     
-    # --- NOUVEAU BOUTON : RECROISER LES LICENCES ---
+    # BOUTON MAGIQUE POUR FORCER LE CROISEMENT !
     if st.sidebar.button("🔄 Recroiser les Licences FFE"):
         if 'df_adherents' in st.session_state and not st.session_state['df_adherents'].empty:
-            with st.spinner("Recroisement en cours avec la base FFE..."):
+            with st.spinner("Recherche des correspondances dans la base FFE..."):
                 df_base = st.session_state['df_adherents'].copy()
                 
                 df_base['Nom_Norm'] = df_base['Nom'].apply(normaliser_nom)
@@ -395,6 +409,7 @@ elif 'df_ffe' in st.session_state:
                 df_ffe_strict = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Forte'])
                 df_ffe_souple = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Souple'])
                 
+                # Écrase l'ancienne donnée pour forcer la mise à jour
                 df_base = df_base.drop(columns=['Elo_FFE', 'Licence_FFE'], errors='ignore')
                 df_base = pd.merge(df_base, df_ffe_strict[['Cle_Forte', 'Elo_FFE', 'Licence_FFE']], on='Cle_Forte', how='left')
                 
@@ -411,10 +426,10 @@ elif 'df_ffe' in st.session_state:
                 
                 st.session_state['df_adherents'] = df_base
                 sauvegarder_adherents_cloud(df_base)
-                st.sidebar.success("✅ Licences recroisées avec succès !")
+                st.sidebar.success("✅ Licences et Elos recroisés avec succès !")
                 st.rerun()
         else:
-            st.sidebar.warning("Aucun adhérent à croiser.")
+            st.sidebar.warning("Aucun adhérent dans la base à croiser.")
 
 st.sidebar.markdown("---")
 st.sidebar.header("2️⃣ HelloAsso (Nouveaux Inscrits)")
@@ -449,7 +464,6 @@ if st.sidebar.button("⬇️ Lancer la Synchronisation HelloAsso"):
                         identite = r.get('Identité')
                         
                         if id_dos and id_dos != 'nan' and id_dos in ids_supprimes: return False
-                        
                         if not df_local.empty:
                             if 'ID_Dossier' in df_local.columns and id_dos in df_local['ID_Dossier'].dropna().astype(str).values: return False
                             masque = (df_local['Identité'] == identite) & (df_local['Campagne'] == r['Campagne']) & (df_local['Formule'] == r['Formule'])
@@ -549,7 +563,7 @@ else:
                 
             df_admin = df[(df["Campagne"].isin(filtre_camp_admin)) & (df["Type"].isin(filtre_type_admin))].copy()
             
-            if filtre_licence and "Licence_FFE" in df_admin.columns: df_admin = df_admin[df_admin["Licence_FFE"] == "Non croisé"]
+            if filtre_licence and "Licence_FFE" in df_admin.columns: df_admin = df_admin[(df_admin["Licence_FFE"] == "Non croisé") | (df_admin["Licence_FFE"] == "")]
             if filtre_allergie and "Allergies / Médical" in df_admin.columns:
                 mots_sains = ["non", "ras", "rien", "néant", "neant", "aucun", "aucune", "-"]
                 df_admin = df_admin[(df_admin["Allergies / Médical"] != "") & (~df_admin["Allergies / Médical"].str.lower().isin(mots_sains))]
@@ -567,7 +581,7 @@ else:
             df_admin['Sortie Seul'] = df_admin.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Identité'], r['Sortie Seul']), axis=1)
             
             colonnes_prioritaires = [
-                "Nom", "Prénom", "Licence_FFE", "Promo Validée ✅", "Sortie Seul", "Code Promo", "Allergies / Médical", 
+                "Licence_FFE", "Nom", "Prénom", "Promo Validée ✅", "Sortie Seul", "Code Promo", "Allergies / Médical", 
                 "Montant Payé", "Formule", "Campagne", "Nom et prénom du responsable légal", "N° Portable", "N° Portable 2 (en cas d'urgence)", 
                 "EMail", "Adresse", "Ville", "Classe", "Date de naissance", "Taille du t-shirt", "Dans quel ville sera votre créneaux principale",
                 "J'autorise le club à diffuser des photos de moi ou mon enfant en lien avec notre activité sur notre site et sur les réseaux sociaux (Facebook ; Instagram, Twitter):",
