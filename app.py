@@ -325,11 +325,9 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
         return rows
     except: return []
 
-# --- ANALYSE ULTRA-ROBUSTE DU FICHIER FFE ---
 def analyser_fichier_ffe(fichier):
     FFE_LOCAL = "base_ffe_locale_tmp.csv"
     try:
-        # Enregistrement local temporaire pour forcer une lecture propre
         if not isinstance(fichier, str):
             with open(FFE_LOCAL, "wb") as f: f.write(fichier.getbuffer())
             fichier_a_lire = FFE_LOCAL
@@ -341,12 +339,8 @@ def analyser_fichier_ffe(fichier):
             
         col_nom = next((c for c in df_ffe.columns if "nom" in str(c).lower() and "prenom" not in str(c).lower() and "prénom" not in str(c).lower()), None)
         col_prenom = next((c for c in df_ffe.columns if "prenom" in str(c).lower() or "prénom" in str(c).lower()), None)
-        
-        # Priorité absolue au Rapide, sinon on cherche le standard
         col_elo = next((c for c in df_ffe.columns if "rapide" in str(c).lower()), None)
         if not col_elo: col_elo = next((c for c in df_ffe.columns if "elo" in str(c).lower()), None)
-        
-        # RECHERCHE "N° FFE" ou "Licence"
         col_licence = next((c for c in df_ffe.columns if any(mot in str(c).lower() for mot in ["n° ffe", "licence", "code", "ref", "identifiant"])), None)
         col_dna = next((c for c in df_ffe.columns if any(mot in str(c).lower() for mot in ["dna", "né", "naissance"])), None)
 
@@ -393,7 +387,6 @@ if fichier_ffe:
 elif 'df_ffe' in st.session_state: 
     st.sidebar.info("✅ FFE en mémoire.")
     
-    # BOUTON MAGIQUE POUR FORCER LE CROISEMENT !
     if st.sidebar.button("🔄 Recroiser les Licences FFE"):
         if 'df_adherents' in st.session_state and not st.session_state['df_adherents'].empty:
             with st.spinner("Recherche des correspondances dans la base FFE..."):
@@ -409,7 +402,6 @@ elif 'df_ffe' in st.session_state:
                 df_ffe_strict = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Forte'])
                 df_ffe_souple = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Souple'])
                 
-                # Écrase l'ancienne donnée pour forcer la mise à jour
                 df_base = df_base.drop(columns=['Elo_FFE', 'Licence_FFE'], errors='ignore')
                 df_base = pd.merge(df_base, df_ffe_strict[['Cle_Forte', 'Elo_FFE', 'Licence_FFE']], on='Cle_Forte', how='left')
                 
@@ -462,7 +454,6 @@ if st.sidebar.button("⬇️ Lancer la Synchronisation HelloAsso"):
                     def est_valide(r):
                         id_dos = str(r.get('ID_Dossier', ''))
                         identite = r.get('Identité')
-                        
                         if id_dos and id_dos != 'nan' and id_dos in ids_supprimes: return False
                         if not df_local.empty:
                             if 'ID_Dossier' in df_local.columns and id_dos in df_local['ID_Dossier'].dropna().astype(str).values: return False
@@ -580,20 +571,7 @@ else:
             df_admin['Promo Validée ✅'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['validations_promo'].get(x, False))
             df_admin['Sortie Seul'] = df_admin.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Identité'], r['Sortie Seul']), axis=1)
             
-            colonnes_prioritaires = [
-                "Licence_FFE", "Nom", "Prénom", "Promo Validée ✅", "Sortie Seul", "Code Promo", "Allergies / Médical", 
-                "Montant Payé", "Formule", "Campagne", "Nom et prénom du responsable légal", "N° Portable", "N° Portable 2 (en cas d'urgence)", 
-                "EMail", "Adresse", "Ville", "Classe", "Date de naissance", "Taille du t-shirt", "Dans quel ville sera votre créneaux principale",
-                "J'autorise le club à diffuser des photos de moi ou mon enfant en lien avec notre activité sur notre site et sur les réseaux sociaux (Facebook ; Instagram, Twitter):",
-                "J’autorise le club à utiliser des images de moi ou mon enfant pour des objets publicitaires (prospectus de présentation du club, oriflamme, kakemono) :",
-                "J’accepte de recevoir les informations sur l’actualité du club (soirée blitz, organisation de stages pendant les vacances…) ainsi que les annonces des prochains tournois par mail",
-                'e confirme avoir renseigné le questionnaire de santé "Sport" (mineurs) https://www.echecs.asso.fr/Actus/14098/questionnaire_mineur.pdf'
-            ]
-            colonnes_presentes = [c for c in colonnes_prioritaires if c in df_admin.columns]
-            colonnes_a_exclure = ["Identité", "Type", "Elo_FFE", "Nom payeur", "Prénom payeur", "Email payeur", "ID_Dossier"]
-            autres_colonnes = [c for c in df_admin.columns if c not in colonnes_presentes and c not in colonnes_a_exclure]
-            colonnes_finales = list(dict.fromkeys(colonnes_presentes + autres_colonnes + ["Elo Crevette 🦐", "Identité"]))
-            
+            # Index unique "Élève (Fige)"
             df_admin["_orig_index"] = df_admin.index
             noms_bruts = df_admin["Nom"] + " " + df_admin["Prénom"]
             s_counts = df_admin.groupby(noms_bruts).cumcount()
@@ -601,16 +579,32 @@ else:
             
             df_admin.insert(0, "👤 Élève (Fige)", index_names)
             df_display = df_admin.set_index("👤 Élève (Fige)")
-            cols_to_use = [c for c in colonnes_finales if c in df_display.columns]
+            
+            # --- SÉLECTEUR DE COLONNES (ERGONOMIE) ---
+            colonnes_a_cacher = ["Identité", "Nom payeur", "Prénom payeur", "Email payeur", "ID_Dossier", "_orig_index"]
+            colonnes_possibles = [c for c in df_display.columns if c not in colonnes_a_cacher]
+            
+            # Tri des colonnes pour avoir les plus importantes en premier dans le sélecteur
+            ordre_prefere = ["Nom", "Prénom", "Licence_FFE", "Type", "Elo_FFE", "Elo Crevette 🦐", "Formule", "Campagne", "Sortie Seul", "Promo Validée ✅", "N° Portable", "EMail"]
+            colonnes_possibles = sorted(colonnes_possibles, key=lambda x: ordre_prefere.index(x) if x in ordre_prefere else 999)
+
+            colonnes_par_defaut = ["Licence_FFE", "Type", "Elo_FFE", "Elo Crevette 🦐", "Formule", "Campagne"]
+            colonnes_par_defaut = [c for c in colonnes_par_defaut if c in colonnes_possibles]
+            
+            st.markdown("##### ⚙️ Affichage sur mesure")
+            colonnes_choisies = st.multiselect(
+                "Sélectionnez les colonnes à afficher (💡 Ajoutez 'Nom' et 'Prénom' si vous devez corriger une faute de frappe) :",
+                options=colonnes_possibles,
+                default=colonnes_par_defaut
+            )
             
             st.metric("Dossiers affichés", len(df_display))
             
             # --- TABLEAU ÉDITABLE ---
             edited_df = st.data_editor(
-                df_display[cols_to_use],
+                df_display[colonnes_choisies],
                 use_container_width=True,
                 column_config={
-                    "Identité": None,
                     "Promo Validée ✅": st.column_config.CheckboxColumn("Promo Validée ✅"),
                     "Sortie Seul": st.column_config.SelectboxColumn("Sortie Seul", options=["✅ OUI", "❌ NON", "N/A (École)", "-"])
                 }
@@ -621,7 +615,9 @@ else:
             for index_fige in edited_df.index:
                 row_old = df_display.loc[index_fige]
                 row_new = edited_df.loc[index_fige]
-                changed_cols = [c for c in cols_to_use if str(row_old[c]) != str(row_new[c])]
+                
+                # On ne vérifie que les colonnes qui sont actuellement affichées et potentiellement modifiées
+                changed_cols = [c for c in colonnes_choisies if str(row_old[c]) != str(row_new[c])]
                 
                 if changed_cols:
                     changement_detecte = True
@@ -728,17 +724,19 @@ else:
             col_ex1, col_ex2, col_ex3 = st.columns(3)
             
             nom_fich_admin = f"Administration_Club_{date_jour.replace('/', '-')}"
-            csv_data_admin = df_display[cols_to_use].to_csv(index=True).encode('utf-8')
+            
+            # Les exports s'adaptent désormais aux colonnes choisies !
+            csv_data_admin = df_display[colonnes_choisies].to_csv(index=True).encode('utf-8')
             col_ex1.download_button("📄 Export Tableau (CSV)", data=csv_data_admin, file_name=f"{nom_fich_admin}.csv", mime="text/csv")
             
             try:
                 buffer_admin = io.BytesIO()
-                with pd.ExcelWriter(buffer_admin, engine='xlsxwriter') as writer: df_display[cols_to_use].to_excel(writer, index=True, sheet_name='Base')
+                with pd.ExcelWriter(buffer_admin, engine='xlsxwriter') as writer: df_display[colonnes_choisies].to_excel(writer, index=True, sheet_name='Base')
                 col_ex2.download_button("📊 Export Tableau (Excel)", data=buffer_admin.getvalue(), file_name=f"{nom_fich_admin}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
             except:
                 try:
                     buffer_admin = io.BytesIO()
-                    with pd.ExcelWriter(buffer_admin, engine='openpyxl') as writer: df_display[cols_to_use].to_excel(writer, index=True, sheet_name='Base')
+                    with pd.ExcelWriter(buffer_admin, engine='openpyxl') as writer: df_display[colonnes_choisies].to_excel(writer, index=True, sheet_name='Base')
                     col_ex2.download_button("📊 Export Tableau (Excel)", data=buffer_admin.getvalue(), file_name=f"{nom_fich_admin}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
                 except: pass
 
