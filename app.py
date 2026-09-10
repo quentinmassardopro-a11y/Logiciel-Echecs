@@ -117,15 +117,18 @@ if 'db' not in st.session_state:
         st.session_state['db'] = charger_base_cloud()
 
 if 'df_adherents' not in st.session_state:
-    with st.spinner("Récupération et nettoyage de la base adhérents..."):
+    with st.spinner("Récupération de la base adhérents..."):
         df_loaded = charger_adherents_cloud()
         if not df_loaded.empty: 
             len_avant = len(df_loaded)
             if 'ID_Dossier' in df_loaded.columns:
                 df_loaded['ID_Dossier'] = df_loaded['ID_Dossier'].replace('', float('nan'))
-                df_loaded = df_loaded.sort_values('ID_Dossier', na_position='first')
-            
-            df_loaded = df_loaded.drop_duplicates(subset=['Identité', 'Campagne', 'Formule'], keep='last').reset_index(drop=True)
+                # Nettoyage sécurisé : on ne supprime que si l'ID de facture HelloAsso est strictement identique
+                mask_valid_id = df_loaded['ID_Dossier'].notna() & (df_loaded['ID_Dossier'].astype(str) != 'nan') & (df_loaded['ID_Dossier'].astype(str).str.strip() != '')
+                df_valid = df_loaded[mask_valid_id].drop_duplicates(subset=['ID_Dossier'], keep='last')
+                df_invalid = df_loaded[~mask_valid_id]
+                df_loaded = pd.concat([df_valid, df_invalid]).reset_index(drop=True)
+                
             st.session_state['df_adherents'] = df_loaded
             if len(df_loaded) < len_avant:
                 sauvegarder_adherents_cloud(df_loaded)
@@ -186,22 +189,15 @@ def generer_appariements_suisses(joueurs_scores, elos_dict, historique_rencontre
             appariements.append((j1, j2_trouve))
     return appariements, exempt, historique_rencontres
 
-# --- FONCTION INTELLIGENTE : DÉTECTION DES VRAIS/FAUX ELOS FFE ---
 def get_elo_actif(identite, df_adherents, db):
     try:
         row = df_adherents[df_adherents["Identité"] == identite].iloc[0]
         elo_ffe = int(row.get("Elo_FFE", 0))
         licence = str(row.get("Licence_FFE", "Non croisé"))
-        
-        # Liste des Elos virtuels par défaut donnés par la FFE (Petits-Poussins à Juniors)
         elos_virtuels_ffe = [799, 899, 999, 1099, 1199, 1299, 1399, 1499]
-        
-        # S'il a une licence, un Elo > 0, et que ce n'est PAS un Elo par défaut, il joue en FFE
         if licence != "Non croisé" and elo_ffe > 0 and elo_ffe not in elos_virtuels_ffe: 
             return elo_ffe, "⚡ FFE/FIDE"
     except: pass
-    
-    # Sinon, il joue dans la ligue du club avec son Elo Crevette
     return db['elos_crevette'].get(identite, 400), "🦐 Crevette"
 
 def affectations_automatiques(row):
@@ -463,13 +459,10 @@ if st.sidebar.button("⬇️ Lancer la Synchronisation HelloAsso"):
                     
                     def est_valide(r):
                         id_dos = str(r.get('ID_Dossier', ''))
-                        identite = r.get('Identité')
-                        
                         if id_dos and id_dos != 'nan' and id_dos in ids_supprimes: return False
                         if not df_local.empty:
+                            # Ne bloque que si la facture (ID_Dossier) est déjà dans la base
                             if 'ID_Dossier' in df_local.columns and id_dos in df_local['ID_Dossier'].dropna().astype(str).values: return False
-                            masque = (df_local['Identité'] == identite) & (df_local['Campagne'] == r['Campagne']) & (df_local['Formule'] == r['Formule'])
-                            if masque.any(): return False
                         return True
                         
                     nouveaux = df_new_fetch[df_new_fetch.apply(est_valide, axis=1)].copy()
@@ -542,7 +535,7 @@ else:
         tab_admin, tab_ecoles, tab_cartes, tab_historique = st.tabs(["📊 Base Adhérents", "🏫 Écoles", "🎟️ Cartes de Centres", "📅 Historique Appels"])
         
         with tab_admin:
-            # --- NOUVEAU DOSSIER ÉLÈVE DÉTAILLÉ ---
+            # --- DOSSIER ÉLÈVE DÉTAILLÉ ---
             st.markdown('<div class="recherche-rapide">', unsafe_allow_html=True)
             st.markdown("#### 🔍 Dossier Complet de l'Élève")
             recherche_nom = st.selectbox("Taper un nom/prénom pour ouvrir le dossier complet :", options=[""] + sorted(df["Identité"].tolist()), label_visibility="collapsed")
@@ -637,7 +630,7 @@ else:
                 }
             )
             
-            # --- DETECTION DES MODIFICATIONS ---
+            # --- DETECTION DES MODIFICATIONS 100% SÉCURISÉE ---
             changement_detecte = False
             for index_fige in edited_df.index:
                 row_old = df_display.loc[index_fige]
@@ -659,31 +652,35 @@ else:
                         elif col == "Elo Crevette 🦐": st.session_state['db']['elos_crevette'][identite] = int(new_val) if str(new_val).isdigit() else 400
                         else: st.session_state['df_adherents'].at[idx_main, col] = new_val
                             
+                    # Mécanique de Cascade ciblée UNIQUEMENT sur la ligne modifiée
                     if "Nom" in changed_cols or "Prénom" in changed_cols:
                         new_nom = str(st.session_state['df_adherents'].at[idx_main, "Nom"]).strip().upper()
                         new_prenom = str(st.session_state['df_adherents'].at[idx_main, "Prénom"]).strip().title()
                         new_identite = f"{new_prenom} {new_nom}"
 
                         if new_identite != identite:
-                            mask = st.session_state['df_adherents']['Identité'] == identite
-                            st.session_state['df_adherents'].loc[mask, "Nom"] = new_nom
-                            st.session_state['df_adherents'].loc[mask, "Prénom"] = new_prenom
-                            st.session_state['df_adherents'].loc[mask, "Identité"] = new_identite
+                            st.session_state['df_adherents'].at[idx_main, "Identité"] = new_identite
                             
-                            st.session_state['db']['elos_crevette'][new_identite] = st.session_state['db']['elos_crevette'].pop(identite, 400)
-                            st.session_state['db']['validations_promo'][new_identite] = st.session_state['db']['validations_promo'].pop(identite, False)
-                            st.session_state['db']['sorties_manuelles'][new_identite] = st.session_state['db']['sorties_manuelles'].pop(identite, "-")
+                            if new_identite not in st.session_state['db']['elos_crevette']:
+                                st.session_state['db']['elos_crevette'][new_identite] = st.session_state['db']['elos_crevette'].get(identite, 400)
+                            if new_identite not in st.session_state['db']['validations_promo']:
+                                st.session_state['db']['validations_promo'][new_identite] = st.session_state['db']['validations_promo'].get(identite, False)
+                            if new_identite not in st.session_state['db']['sorties_manuelles']:
+                                st.session_state['db']['sorties_manuelles'][new_identite] = st.session_state['db']['sorties_manuelles'].get(identite, "-")
                                 
-                            for c in st.session_state['db']['affectations_creneaux']:
-                                if identite in st.session_state['db']['affectations_creneaux'][c]:
-                                    st.session_state['db']['affectations_creneaux'][c].remove(identite)
-                                    if new_identite not in st.session_state['db']['affectations_creneaux'][c]:
-                                        st.session_state['db']['affectations_creneaux'][c].append(new_identite)
-                                        
-                            if identite in st.session_state['db'].get('eleves_deja_affectes', []):
-                                st.session_state['db']['eleves_deja_affectes'].remove(identite)
-                                if new_identite not in st.session_state['db']['eleves_deja_affectes']:
-                                    st.session_state['db']['eleves_deja_affectes'].append(new_identite)
+                            row_updated = st.session_state['df_adherents'].loc[idx_main]
+                            creneaux_autos = affectations_automatiques(row_updated)
+                            
+                            for c_auto in creneaux_autos:
+                                if c_auto not in st.session_state['db']['affectations_creneaux']:
+                                    st.session_state['db']['affectations_creneaux'][c_auto] = []
+                                if new_identite not in st.session_state['db']['affectations_creneaux'][c_auto]:
+                                    st.session_state['db']['affectations_creneaux'][c_auto].append(new_identite)
+                                    
+                            if new_identite not in st.session_state['db'].get('eleves_deja_affectes', []):
+                                st.session_state['db']['eleves_deja_affectes'].append(new_identite)
+                            if new_identite not in st.session_state['db'].get('identites_helloasso_connues', []):
+                                st.session_state['db']['identites_helloasso_connues'].append(new_identite)
 
             if changement_detecte:
                 sauvegarder_base_cloud(st.session_state['db'])
@@ -693,22 +690,20 @@ else:
             # --- OUTIL DE SUPPRESSION (ZONE DE DANGER) ---
             st.markdown("---")
             with st.expander("🗑️ Zone de Danger : Nettoyage et Suppressions"):
-                st.warning("Les élèves supprimés n'apparaîtront plus. Leur identifiant est mis sur Liste Noire.")
+                st.warning("Les élèves supprimés n'apparaîtront plus. Leur identifiant de paiement est mis sur Liste Noire.")
                 
-                if st.button("🧹 Nettoyer les doublons fantômes automatiquement"):
+                if st.button("🧹 Nettoyer les doublons techniques (Garde les frères/sœurs intacts)"):
                     df_nettoye = st.session_state['df_adherents'].copy()
-                    if 'ID_Dossier' in df_nettoye.columns:
-                        df_nettoye['has_id'] = df_nettoye['ID_Dossier'].apply(lambda x: 1 if str(x) not in ['nan', '', 'None'] else 0)
-                        df_nettoye = df_nettoye.sort_values('has_id')
-                        df_nettoye = df_nettoye.drop(columns=['has_id'])
-                    
                     taille_avant = len(df_nettoye)
-                    df_nettoye = df_nettoye.drop_duplicates(subset=['Identité', 'Campagne', 'Formule'], keep='last').reset_index(drop=True)
+                    if 'ID_Dossier' in df_nettoye.columns:
+                        mask_valid_id = df_nettoye['ID_Dossier'].notna() & (df_nettoye['ID_Dossier'].astype(str) != 'nan') & (df_nettoye['ID_Dossier'].astype(str).str.strip() != '')
+                        df_valid = df_nettoye[mask_valid_id].drop_duplicates(subset=['ID_Dossier'], keep='last')
+                        df_invalid = df_nettoye[~mask_valid_id]
+                        df_nettoye = pd.concat([df_valid, df_invalid]).reset_index(drop=True)
                     taille_apres = len(df_nettoye)
-                    
                     st.session_state['df_adherents'] = df_nettoye
                     sauvegarder_adherents_cloud(df_nettoye)
-                    st.success(f"Nettoyage parfait ! {taille_avant - taille_apres} doublons supprimés.")
+                    st.success(f"Nettoyage sécurisé terminé ! {taille_avant - taille_apres} doublons techniques supprimés.")
                     st.rerun()
                 
                 st.markdown("---")
