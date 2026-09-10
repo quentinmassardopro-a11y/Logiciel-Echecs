@@ -186,13 +186,22 @@ def generer_appariements_suisses(joueurs_scores, elos_dict, historique_rencontre
             appariements.append((j1, j2_trouve))
     return appariements, exempt, historique_rencontres
 
+# --- FONCTION INTELLIGENTE : DÉTECTION DES VRAIS/FAUX ELOS FFE ---
 def get_elo_actif(identite, df_adherents, db):
     try:
         row = df_adherents[df_adherents["Identité"] == identite].iloc[0]
         elo_ffe = int(row.get("Elo_FFE", 0))
         licence = str(row.get("Licence_FFE", "Non croisé"))
-        if licence != "Non croisé" and elo_ffe > 0: return elo_ffe, "⚡ FFE/FIDE"
+        
+        # Liste des Elos virtuels par défaut donnés par la FFE (Petits-Poussins à Juniors)
+        elos_virtuels_ffe = [799, 899, 999, 1099, 1199, 1299, 1399, 1499]
+        
+        # S'il a une licence, un Elo > 0, et que ce n'est PAS un Elo par défaut, il joue en FFE
+        if licence != "Non croisé" and elo_ffe > 0 and elo_ffe not in elos_virtuels_ffe: 
+            return elo_ffe, "⚡ FFE/FIDE"
     except: pass
+    
+    # Sinon, il joue dans la ligue du club avec son Elo Crevette
     return db['elos_crevette'].get(identite, 400), "🦐 Crevette"
 
 def affectations_automatiques(row):
