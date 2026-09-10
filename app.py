@@ -117,13 +117,12 @@ if 'db' not in st.session_state:
         st.session_state['db'] = charger_base_cloud()
 
 if 'df_adherents' not in st.session_state:
-    with st.spinner("Récupération de la base adhérents..."):
+    with st.spinner("Récupération et nettoyage de la base adhérents..."):
         df_loaded = charger_adherents_cloud()
         if not df_loaded.empty: 
             len_avant = len(df_loaded)
             if 'ID_Dossier' in df_loaded.columns:
                 df_loaded['ID_Dossier'] = df_loaded['ID_Dossier'].replace('', float('nan'))
-                # Nettoyage sécurisé : on ne supprime que si l'ID de facture HelloAsso est strictement identique
                 mask_valid_id = df_loaded['ID_Dossier'].notna() & (df_loaded['ID_Dossier'].astype(str) != 'nan') & (df_loaded['ID_Dossier'].astype(str).str.strip() != '')
                 df_valid = df_loaded[mask_valid_id].drop_duplicates(subset=['ID_Dossier'], keep='last')
                 df_invalid = df_loaded[~mask_valid_id]
@@ -459,9 +458,9 @@ if st.sidebar.button("⬇️ Lancer la Synchronisation HelloAsso"):
                     
                     def est_valide(r):
                         id_dos = str(r.get('ID_Dossier', ''))
+                        
                         if id_dos and id_dos != 'nan' and id_dos in ids_supprimes: return False
                         if not df_local.empty:
-                            # Ne bloque que si la facture (ID_Dossier) est déjà dans la base
                             if 'ID_Dossier' in df_local.columns and id_dos in df_local['ID_Dossier'].dropna().astype(str).values: return False
                         return True
                         
@@ -593,9 +592,10 @@ else:
             df_admin['Promo Validée ✅'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['validations_promo'].get(x, False))
             df_admin['Sortie Seul'] = df_admin.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Identité'], r['Sortie Seul']), axis=1)
             
+            # --- CRÉATION DE L'INDEX FIABLE ---
             df_admin["_orig_index"] = df_admin.index
-            noms_bruts = df_admin["Nom"] + " " + df_admin["Prénom"]
-            s_counts = df_admin.groupby(noms_bruts).cumcount()
+            noms_bruts = df_admin["Nom"].fillna("Inconnu").astype(str) + " " + df_admin["Prénom"].fillna("").astype(str)
+            s_counts = df_admin.groupby(noms_bruts, dropna=False).cumcount()
             index_names = noms_bruts + s_counts.apply(lambda x: f" ({x})" if x > 0 else "")
             
             df_admin.insert(0, "👤 Élève (Fige)", index_names)
@@ -633,8 +633,16 @@ else:
             # --- DETECTION DES MODIFICATIONS 100% SÉCURISÉE ---
             changement_detecte = False
             for index_fige in edited_df.index:
+                # BLOUCLIER ANTI-KEYERROR: On s'assure que la ligne existe toujours avant de la comparer
+                if index_fige not in df_display.index:
+                    continue
+                    
                 row_old = df_display.loc[index_fige]
                 row_new = edited_df.loc[index_fige]
+                
+                # Double sécurité si un doublon parfait a survécu
+                if isinstance(row_old, pd.DataFrame): row_old = row_old.iloc[0]
+                if isinstance(row_new, pd.DataFrame): row_new = row_new.iloc[0]
                 
                 changed_cols = [c for c in colonnes_choisies if str(row_old[c]) != str(row_new[c])]
                 
