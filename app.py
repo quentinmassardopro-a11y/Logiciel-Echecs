@@ -71,7 +71,7 @@ def charger_base_cloud():
             db = json.loads("".join(vals))
             return db
     except Exception as e:
-        pass
+        st.sidebar.error(f"❌ Erreur lecture DB : {e}")
     return initialiser_memoire_vierge()
 
 def sauvegarder_base_cloud(db):
@@ -82,10 +82,10 @@ def sauvegarder_base_cloud(db):
         json_str = json.dumps(db, ensure_ascii=False)
         chunks = [[json_str[i:i+40000]] for i in range(0, len(json_str), 40000)]
         ws.clear()
-        try: ws.update(chunks)
-        except: ws.update("A1", chunks)
+        try: ws.update(values=chunks, range_name="A1")
+        except TypeError: ws.update("A1", chunks)
     except Exception as e:
-        pass
+        st.sidebar.error(f"❌ Erreur écriture DB : {e}")
 
 def charger_adherents_cloud():
     try:
@@ -95,7 +95,7 @@ def charger_adherents_cloud():
         data = ws.get_all_records()
         if data: return pd.DataFrame(data)
     except Exception as e:
-        pass
+        st.sidebar.error(f"❌ Erreur lecture Adhérents : {e}")
     return pd.DataFrame()
 
 def sauvegarder_adherents_cloud(df):
@@ -106,10 +106,10 @@ def sauvegarder_adherents_cloud(df):
         ws.clear()
         if not df.empty:
             data = [df.columns.values.tolist()] + df.fillna("").astype(str).values.tolist()
-            try: ws.update(data)
-            except: ws.update("A1", data)
+            try: ws.update(values=data, range_name="A1")
+            except TypeError: ws.update("A1", data)
     except Exception as e:
-        pass
+        st.sidebar.error(f"❌ Erreur écriture Adhérents : {e}")
 
 # --- CHARGEMENT SÉCURISÉ & AUTO-NETTOYAGE DES DOUBLONS ---
 if 'db' not in st.session_state: 
@@ -458,7 +458,6 @@ if st.sidebar.button("⬇️ Lancer la Synchronisation HelloAsso"):
                     
                     def est_valide(r):
                         id_dos = str(r.get('ID_Dossier', ''))
-                        
                         if id_dos and id_dos != 'nan' and id_dos in ids_supprimes: return False
                         if not df_local.empty:
                             if 'ID_Dossier' in df_local.columns and id_dos in df_local['ID_Dossier'].dropna().astype(str).values: return False
@@ -592,10 +591,9 @@ else:
             df_admin['Promo Validée ✅'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['validations_promo'].get(x, False))
             df_admin['Sortie Seul'] = df_admin.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Identité'], r['Sortie Seul']), axis=1)
             
-            # --- CRÉATION DE L'INDEX FIABLE ---
             df_admin["_orig_index"] = df_admin.index
-            noms_bruts = df_admin["Nom"].fillna("Inconnu").astype(str) + " " + df_admin["Prénom"].fillna("").astype(str)
-            s_counts = df_admin.groupby(noms_bruts, dropna=False).cumcount()
+            noms_bruts = df_admin["Nom"] + " " + df_admin["Prénom"]
+            s_counts = df_admin.groupby(noms_bruts).cumcount()
             index_names = noms_bruts + s_counts.apply(lambda x: f" ({x})" if x > 0 else "")
             
             df_admin.insert(0, "👤 Élève (Fige)", index_names)
@@ -633,14 +631,12 @@ else:
             # --- DETECTION DES MODIFICATIONS 100% SÉCURISÉE ---
             changement_detecte = False
             for index_fige in edited_df.index:
-                # BLOUCLIER ANTI-KEYERROR: On s'assure que la ligne existe toujours avant de la comparer
                 if index_fige not in df_display.index:
                     continue
                     
                 row_old = df_display.loc[index_fige]
                 row_new = edited_df.loc[index_fige]
                 
-                # Double sécurité si un doublon parfait a survécu
                 if isinstance(row_old, pd.DataFrame): row_old = row_old.iloc[0]
                 if isinstance(row_new, pd.DataFrame): row_new = row_new.iloc[0]
                 
@@ -660,7 +656,7 @@ else:
                         elif col == "Elo Crevette 🦐": st.session_state['db']['elos_crevette'][identite] = int(new_val) if str(new_val).isdigit() else 400
                         else: st.session_state['df_adherents'].at[idx_main, col] = new_val
                             
-                    # Mécanique de Cascade ciblée UNIQUEMENT sur la ligne modifiée
+                    # Mécanique de Renommage Chirurgical (Impacte UNIQUEMENT la ligne modifiée)
                     if "Nom" in changed_cols or "Prénom" in changed_cols:
                         new_nom = str(st.session_state['df_adherents'].at[idx_main, "Nom"]).strip().upper()
                         new_prenom = str(st.session_state['df_adherents'].at[idx_main, "Prénom"]).strip().title()
@@ -669,6 +665,7 @@ else:
                         if new_identite != identite:
                             st.session_state['df_adherents'].at[idx_main, "Identité"] = new_identite
                             
+                            # On transfère l'expérience et le dossier vers la nouvelle soeur/le nouveau frère
                             if new_identite not in st.session_state['db']['elos_crevette']:
                                 st.session_state['db']['elos_crevette'][new_identite] = st.session_state['db']['elos_crevette'].get(identite, 400)
                             if new_identite not in st.session_state['db']['validations_promo']:
@@ -699,20 +696,6 @@ else:
             st.markdown("---")
             with st.expander("🗑️ Zone de Danger : Nettoyage et Suppressions"):
                 st.warning("Les élèves supprimés n'apparaîtront plus. Leur identifiant de paiement est mis sur Liste Noire.")
-                
-                if st.button("🧹 Nettoyer les doublons techniques (Garde les frères/sœurs intacts)"):
-                    df_nettoye = st.session_state['df_adherents'].copy()
-                    taille_avant = len(df_nettoye)
-                    if 'ID_Dossier' in df_nettoye.columns:
-                        mask_valid_id = df_nettoye['ID_Dossier'].notna() & (df_nettoye['ID_Dossier'].astype(str) != 'nan') & (df_nettoye['ID_Dossier'].astype(str).str.strip() != '')
-                        df_valid = df_nettoye[mask_valid_id].drop_duplicates(subset=['ID_Dossier'], keep='last')
-                        df_invalid = df_nettoye[~mask_valid_id]
-                        df_nettoye = pd.concat([df_valid, df_invalid]).reset_index(drop=True)
-                    taille_apres = len(df_nettoye)
-                    st.session_state['df_adherents'] = df_nettoye
-                    sauvegarder_adherents_cloud(df_nettoye)
-                    st.success(f"Nettoyage sécurisé terminé ! {taille_avant - taille_apres} doublons techniques supprimés.")
-                    st.rerun()
                 
                 st.markdown("---")
                 options_suppr = []
