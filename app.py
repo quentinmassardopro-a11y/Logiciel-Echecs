@@ -70,8 +70,7 @@ def charger_base_cloud():
         if vals:
             db = json.loads("".join(vals))
             return db
-    except Exception as e:
-        pass
+    except Exception: pass
     return initialiser_memoire_vierge()
 
 def sauvegarder_base_cloud(db):
@@ -86,8 +85,7 @@ def sauvegarder_base_cloud(db):
         except TypeError: 
             try: ws.update("A1", chunks)
             except Exception: pass
-    except Exception as e:
-        pass
+    except Exception: pass
 
 def charger_adherents_cloud():
     try:
@@ -95,20 +93,8 @@ def charger_adherents_cloud():
         sh = client.open("Base_Calanques_DB")
         ws = get_or_create_worksheet(sh, "Adherents")
         data = ws.get_all_records()
-        if data: 
-            df = pd.DataFrame(data)
-            # DÉDUPLICATION THERMONUCLÉAIRE : Détruit les clones parfaits dès le chargement
-            taille_avant = len(df)
-            df['Nom_Temp'] = df['Nom'].astype(str).str.strip().str.upper()
-            df['Prenom_Temp'] = df['Prénom'].astype(str).str.strip().str.title()
-            df = df.drop_duplicates(subset=['Nom_Temp', 'Prenom_Temp', 'Campagne', 'Formule'], keep='last')
-            df = df.drop(columns=['Nom_Temp', 'Prenom_Temp']).reset_index(drop=True)
-            # Sauvegarder automatiquement si on a nettoyé des clones
-            if len(df) < taille_avant:
-                sauvegarder_adherents_cloud(df)
-            return df
-    except Exception as e:
-        pass
+        if data: return pd.DataFrame(data)
+    except Exception: pass
     return pd.DataFrame()
 
 def sauvegarder_adherents_cloud(df):
@@ -123,17 +109,29 @@ def sauvegarder_adherents_cloud(df):
             except TypeError: 
                 try: ws.update("A1", data)
                 except Exception: pass
-    except Exception as e:
-        pass
+    except Exception: pass
 
-# --- CHARGEMENT SÉCURISÉ ---
+# --- CHARGEMENT SÉCURISÉ & DÉDUPLICATION STRICTE PAR FACTURE (FINI LES SOEURS EFFACÉES) ---
 if 'db' not in st.session_state: 
     with st.spinner("Connexion sécurisée au Cloud Google..."):
         st.session_state['db'] = charger_base_cloud()
 
 if 'df_adherents' not in st.session_state:
-    with st.spinner("Récupération et nettoyage de la base adhérents..."):
-        st.session_state['df_adherents'] = charger_adherents_cloud()
+    with st.spinner("Récupération de la base adhérents..."):
+        df_loaded = charger_adherents_cloud()
+        if not df_loaded.empty: 
+            len_avant = len(df_loaded)
+            # On ne dédoublonne QUE sur les vrais numéros de dossier HelloAsso !
+            if 'ID_Dossier' in df_loaded.columns:
+                df_loaded['ID_Dossier'] = df_loaded['ID_Dossier'].replace('', float('nan'))
+                mask_valid_id = df_loaded['ID_Dossier'].notna() & (df_loaded['ID_Dossier'].astype(str) != 'nan') & (df_loaded['ID_Dossier'].astype(str).str.strip() != '')
+                df_valid = df_loaded[mask_valid_id].drop_duplicates(subset=['ID_Dossier'], keep='last')
+                df_invalid = df_loaded[~mask_valid_id]
+                df_loaded = pd.concat([df_valid, df_invalid]).reset_index(drop=True)
+                
+            st.session_state['df_adherents'] = df_loaded
+            if len(df_loaded) < len_avant:
+                sauvegarder_adherents_cloud(df_loaded)
 
 # --- BOUCLIER ANTI-KEYERROR ABSOLU ---
 default_mem = initialiser_memoire_vierge()
@@ -461,10 +459,7 @@ if st.sidebar.button("⬇️ Lancer la Synchronisation HelloAsso"):
                     
                     def est_valide(r):
                         id_dos = str(r.get('ID_Dossier', ''))
-                        
-                        # Bloque les dossiers mis manuellement à la corbeille
                         if id_dos and id_dos != 'nan' and id_dos in ids_supprimes: return False
-                        
                         if not df_local.empty:
                             if 'ID_Dossier' in df_local.columns and id_dos in df_local['ID_Dossier'].dropna().astype(str).values: return False
                         return True
@@ -587,22 +582,16 @@ else:
             
             if recherche_nom:
                 contact = df[df["Identité"] == recherche_nom].iloc[0].copy()
-                
                 s_actuelle = st.session_state['db']['sorties_manuelles'].get(contact["Identité"], contact.get("Sortie Seul", "-"))
-                elo_crev = st.session_state['db']['elos_crevette'].get(contact["Identité"], 400)
-                promo_val = st.session_state['db']['validations_promo'].get(contact["Identité"], False)
-                
                 contact["Sortie Seul (Temps Réel)"] = s_actuelle
-                contact["Elo Crevette 🦐"] = elo_crev
-                contact["Promo Validée ✅"] = "Oui" if promo_val else "Non"
+                contact["Elo Crevette 🦐"] = st.session_state['db']['elos_crevette'].get(contact["Identité"], 400)
+                contact["Promo Validée ✅"] = "Oui" if st.session_state['db']['validations_promo'].get(contact["Identité"], False) else "Non"
                 
                 st.markdown("---")
                 c_info1, c_info2 = st.columns(2)
-                
                 infos = {k: v for k, v in contact.items() if k not in ["_orig_index", "Identité"] and str(v).strip() and str(v) != "nan"}
                 items = list(infos.items())
                 mid = (len(items) + 1) // 2
-                
                 for i, (k, v) in enumerate(items):
                     if i < mid: c_info1.markdown(f"**{k}:** {v}")
                     else: c_info2.markdown(f"**{k}:** {v}")
@@ -611,115 +600,96 @@ else:
             col_ad1, col_ad2 = st.columns(2)
             with col_ad1: filtre_camp_admin = st.multiselect("Campagnes :", options=df["Campagne"].unique(), default=df["Campagne"].unique())
             with col_ad2: filtre_type_admin = st.multiselect("Types :", options=df["Type"].unique(), default=df["Type"].unique())
-            
-            st.markdown("##### ⚡ Filtres d'Action Rapide")
-            c_f1, c_f2, c_f3, c_f4 = st.columns(4)
-            with c_f1: filtre_licence = st.checkbox("🚫 Sans Licence")
-            with c_f2: filtre_allergie = st.checkbox("🤧 Allergies / Médical")
-            with c_f3: filtre_sortie = st.checkbox("🚶 Sorties Autorisées (OUI)")
-            with c_f4: filtre_carte = st.checkbox("🎟️ Carte Cassis/Carnoux Manquante")
                 
             df_admin = df[(df["Campagne"].isin(filtre_camp_admin)) & (df["Type"].isin(filtre_type_admin))].copy()
             
-            if filtre_licence and "Licence_FFE" in df_admin.columns: df_admin = df_admin[(df_admin["Licence_FFE"] == "Non croisé") | (df_admin["Licence_FFE"] == "")]
-            if filtre_allergie and "Allergies / Médical" in df_admin.columns:
-                mots_sains = ["non", "ras", "rien", "néant", "neant", "aucun", "aucune", "-"]
-                df_admin = df_admin[(df_admin["Allergies / Médical"] != "") & (~df_admin["Allergies / Médical"].str.lower().isin(mots_sains))]
-            if filtre_sortie: df_admin = df_admin[df_admin.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Identité'], r['Sortie Seul']) == "✅ OUI", axis=1)]
-            if filtre_carte:
-                def is_carte_manquante(row):
-                    identite, camp, ville = row["Identité"], str(row.get("Campagne", "")).lower(), str(row.get("Dans quel ville sera votre créneaux principale", "")).lower()
-                    if ("cassis" in camp or "cassis" in ville) and not st.session_state['db']['cartes_membres'].get(identite, {}).get("Cassis", False): return True
-                    if ("carnoux" in camp or "carnoux" in ville) and not st.session_state['db']['cartes_membres'].get(identite, {}).get("Carnoux", False): return True
-                    return False
-                df_admin = df_admin[df_admin.apply(is_carte_manquante, axis=1)]
-
             df_admin['Elo Crevette 🦐'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['elos_crevette'].get(x, 400))
             df_admin['Promo Validée ✅'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['validations_promo'].get(x, False))
             df_admin['Sortie Seul'] = df_admin.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Identité'], r['Sortie Seul']), axis=1)
             
-            df_admin["_orig_index"] = df_admin.index
+            # --- CONSTITUTION D'UN INDEX INCASSABLE (INTÉGRALEMENT RECODÉ) ---
+            # Le vrai index devient la position réelle dans le dataframe original (int)
+            df_admin["_orig_index"] = df_admin.index 
+            
             noms_bruts = df_admin["Nom"].fillna("Inconnu").astype(str) + " " + df_admin["Prénom"].fillna("").astype(str)
             s_counts = df_admin.groupby(noms_bruts, dropna=False).cumcount()
             index_names = noms_bruts + s_counts.apply(lambda x: f" ({x})" if x > 0 else "")
             
             df_admin.insert(0, "👤 Élève (Fige)", index_names)
-            df_display = df_admin.set_index("👤 Élève (Fige)")
+            df_display = df_admin.set_index("_orig_index") # <-- LA CLÉ POUR NE PLUS AVOIR DE KEYERROR
             
-            # --- SÉLECTEUR DE COLONNES (ERGONOMIE) ---
-            colonnes_a_cacher = ["Identité", "Nom payeur", "Prénom payeur", "Email payeur", "ID_Dossier", "_orig_index"]
+            colonnes_a_cacher = ["Identité", "Nom payeur", "Prénom payeur", "Email payeur", "ID_Dossier"]
             colonnes_possibles = [c for c in df_display.columns if c not in colonnes_a_cacher]
             
-            ordre_prefere = ["Nom", "Prénom", "Licence_FFE", "Type", "Elo_FFE", "Elo Crevette 🦐", "Formule", "Campagne", "Sortie Seul", "Promo Validée ✅", "N° Portable", "EMail"]
+            ordre_prefere = ["👤 Élève (Fige)", "Nom", "Prénom", "Licence_FFE", "Type", "Elo_FFE", "Elo Crevette 🦐", "Formule", "Campagne", "Sortie Seul", "Promo Validée ✅", "N° Portable", "EMail"]
             colonnes_possibles = sorted(colonnes_possibles, key=lambda x: ordre_prefere.index(x) if x in ordre_prefere else 999)
 
-            colonnes_par_defaut = ["Licence_FFE", "Type", "Elo_FFE", "Elo Crevette 🦐", "Formule", "Campagne"]
+            colonnes_par_defaut = ["👤 Élève (Fige)", "Licence_FFE", "Type", "Elo_FFE", "Elo Crevette 🦐", "Formule", "Campagne"]
             colonnes_par_defaut = [c for c in colonnes_par_defaut if c in colonnes_possibles]
             
             st.markdown("##### ⚙️ Affichage sur mesure")
             colonnes_choisies = st.multiselect(
-                "Sélectionnez les colonnes à afficher (💡 Ajoutez 'Nom' et 'Prénom' si vous devez corriger une faute de frappe) :",
-                options=colonnes_possibles,
-                default=colonnes_par_defaut
+                "Sélectionnez les colonnes à afficher :",
+                options=[c for c in colonnes_possibles if c != "👤 Élève (Fige)"],
+                default=[c for c in colonnes_par_defaut if c != "👤 Élève (Fige)"]
             )
+            
+            colonnes_finales = ["👤 Élève (Fige)"] + colonnes_choisies
             
             st.metric("Dossiers affichés", len(df_display))
             
-            # --- TABLEAU ÉDITABLE ---
-            st.info("✏️ Vous pouvez modifier n'importe quelle cellule ci-dessous.")
-            edited_df = st.data_editor(
-                df_display[colonnes_choisies],
-                use_container_width=True,
-                column_config={
-                    "Promo Validée ✅": st.column_config.CheckboxColumn("Promo Validée ✅"),
-                    "Sortie Seul": st.column_config.SelectboxColumn("Sortie Seul", options=["✅ OUI", "❌ NON", "N/A (École)", "-"])
-                }
-            )
-            
-            # --- BOUTON DE SAUVEGARDE EXPLICITE ---
-            if st.button("💾 Enregistrer toutes les modifications du tableau", use_container_width=True):
+            # --- TABLEAU ÉDITABLE BLINDÉ DANS UN FORMULAIRE ---
+            with st.form("editeur_adherents"):
+                st.info("✏️ Modifiez n'importe quelle cellule ci-dessous, puis cliquez impérativement sur le bouton d'enregistrement en bas du tableau.")
+                edited_df = st.data_editor(
+                    df_display[colonnes_finales],
+                    use_container_width=True,
+                    column_config={
+                        "👤 Élève (Fige)": st.column_config.Column(disabled=True),
+                        "Promo Validée ✅": st.column_config.CheckboxColumn("Promo Validée ✅"),
+                        "Sortie Seul": st.column_config.SelectboxColumn("Sortie Seul", options=["✅ OUI", "❌ NON", "N/A (École)", "-"])
+                    }
+                )
+                bouton_sauvegarde = st.form_submit_button("💾 Enregistrer toutes les modifications du tableau", use_container_width=True)
+
+            # --- SAUVEGARDE CHIRURGICALE (SÉPARATION DES SŒURS) ---
+            if bouton_sauvegarde:
                 changement_detecte = False
-                for index_fige in edited_df.index:
-                    if index_fige not in df_display.index:
-                        continue
-                        
-                    row_old = df_display.loc[index_fige]
-                    row_new = edited_df.loc[index_fige]
+                for idx_main in edited_df.index:
+                    row_old = df_display.loc[idx_main]
+                    row_new = edited_df.loc[idx_main]
                     
-                    if isinstance(row_old, pd.DataFrame): row_old = row_old.iloc[0]
-                    if isinstance(row_new, pd.DataFrame): row_new = row_new.iloc[0]
-                    
-                    changed_cols = [c for c in colonnes_choisies if str(row_old[c]) != str(row_new[c])]
+                    changed_cols = [c for c in colonnes_finales if str(row_old[c]) != str(row_new[c]) and c != "👤 Élève (Fige)"]
                     
                     if changed_cols:
                         changement_detecte = True
-                        identite = row_old["Identité"]
-                        idx_main = row_old["_orig_index"]
+                        identite_actuelle = row_old["Identité"]
                         
                         for col in changed_cols:
                             new_val = row_new[col]
                             if pd.isna(new_val): new_val = ""
                             
-                            if col == "Promo Validée ✅": st.session_state['db']['validations_promo'][identite] = new_val
-                            elif col == "Sortie Seul": st.session_state['db']['sorties_manuelles'][identite] = new_val
-                            elif col == "Elo Crevette 🦐": st.session_state['db']['elos_crevette'][identite] = int(new_val) if str(new_val).isdigit() else 400
+                            if col == "Promo Validée ✅": st.session_state['db']['validations_promo'][identite_actuelle] = new_val
+                            elif col == "Sortie Seul": st.session_state['db']['sorties_manuelles'][identite_actuelle] = new_val
+                            elif col == "Elo Crevette 🦐": st.session_state['db']['elos_crevette'][identite_actuelle] = int(new_val) if str(new_val).isdigit() else 400
                             else: st.session_state['df_adherents'].at[idx_main, col] = new_val
                                 
-                        # Mécanique de Cascade ciblée UNIQUEMENT sur la ligne modifiée
+                        # Si le NOM ou PRÉNOM change
                         if "Nom" in changed_cols or "Prénom" in changed_cols:
                             new_nom = str(st.session_state['df_adherents'].at[idx_main, "Nom"]).strip().upper()
                             new_prenom = str(st.session_state['df_adherents'].at[idx_main, "Prénom"]).strip().title()
                             new_identite = f"{new_prenom} {new_nom}"
 
-                            if new_identite != identite:
+                            if new_identite != identite_actuelle:
+                                # ON NE MODIFIE QUE LA LIGNE EN COURS, ON NE TOUCHE PAS A LA SOEUR !
                                 st.session_state['df_adherents'].at[idx_main, "Identité"] = new_identite
                                 
                                 if new_identite not in st.session_state['db']['elos_crevette']:
-                                    st.session_state['db']['elos_crevette'][new_identite] = st.session_state['db']['elos_crevette'].get(identite, 400)
+                                    st.session_state['db']['elos_crevette'][new_identite] = st.session_state['db']['elos_crevette'].get(identite_actuelle, 400)
                                 if new_identite not in st.session_state['db']['validations_promo']:
-                                    st.session_state['db']['validations_promo'][new_identite] = st.session_state['db']['validations_promo'].get(identite, False)
+                                    st.session_state['db']['validations_promo'][new_identite] = st.session_state['db']['validations_promo'].get(identite_actuelle, False)
                                 if new_identite not in st.session_state['db']['sorties_manuelles']:
-                                    st.session_state['db']['sorties_manuelles'][new_identite] = st.session_state['db']['sorties_manuelles'].get(identite, "-")
+                                    st.session_state['db']['sorties_manuelles'][new_identite] = st.session_state['db']['sorties_manuelles'].get(identite_actuelle, "-")
                                     
                                 row_updated = st.session_state['df_adherents'].loc[idx_main]
                                 creneaux_autos = affectations_automatiques(row_updated)
@@ -735,23 +705,22 @@ else:
                                 if new_identite not in st.session_state['db'].get('identites_helloasso_connues', []):
                                     st.session_state['db']['identites_helloasso_connues'].append(new_identite)
                                     
-                                if identite not in st.session_state['df_adherents']['Identité'].values:
+                                # On nettoie l'ancienne identité SEULEMENT SI l'autre sœur/frère n'en a plus besoin
+                                if identite_actuelle not in st.session_state['df_adherents']['Identité'].values:
                                     for c in st.session_state['db']['affectations_creneaux']:
-                                        if identite in st.session_state['db']['affectations_creneaux'][c]:
-                                            st.session_state['db']['affectations_creneaux'][c].remove(identite)
-                                    if identite in st.session_state['db'].get('eleves_deja_affectes', []):
-                                        st.session_state['db']['eleves_deja_affectes'].remove(identite)
-                                    st.session_state['db']['elos_crevette'].pop(identite, None)
-                                    st.session_state['db']['validations_promo'].pop(identite, None)
-                                    st.session_state['db']['sorties_manuelles'].pop(identite, None)
+                                        if identite_actuelle in st.session_state['db']['affectations_creneaux'][c]:
+                                            st.session_state['db']['affectations_creneaux'][c].remove(identite_actuelle)
+                                    if identite_actuelle in st.session_state['db'].get('eleves_deja_affectes', []):
+                                        st.session_state['db']['eleves_deja_affectes'].remove(identite_actuelle)
+                                    st.session_state['db']['elos_crevette'].pop(identite_actuelle, None)
+                                    st.session_state['db']['validations_promo'].pop(identite_actuelle, None)
+                                    st.session_state['db']['sorties_manuelles'].pop(identite_actuelle, None)
 
                 if changement_detecte:
                     sauvegarder_base_cloud(st.session_state['db'])
                     sauvegarder_adherents_cloud(st.session_state['df_adherents'])
-                    st.success("✅ Modifications enregistrées et ancrées dans le Cloud !")
+                    st.success("✅ Modifications chirurgicales enregistrées et ancrées dans le Cloud !")
                     st.rerun()
-                else:
-                    st.info("💡 Modifiez les cases du tableau puis cliquez ici pour sauvegarder.")
 
             # --- OUTIL DE SUPPRESSION (ZONE DE DANGER) ---
             st.markdown("---")
@@ -796,17 +765,17 @@ else:
             col_ex1, col_ex2, col_ex3 = st.columns(3)
             
             nom_fich_admin = f"Administration_Club_{date_jour.replace('/', '-')}"
-            csv_data_admin = df_display[colonnes_choisies].to_csv(index=True).encode('utf-8')
+            csv_data_admin = df_display[colonnes_finales].to_csv(index=True).encode('utf-8')
             col_ex1.download_button("📄 Export Tableau (CSV)", data=csv_data_admin, file_name=f"{nom_fich_admin}.csv", mime="text/csv")
             
             try:
                 buffer_admin = io.BytesIO()
-                with pd.ExcelWriter(buffer_admin, engine='xlsxwriter') as writer: df_display[colonnes_choisies].to_excel(writer, index=True, sheet_name='Base')
+                with pd.ExcelWriter(buffer_admin, engine='xlsxwriter') as writer: df_display[colonnes_finales].to_excel(writer, index=True, sheet_name='Base')
                 col_ex2.download_button("📊 Export Tableau (Excel)", data=buffer_admin.getvalue(), file_name=f"{nom_fich_admin}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
             except:
                 try:
                     buffer_admin = io.BytesIO()
-                    with pd.ExcelWriter(buffer_admin, engine='openpyxl') as writer: df_display[colonnes_choisies].to_excel(writer, index=True, sheet_name='Base')
+                    with pd.ExcelWriter(buffer_admin, engine='openpyxl') as writer: df_display[colonnes_finales].to_excel(writer, index=True, sheet_name='Base')
                     col_ex2.download_button("📊 Export Tableau (Excel)", data=buffer_admin.getvalue(), file_name=f"{nom_fich_admin}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
                 except: pass
 
@@ -845,7 +814,12 @@ else:
                     c3.metric("🏫 Formule Scolaire", total_eleves - nb_club)
                     
                     df_ec['Sortie Seul'] = df_ec.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Identité'], r['Sortie Seul']), axis=1)
-                    df_ec.insert(0, "👤 Élève (Fige)", df_ec["Nom"] + " " + df_ec["Prénom"])
+                    
+                    noms_bruts_ec = df_ec["Nom"].fillna("Inconnu").astype(str) + " " + df_ec["Prénom"].fillna("").astype(str)
+                    s_counts_ec = df_ec.groupby(noms_bruts_ec, dropna=False).cumcount()
+                    index_names_ec = noms_bruts_ec + s_counts_ec.apply(lambda x: f" ({x})" if x > 0 else "")
+                    
+                    df_ec.insert(0, "👤 Élève (Fige)", index_names_ec)
                     df_ec_display = df_ec.set_index("👤 Élève (Fige)")
                     colonnes_ecole = [c for c in ["Classe", "Formule", "Sortie Seul", "N° Portable", "N° Portable 2 (en cas d'urgence)"] if c in df_ec_display.columns]
                     st.dataframe(df_ec_display[colonnes_ecole], use_container_width=True)
@@ -919,15 +893,22 @@ else:
             liste_identites = st.session_state['db']['affectations_creneaux'].get(lieu_appel, [])
             if not liste_identites: st.info("Aucun élève assigné à ce créneau.")
             else:
-                df_groupe = df[df["Identité"].isin(liste_identites)].drop_duplicates(subset=["Identité"])
+                # Ajout de l'index au drop_duplicates pour éviter les bugs si homonymes dans la même liste
+                df_groupe = df[df["Identité"].isin(liste_identites)].drop_duplicates(subset=["ID_Dossier"])
                 total_appel = len(df_groupe)
                 st.markdown("---")
                 presences = {}
                 for idx, row in df_groupe.iterrows():
                     c1, c2 = st.columns([4, 1])
                     sortie_act = st.session_state['db']['sorties_manuelles'].get(row['Identité'], row.get('Sortie Seul', '-'))
-                    c1.write(f"👤 **{row['Nom']}** {row['Prénom']} *(Sortie: {sortie_act})*")
-                    presences[row['Identité']] = c2.checkbox("Présent", value=True, key=f"pres_{row['Identité']}")
+                    
+                    nom_aff = row['Nom'] + " " + row['Prénom']
+                    if len(df_groupe[df_groupe['Identité'] == row['Identité']]) > 1:
+                        nom_aff += f" ({idx})"
+                        
+                    c1.write(f"👤 **{nom_aff}** *(Sortie: {sortie_act})*")
+                    # Clé unique basée sur l'index de la base de données
+                    presences[idx] = c2.checkbox("Présent", value=True, key=f"pres_{idx}")
 
                 presents_count = sum(presences.values())
                 absents_count = total_appel - presents_count
@@ -939,7 +920,7 @@ else:
                 c_m3.metric("❌ Absents", absents_count)
 
                 if st.button(f"💾 Enregistrer l'appel pour {lieu_appel}"):
-                    liste_presents = [id_joueur for id_joueur, est_present in presences.items() if est_present]
+                    liste_presents = [df_groupe.loc[idx_app, 'Identité'] for idx_app, est_present in presences.items() if est_present]
                     if date_jour not in st.session_state['db']['historique_appels']: st.session_state['db']['historique_appels'][date_jour] = {}
                     st.session_state['db']['historique_appels'][date_jour][lieu_appel] = {"entraineur": entraineur_appel, "presents": liste_presents}
                     sauvegarder_base_cloud(st.session_state['db'])
