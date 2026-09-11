@@ -111,6 +111,12 @@ def sauvegarder_adherents_cloud(df):
                 except Exception: pass
     except Exception: pass
 
+# --- FONCTION DE COMPARAISON FIABLE (Évite les Faux-Positifs) ---
+def is_different(val1, val2):
+    v1 = str(val1).strip().lower() if pd.notna(val1) and str(val1) != "nan" else ""
+    v2 = str(val2).strip().lower() if pd.notna(val2) and str(val2) != "nan" else ""
+    return v1 != v2
+
 # --- CHARGEMENT SÉCURISÉ & DÉDUPLICATION STRICTE PAR FACTURE (FINI LES SOEURS EFFACÉES) ---
 if 'db' not in st.session_state: 
     with st.spinner("Connexion sécurisée au Cloud Google..."):
@@ -121,9 +127,9 @@ if 'df_adherents' not in st.session_state:
         df_loaded = charger_adherents_cloud()
         if not df_loaded.empty: 
             len_avant = len(df_loaded)
-            # On ne dédoublonne QUE sur les vrais numéros de dossier HelloAsso !
             if 'ID_Dossier' in df_loaded.columns:
                 df_loaded['ID_Dossier'] = df_loaded['ID_Dossier'].replace('', float('nan'))
+                # Dédoublonnage UNIQUEMENT sur l'ID de facture. Les noms parfaits sont CONSERVÉS.
                 mask_valid_id = df_loaded['ID_Dossier'].notna() & (df_loaded['ID_Dossier'].astype(str) != 'nan') & (df_loaded['ID_Dossier'].astype(str).str.strip() != '')
                 df_valid = df_loaded[mask_valid_id].drop_duplicates(subset=['ID_Dossier'], keep='last')
                 df_invalid = df_loaded[~mask_valid_id]
@@ -253,82 +259,106 @@ def get_helloasso_token(client_id, client_secret):
         return r.json().get("access_token") if r.status_code == 200 else None
     except: return None
 
+# --- FETCH HELLOASSO AMÉLIORÉ AVEC PAGINATION (Résout la limite des 100 inscrits) ---
 def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
-    url = f"https://api.helloasso.com/v5/organizations/echecs-cassis/forms/{form_type}/{form_slug}/items"
-    try:
-        r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, params={"pageSize": 100, "withDetails": "true"})
-        items = r.json().get("data", [])
-        rows = []
-        for item in items:
-            if item.get("type") == "Donation": continue
-            nom_tarif = str(item.get("name", "")).strip()
-            if "don " in nom_tarif.lower() or nom_tarif.lower() == "don": continue
+    url_base = f"https://api.helloasso.com/v5/organizations/echecs-cassis/forms/{form_type}/{form_slug}/items"
+    rows = []
+    continuation_token = None
+    
+    while True:
+        params = {"pageSize": 100, "withDetails": "true"}
+        if continuation_token:
+            params["continuationToken"] = continuation_token
+            
+        try:
+            r = requests.get(url_base, headers={"Authorization": f"Bearer {token}"}, params=params)
+            if r.status_code != 200: break
+            
+            data = r.json()
+            items = data.get("data", [])
+            
+            for item in items:
+                if item.get("type") == "Donation": continue
+                nom_tarif = str(item.get("name", "")).strip()
+                if "don " in nom_tarif.lower() or nom_tarif.lower() == "don": continue
+                    
+                user, payer = item.get("user", {}), item.get("payer", {})
                 
-            user, payer = item.get("user", {}), item.get("payer", {})
-            
-            discount = item.get("discount")
-            if discount and isinstance(discount, dict): code_promo_utilise = discount.get("code", "")
-            else: code_promo_utilise = ""
-            if not code_promo_utilise and "amountDiscount" in item: code_promo_utilise = "Oui (Montant Réduit)"
-            
-            type_formule = "Club" if "club" in nom_campagne.lower() else "École"
-            nom_propre = user.get("lastName", payer.get("lastName", "Inconnu")).replace("*", "").strip().upper()
-            prenom_propre = user.get("firstName", payer.get("firstName", "Inconnu")).replace("*", "").strip().title()
-            
-            email_def = user.get("email", payer.get("email", ""))
-            adresse_def = user.get("address", payer.get("address", ""))
-            ville_def = user.get("city", payer.get("city", ""))
-            naissance_def = user.get("birthDate", user.get("dateOfBirth", payer.get("dateOfBirth", "")))
-            
-            row = {
-                "ID_Dossier": str(item.get("id", random.randint(1000000, 9999999))), 
-                "Campagne": nom_campagne, "Nom": nom_propre, "Prénom": prenom_propre, "Identité": f"{prenom_propre} {nom_propre}",
-                "Montant Payé": f"{item.get('amount', 0) / 100} €", "Code Promo": code_promo_utilise, "Allergies / Médical": "-",
-                "Formule": nom_tarif, "Type": type_formule, "Licence_FFE": "Non croisé", "Nom payeur": payer.get("lastName", "").replace("*", "").strip(),
-                "Prénom payeur": payer.get("firstName", "").replace("*", "").strip(), "Email payeur": email_def, "N° Portable": "",
-                "N° Portable 2 (en cas d'urgence)": "", "EMail": email_def, "Adresse": adresse_def, "Ville": ville_def, "Nom et prénom du responsable légal": "",
-                "Classe": "", "Date de naissance": naissance_def, "Taille du t-shirt": "", "Dans quel ville sera votre créneaux principale": "",
-                "J'autorise le club à diffuser des photos de moi ou mon enfant en lien avec notre activité sur notre site et sur les réseaux sociaux (Facebook ; Instagram, Twitter):": "",
-                "J’autorise le club à utiliser des images de moi ou mon enfant pour des objets publicitaires (prospectus de présentation du club, oriflamme, kakemono) :": "",
-                "J’accepte de recevoir les informations sur l’actualité du club (soirée blitz, organisation de stages pendant les vacances…) ainsi que les annonces des prochains tournois par mail": "",
-                "Sortie Seul": "-"
-            }
-            if row["Date de naissance"] and len(str(row["Date de naissance"])) >= 10: row["Date de naissance"] = str(row["Date de naissance"])[:10]
-            
-            for field in item.get("customFields", []):
-                nom_champ = str(field.get("name", "")).strip() 
-                reponse = str(field.get("answer", "")).strip()
-                nom_lower = nom_champ.lower()
+                discount = item.get("discount")
+                if discount and isinstance(discount, dict): code_promo_utilise = discount.get("code", "")
+                else: code_promo_utilise = ""
+                if not code_promo_utilise and "amountDiscount" in item: code_promo_utilise = "Oui (Montant Réduit)"
                 
-                row[nom_champ] = reponse
-                if "promo" in nom_lower: row["Code Promo"] = reponse
-                if any(mot in nom_lower for mot in ["allergie", "médical", "sante", "santé"]):
-                    if row["Allergies / Médical"] == "-": row["Allergies / Médical"] = reponse
-                    else: row["Allergies / Médical"] += f" | {reponse}"
-                if "classe" in nom_lower or "niveau" in nom_lower: row["Classe"] = reponse
-                if "portable 2" in nom_lower or "urgence" in nom_lower: row["N° Portable 2 (en cas d'urgence)"] = reponse
-                elif "portable" in nom_lower or "téléphone" in nom_lower or "telephone" in nom_lower or "tel" in nom_lower: 
-                    if not row["N° Portable"]: row["N° Portable"] = reponse
-                if "responsable" in nom_lower or "légal" in nom_lower: row["Nom et prénom du responsable légal"] = reponse
-                if "t-shirt" in nom_lower: row["Taille du t-shirt"] = reponse
-                if "créneaux" in nom_lower and "principale" in nom_lower: row["Dans quel ville sera votre créneaux principale"] = reponse
-                if "diffuser" in nom_lower and "photos" in nom_lower: row["J'autorise le club à diffuser des photos de moi ou mon enfant en lien avec notre activité sur notre site et sur les réseaux sociaux (Facebook ; Instagram, Twitter):"] = reponse
-                if "publicitaires" in nom_lower or "prospectus" in nom_lower: row["J’autorise le club à utiliser des images de moi ou mon enfant pour des objets publicitaires (prospectus de présentation du club, oriflamme, kakemono) :"] = reponse
-                if "actualité" in nom_lower or "blitz" in nom_lower: row["J’accepte de recevoir les informations sur l’actualité du club (soirée blitz, organisation de stages pendant les vacances…) ainsi que les annonces des prochains tournois par mail"] = reponse
-                if "adresse" in nom_lower and len(reponse) > 2: row["Adresse"] = reponse
-                if "ville" in nom_lower and "créneaux" not in nom_lower and len(reponse) > 1: row["Ville"] = reponse
-                if "naissance" in nom_lower and len(reponse) > 2: row["Date de naissance"] = reponse
-                if "email" in nom_lower or "courriel" in nom_lower: row["EMail"] = reponse
-                if "quitter" in nom_lower and "seul" in nom_lower:
-                    if type_formule == "École": row["Sortie Seul"] = "N/A (École)"
-                    else:
-                        if "oui" in reponse.lower() or reponse.lower() == "true": row["Sortie Seul"] = "✅ OUI"
-                        elif "non" in reponse.lower() or reponse.lower() == "false": row["Sortie Seul"] = "❌ NON"
-                        elif reponse == "": row["Sortie Seul"] = "-"
-                        else: row["Sortie Seul"] = f"❓ {reponse}"
-            rows.append(row)
-        return rows
-    except: return []
+                type_formule = "Club" if "club" in nom_campagne.lower() else "École"
+                nom_propre = user.get("lastName", payer.get("lastName", "Inconnu")).replace("*", "").strip().upper()
+                prenom_propre = user.get("firstName", payer.get("firstName", "Inconnu")).replace("*", "").strip().title()
+                
+                email_def = user.get("email", payer.get("email", ""))
+                adresse_def = user.get("address", payer.get("address", ""))
+                ville_def = user.get("city", payer.get("city", ""))
+                naissance_def = user.get("birthDate", user.get("dateOfBirth", payer.get("dateOfBirth", "")))
+                
+                # EMPREINTE DIGITALE FIABLE POUR LES VIEUX DOSSIERS SANS ID
+                montant_paye = item.get('amount', 0)
+                item_id = item.get("id")
+                if not item_id:
+                    hash_chaine = f"{nom_propre}{prenom_propre}{nom_campagne}{montant_paye}"
+                    item_id = f"HA_{abs(hash(hash_chaine))}"
+                
+                row = {
+                    "ID_Dossier": str(item_id), 
+                    "Campagne": nom_campagne, "Nom": nom_propre, "Prénom": prenom_propre, "Identité": f"{prenom_propre} {nom_propre}",
+                    "Montant Payé": f"{montant_paye / 100} €", "Code Promo": code_promo_utilise, "Allergies / Médical": "-",
+                    "Formule": nom_tarif, "Type": type_formule, "Licence_FFE": "Non croisé", "Nom payeur": payer.get("lastName", "").replace("*", "").strip(),
+                    "Prénom payeur": payer.get("firstName", "").replace("*", "").strip(), "Email payeur": email_def, "N° Portable": "",
+                    "N° Portable 2 (en cas d'urgence)": "", "EMail": email_def, "Adresse": adresse_def, "Ville": ville_def, "Nom et prénom du responsable légal": "",
+                    "Classe": "", "Date de naissance": naissance_def, "Taille du t-shirt": "", "Dans quel ville sera votre créneaux principale": "",
+                    "J'autorise le club à diffuser des photos de moi ou mon enfant en lien avec notre activité sur notre site et sur les réseaux sociaux (Facebook ; Instagram, Twitter):": "",
+                    "J’autorise le club à utiliser des images de moi ou mon enfant pour des objets publicitaires (prospectus de présentation du club, oriflamme, kakemono) :": "",
+                    "J’accepte de recevoir les informations sur l’actualité du club (soirée blitz, organisation de stages pendant les vacances…) ainsi que les annonces des prochains tournois par mail": "",
+                    "Sortie Seul": "-"
+                }
+                if row["Date de naissance"] and len(str(row["Date de naissance"])) >= 10: row["Date de naissance"] = str(row["Date de naissance"])[:10]
+                
+                for field in item.get("customFields", []):
+                    nom_champ = str(field.get("name", "")).strip() 
+                    reponse = str(field.get("answer", "")).strip()
+                    nom_lower = nom_champ.lower()
+                    
+                    row[nom_champ] = reponse
+                    if "promo" in nom_lower: row["Code Promo"] = reponse
+                    if any(mot in nom_lower for mot in ["allergie", "médical", "sante", "santé"]):
+                        if row["Allergies / Médical"] == "-": row["Allergies / Médical"] = reponse
+                        else: row["Allergies / Médical"] += f" | {reponse}"
+                    if "classe" in nom_lower or "niveau" in nom_lower: row["Classe"] = reponse
+                    if "portable 2" in nom_lower or "urgence" in nom_lower: row["N° Portable 2 (en cas d'urgence)"] = reponse
+                    elif "portable" in nom_lower or "téléphone" in nom_lower or "telephone" in nom_lower or "tel" in nom_lower: 
+                        if not row["N° Portable"]: row["N° Portable"] = reponse
+                    if "responsable" in nom_lower or "légal" in nom_lower: row["Nom et prénom du responsable légal"] = reponse
+                    if "t-shirt" in nom_lower: row["Taille du t-shirt"] = reponse
+                    if "créneaux" in nom_lower and "principale" in nom_lower: row["Dans quel ville sera votre créneaux principale"] = reponse
+                    if "diffuser" in nom_lower and "photos" in nom_lower: row["J'autorise le club à diffuser des photos de moi ou mon enfant en lien avec notre activité sur notre site et sur les réseaux sociaux (Facebook ; Instagram, Twitter):"] = reponse
+                    if "publicitaires" in nom_lower or "prospectus" in nom_lower: row["J’autorise le club à utiliser des images de moi ou mon enfant pour des objets publicitaires (prospectus de présentation du club, oriflamme, kakemono) :"] = reponse
+                    if "actualité" in nom_lower or "blitz" in nom_lower: row["J’accepte de recevoir les informations sur l’actualité du club (soirée blitz, organisation de stages pendant les vacances…) ainsi que les annonces des prochains tournois par mail"] = reponse
+                    if "adresse" in nom_lower and len(reponse) > 2: row["Adresse"] = reponse
+                    if "ville" in nom_lower and "créneaux" not in nom_lower and len(reponse) > 1: row["Ville"] = reponse
+                    if "naissance" in nom_lower and len(reponse) > 2: row["Date de naissance"] = reponse
+                    if "email" in nom_lower or "courriel" in nom_lower: row["EMail"] = reponse
+                    if "quitter" in nom_lower and "seul" in nom_lower:
+                        if type_formule == "École": row["Sortie Seul"] = "N/A (École)"
+                        else:
+                            if "oui" in reponse.lower() or reponse.lower() == "true": row["Sortie Seul"] = "✅ OUI"
+                            elif "non" in reponse.lower() or reponse.lower() == "false": row["Sortie Seul"] = "❌ NON"
+                            elif reponse == "": row["Sortie Seul"] = "-"
+                            else: row["Sortie Seul"] = f"❓ {reponse}"
+                rows.append(row)
+                
+            continuation_token = data.get("pagination", {}).get("continuationToken")
+            if not continuation_token: break
+            
+        except Exception: break
+        
+    return rows
 
 def analyser_fichier_ffe(fichier):
     FFE_LOCAL = "base_ffe_locale_tmp.csv"
@@ -534,7 +564,7 @@ else:
         tab_admin, tab_ecoles, tab_cartes, tab_historique = st.tabs(["📊 Base Adhérents", "🏫 Écoles", "🎟️ Cartes de Centres", "📅 Historique Appels"])
         
         with tab_admin:
-            # --- AJOUT MANUEL (Nouveau !) ---
+            # --- AJOUT MANUEL ---
             st.markdown("##### ➕ Inscription Manuelle")
             with st.expander("Ajouter un élève manuellement (Chèque, Espèces...)"):
                 with st.form("form_ajout_manuel"):
@@ -550,8 +580,9 @@ else:
                     if st.form_submit_button("Créer le dossier de l'élève"):
                         if nv_nom and nv_prenom:
                             nv_identite = f"{nv_prenom} {nv_nom}"
+                            id_unique = f"MANUEL-{int(datetime.now().timestamp())}-{random.randint(100,999)}"
                             nouvelle_ligne = {
-                                "ID_Dossier": f"MANUEL-{random.randint(100000, 999999)}",
+                                "ID_Dossier": id_unique,
                                 "Campagne": nv_campagne, "Nom": nv_nom, "Prénom": nv_prenom, "Identité": nv_identite,
                                 "Montant Payé": "0 € (Manuel)", "Code Promo": "", "Allergies / Médical": "-",
                                 "Formule": nv_formule, "Type": "Club" if "Club" in nv_campagne else "École", "Licence_FFE": "Non croisé",
@@ -607,8 +638,7 @@ else:
             df_admin['Promo Validée ✅'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['validations_promo'].get(x, False))
             df_admin['Sortie Seul'] = df_admin.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Identité'], r['Sortie Seul']), axis=1)
             
-            # --- CONSTITUTION D'UN INDEX INCASSABLE (INTÉGRALEMENT RECODÉ) ---
-            # Le vrai index devient la position réelle dans le dataframe original (int)
+            # --- CONSTITUTION D'UN INDEX INCASSABLE ---
             df_admin["_orig_index"] = df_admin.index 
             
             noms_bruts = df_admin["Nom"].fillna("Inconnu").astype(str) + " " + df_admin["Prénom"].fillna("").astype(str)
@@ -616,7 +646,7 @@ else:
             index_names = noms_bruts + s_counts.apply(lambda x: f" ({x})" if x > 0 else "")
             
             df_admin.insert(0, "👤 Élève (Fige)", index_names)
-            df_display = df_admin.set_index("_orig_index") # <-- LA CLÉ POUR NE PLUS AVOIR DE KEYERROR
+            df_display = df_admin.set_index("_orig_index")
             
             colonnes_a_cacher = ["Identité", "Nom payeur", "Prénom payeur", "Email payeur", "ID_Dossier"]
             colonnes_possibles = [c for c in df_display.columns if c not in colonnes_a_cacher]
@@ -638,19 +668,19 @@ else:
             
             st.metric("Dossiers affichés", len(df_display))
             
-            # --- TABLEAU ÉDITABLE BLINDÉ DANS UN FORMULAIRE ---
-            with st.form("editeur_adherents"):
-                st.info("✏️ Modifiez n'importe quelle cellule ci-dessous, puis cliquez impérativement sur le bouton d'enregistrement en bas du tableau.")
-                edited_df = st.data_editor(
-                    df_display[colonnes_finales],
-                    use_container_width=True,
-                    column_config={
-                        "👤 Élève (Fige)": st.column_config.Column(disabled=True),
-                        "Promo Validée ✅": st.column_config.CheckboxColumn("Promo Validée ✅"),
-                        "Sortie Seul": st.column_config.SelectboxColumn("Sortie Seul", options=["✅ OUI", "❌ NON", "N/A (École)", "-"])
-                    }
-                )
-                bouton_sauvegarde = st.form_submit_button("💾 Enregistrer toutes les modifications du tableau", use_container_width=True)
+            # --- TABLEAU ÉDITABLE SANS FORMULAIRE BLOQUANT ---
+            st.info("✏️ Modifiez le tableau ci-dessous, puis cliquez impérativement sur le bouton d'enregistrement en bas.")
+            edited_df = st.data_editor(
+                df_display[colonnes_finales],
+                use_container_width=True,
+                column_config={
+                    "👤 Élève (Fige)": st.column_config.Column(disabled=True),
+                    "Promo Validée ✅": st.column_config.CheckboxColumn("Promo Validée ✅"),
+                    "Sortie Seul": st.column_config.SelectboxColumn("Sortie Seul", options=["✅ OUI", "❌ NON", "N/A (École)", "-"])
+                }
+            )
+            
+            bouton_sauvegarde = st.button("💾 Enregistrer toutes les modifications du tableau", use_container_width=True)
 
             # --- SAUVEGARDE CHIRURGICALE (SÉPARATION DES SŒURS) ---
             if bouton_sauvegarde:
@@ -659,7 +689,7 @@ else:
                     row_old = df_display.loc[idx_main]
                     row_new = edited_df.loc[idx_main]
                     
-                    changed_cols = [c for c in colonnes_finales if str(row_old[c]) != str(row_new[c]) and c != "👤 Élève (Fige)"]
+                    changed_cols = [c for c in colonnes_finales if is_different(row_old[c], row_new[c]) and c != "👤 Élève (Fige)"]
                     
                     if changed_cols:
                         changement_detecte = True
@@ -719,7 +749,7 @@ else:
                 if changement_detecte:
                     sauvegarder_base_cloud(st.session_state['db'])
                     sauvegarder_adherents_cloud(st.session_state['df_adherents'])
-                    st.success("✅ Modifications chirurgicales enregistrées et ancrées dans le Cloud !")
+                    st.success("✅ Modifications enregistrées et ancrées dans le Cloud !")
                     st.rerun()
 
             # --- OUTIL DE SUPPRESSION (ZONE DE DANGER) ---
@@ -893,7 +923,6 @@ else:
             liste_identites = st.session_state['db']['affectations_creneaux'].get(lieu_appel, [])
             if not liste_identites: st.info("Aucun élève assigné à ce créneau.")
             else:
-                # Ajout de l'index au drop_duplicates pour éviter les bugs si homonymes dans la même liste
                 df_groupe = df[df["Identité"].isin(liste_identites)].drop_duplicates(subset=["ID_Dossier"])
                 total_appel = len(df_groupe)
                 st.markdown("---")
@@ -907,7 +936,6 @@ else:
                         nom_aff += f" ({idx})"
                         
                     c1.write(f"👤 **{nom_aff}** *(Sortie: {sortie_act})*")
-                    # Clé unique basée sur l'index de la base de données
                     presences[idx] = c2.checkbox("Présent", value=True, key=f"pres_{idx}")
 
                 presents_count = sum(presences.values())
