@@ -111,13 +111,13 @@ def sauvegarder_adherents_cloud(df):
                 except Exception: pass
     except Exception: pass
 
-# --- FONCTION DE COMPARAISON FIABLE (Évite les Faux-Positifs) ---
+# --- FONCTION DE COMPARAISON FIABLE ---
 def is_different(val1, val2):
     v1 = str(val1).strip().lower() if pd.notna(val1) and str(val1) != "nan" else ""
     v2 = str(val2).strip().lower() if pd.notna(val2) and str(val2) != "nan" else ""
     return v1 != v2
 
-# --- CHARGEMENT SÉCURISÉ & DÉDUPLICATION STRICTE PAR FACTURE (FINI LES SOEURS EFFACÉES) ---
+# --- CHARGEMENT SÉCURISÉ & DÉDUPLICATION STRICTE PAR FACTURE ---
 if 'db' not in st.session_state: 
     with st.spinner("Connexion sécurisée au Cloud Google..."):
         st.session_state['db'] = charger_base_cloud()
@@ -129,7 +129,6 @@ if 'df_adherents' not in st.session_state:
             len_avant = len(df_loaded)
             if 'ID_Dossier' in df_loaded.columns:
                 df_loaded['ID_Dossier'] = df_loaded['ID_Dossier'].replace('', float('nan'))
-                # Dédoublonnage UNIQUEMENT sur l'ID de facture. Les noms parfaits sont CONSERVÉS.
                 mask_valid_id = df_loaded['ID_Dossier'].notna() & (df_loaded['ID_Dossier'].astype(str) != 'nan') & (df_loaded['ID_Dossier'].astype(str).str.strip() != '')
                 df_valid = df_loaded[mask_valid_id].drop_duplicates(subset=['ID_Dossier'], keep='last')
                 df_invalid = df_loaded[~mask_valid_id]
@@ -259,7 +258,6 @@ def get_helloasso_token(client_id, client_secret):
         return r.json().get("access_token") if r.status_code == 200 else None
     except: return None
 
-# --- FETCH HELLOASSO AMÉLIORÉ AVEC PAGINATION (Résout la limite des 100 inscrits) ---
 def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
     url_base = f"https://api.helloasso.com/v5/organizations/echecs-cassis/forms/{form_type}/{form_slug}/items"
     rows = []
@@ -298,7 +296,6 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
                 ville_def = user.get("city", payer.get("city", ""))
                 naissance_def = user.get("birthDate", user.get("dateOfBirth", payer.get("dateOfBirth", "")))
                 
-                # EMPREINTE DIGITALE FIABLE POUR LES VIEUX DOSSIERS SANS ID
                 montant_paye = item.get('amount', 0)
                 item_id = item.get("id")
                 if not item_id:
@@ -489,9 +486,15 @@ if st.sidebar.button("⬇️ Lancer la Synchronisation HelloAsso"):
                     
                     def est_valide(r):
                         id_dos = str(r.get('ID_Dossier', ''))
+                        
+                        # Bloque les dossiers mis manuellement à la corbeille
                         if id_dos and id_dos != 'nan' and id_dos in ids_supprimes: return False
+                        
                         if not df_local.empty:
-                            if 'ID_Dossier' in df_local.columns and id_dos in df_local['ID_Dossier'].dropna().astype(str).values: return False
+                            # Rejette si l'ID HelloAsso de cette facture existe déjà dans le tableau
+                            if 'ID_Dossier' in df_local.columns and id_dos in df_local['ID_Dossier'].dropna().astype(str).values: 
+                                return False
+                                
                         return True
                         
                     nouveaux = df_new_fetch[df_new_fetch.apply(est_valide, axis=1)].copy()
@@ -564,48 +567,122 @@ else:
         tab_admin, tab_ecoles, tab_cartes, tab_historique = st.tabs(["📊 Base Adhérents", "🏫 Écoles", "🎟️ Cartes de Centres", "📅 Historique Appels"])
         
         with tab_admin:
-            # --- AJOUT MANUEL ---
-            st.markdown("##### ➕ Inscription Manuelle")
-            with st.expander("Ajouter un élève manuellement (Chèque, Espèces...)"):
-                with st.form("form_ajout_manuel"):
-                    st.write("Créez ici un dossier pour un élève qui n'est pas passé par HelloAsso.")
-                    c_m1, c_m2 = st.columns(2)
-                    nv_nom = c_m1.text_input("Nom de l'élève").upper()
-                    nv_prenom = c_m2.text_input("Prénom de l'élève").title()
-                    nv_campagne = st.selectbox("Établissement / Campagne", ["Adhésions Club", "Sainte Trinité", "Saint Augustin", "Don Bosco", "Autre"])
-                    nv_formule = st.text_input("Formule / Cours (ex: Lundi, Créneau collège...)")
-                    nv_tel = st.text_input("Téléphone parent")
-                    nv_mail = st.text_input("Email parent")
-                    
-                    if st.form_submit_button("Créer le dossier de l'élève"):
-                        if nv_nom and nv_prenom:
-                            nv_identite = f"{nv_prenom} {nv_nom}"
-                            id_unique = f"MANUEL-{int(datetime.now().timestamp())}-{random.randint(100,999)}"
-                            nouvelle_ligne = {
-                                "ID_Dossier": id_unique,
-                                "Campagne": nv_campagne, "Nom": nv_nom, "Prénom": nv_prenom, "Identité": nv_identite,
-                                "Montant Payé": "0 € (Manuel)", "Code Promo": "", "Allergies / Médical": "-",
-                                "Formule": nv_formule, "Type": "Club" if "Club" in nv_campagne else "École", "Licence_FFE": "Non croisé",
-                                "Nom payeur": nv_nom, "Prénom payeur": nv_prenom, "Email payeur": nv_mail, "N° Portable": nv_tel,
-                                "N° Portable 2 (en cas d'urgence)": "", "EMail": nv_mail, "Adresse": "", "Ville": "", 
-                                "Nom et prénom du responsable légal": "", "Classe": "", "Date de naissance": "", 
-                                "Taille du t-shirt": "", "Dans quel ville sera votre créneaux principale": "",
-                                "J'autorise le club à diffuser des photos de moi ou mon enfant en lien avec notre activité sur notre site et sur les réseaux sociaux (Facebook ; Instagram, Twitter):": "",
-                                "J’autorise le club à utiliser des images de moi ou mon enfant pour des objets publicitaires (prospectus de présentation du club, oriflamme, kakemono) :": "",
-                                "J’accepte de recevoir les informations sur l’actualité du club (soirée blitz, organisation de stages pendant les vacances…) ainsi que les annonces des prochains tournois par mail": "",
-                                "Sortie Seul": "-"
-                            }
-                            st.session_state['df_adherents'] = pd.concat([st.session_state['df_adherents'], pd.DataFrame([nouvelle_ligne])], ignore_index=True)
-                            st.session_state['db']['elos_crevette'][nv_identite] = 400
-                            st.session_state['db']['validations_promo'][nv_identite] = False
-                            st.session_state['db']['sorties_manuelles'][nv_identite] = "-"
-                            sauvegarder_adherents_cloud(st.session_state['df_adherents'])
-                            sauvegarder_base_cloud(st.session_state['db'])
-                            st.success(f"✅ {nv_identite} a été ajouté avec succès !")
-                            st.rerun()
-                        else:
-                            st.error("Le Nom et le Prénom sont obligatoires.")
+            c_tools1, c_tools2 = st.columns(2)
+            
+            with c_tools1:
+                st.markdown("##### ➕ Inscription Manuelle")
+                with st.expander("Créer un dossier d'élève (Chèque, Espèces...)"):
+                    with st.form("form_ajout_manuel"):
+                        st.write("Dossier pour un élève qui n'est pas passé par HelloAsso.")
+                        c_m1, c_m2 = st.columns(2)
+                        nv_nom = c_m1.text_input("Nom de l'élève").upper()
+                        nv_prenom = c_m2.text_input("Prénom de l'élève").title()
+                        nv_campagne = st.selectbox("Établissement / Campagne", ["Adhésions Club", "Sainte Trinité", "Saint Augustin", "Don Bosco", "Autre"])
+                        nv_formule = st.text_input("Formule / Cours (ex: Lundi, Créneau collège...)")
+                        nv_tel = st.text_input("Téléphone parent")
+                        nv_mail = st.text_input("Email parent")
+                        
+                        if st.form_submit_button("Créer le dossier de l'élève"):
+                            if nv_nom and nv_prenom:
+                                nv_identite = f"{nv_prenom} {nv_nom}"
+                                id_unique = f"MANUEL-{int(datetime.now().timestamp())}-{random.randint(100,999)}"
+                                nouvelle_ligne = {
+                                    "ID_Dossier": id_unique,
+                                    "Campagne": nv_campagne, "Nom": nv_nom, "Prénom": nv_prenom, "Identité": nv_identite,
+                                    "Montant Payé": "0 € (Manuel)", "Code Promo": "", "Allergies / Médical": "-",
+                                    "Formule": nv_formule, "Type": "Club" if "Club" in nv_campagne else "École", "Licence_FFE": "Non croisé",
+                                    "Nom payeur": nv_nom, "Prénom payeur": nv_prenom, "Email payeur": nv_mail, "N° Portable": nv_tel,
+                                    "N° Portable 2 (en cas d'urgence)": "", "EMail": nv_mail, "Adresse": "", "Ville": "", 
+                                    "Nom et prénom du responsable légal": "", "Classe": "", "Date de naissance": "", 
+                                    "Taille du t-shirt": "", "Dans quel ville sera votre créneaux principale": "",
+                                    "J'autorise le club à diffuser des photos de moi ou mon enfant en lien avec notre activité sur notre site et sur les réseaux sociaux (Facebook ; Instagram, Twitter):": "",
+                                    "J’autorise le club à utiliser des images de moi ou mon enfant pour des objets publicitaires (prospectus de présentation du club, oriflamme, kakemono) :": "",
+                                    "J’accepte de recevoir les informations sur l’actualité du club (soirée blitz, organisation de stages pendant les vacances…) ainsi que les annonces des prochains tournois par mail": "",
+                                    "Sortie Seul": "-"
+                                }
+                                st.session_state['df_adherents'] = pd.concat([st.session_state['df_adherents'], pd.DataFrame([nouvelle_ligne])], ignore_index=True)
+                                st.session_state['db']['elos_crevette'][nv_identite] = 400
+                                st.session_state['db']['validations_promo'][nv_identite] = False
+                                st.session_state['db']['sorties_manuelles'][nv_identite] = "-"
+                                sauvegarder_adherents_cloud(st.session_state['df_adherents'])
+                                sauvegarder_base_cloud(st.session_state['db'])
+                                st.success(f"✅ {nv_identite} a été ajouté avec succès !")
+                                st.rerun()
+                            else:
+                                st.error("Le Nom et le Prénom sont obligatoires.")
 
+            with c_tools2:
+                # --- OUTIL SPÉCIAL RENOMMAGE SÉCURISÉ ---
+                st.markdown("##### ✏️ Correction d'Identité")
+                with st.expander("Corriger une faute dans un Nom / Prénom"):
+                    st.write("Sélectionnez la transaction précise de l'élève pour corriger son nom :")
+                    options_renommage = []
+                    mapping_renommage = {}
+                    for idx, row in df.iterrows():
+                        id_dos = row.get('ID_Dossier', 'Sans ID')
+                        texte_ren = f"👤 {row['Nom']} {row['Prénom']} | 📋 {row.get('Campagne', '-')} (Dossier: {id_dos}) - Ligne {idx}"
+                        options_renommage.append(texte_ren)
+                        mapping_renommage[texte_ren] = idx
+                        
+                    eleve_a_renommer = st.selectbox("Élève à corriger :", [""] + sorted(options_renommage))
+                    
+                    if eleve_a_renommer:
+                        idx_cible = mapping_renommage[eleve_a_renommer]
+                        row_cible = df.loc[idx_cible]
+                        identite_cible = row_cible['Identité']
+                        
+                        c_r1, c_r2 = st.columns(2)
+                        nv_nom = c_r1.text_input("Corriger le Nom", value=row_cible['Nom']).strip().upper()
+                        nv_prenom = c_r2.text_input("Corriger le Prénom", value=row_cible['Prénom']).strip().title()
+                        
+                        if st.button("✅ Valider la correction du nom"):
+                            nv_identite = f"{nv_prenom} {nv_nom}"
+                            if nv_nom and nv_prenom and nv_identite != identite_cible:
+                                st.session_state['df_adherents'].at[idx_cible, 'Nom'] = nv_nom
+                                st.session_state['df_adherents'].at[idx_cible, 'Prénom'] = nv_prenom
+                                st.session_state['df_adherents'].at[idx_cible, 'Identité'] = nv_identite
+                                
+                                if nv_identite not in st.session_state['db']['elos_crevette']:
+                                    st.session_state['db']['elos_crevette'][nv_identite] = st.session_state['db']['elos_crevette'].get(identite_cible, 400)
+                                if nv_identite not in st.session_state['db']['validations_promo']:
+                                    st.session_state['db']['validations_promo'][nv_identite] = st.session_state['db']['validations_promo'].get(identite_cible, False)
+                                if nv_identite not in st.session_state['db']['sorties_manuelles']:
+                                    st.session_state['db']['sorties_manuelles'][nv_identite] = st.session_state['db']['sorties_manuelles'].get(identite_cible, "-")
+                                    
+                                row_updated = st.session_state['df_adherents'].loc[idx_cible]
+                                creneaux_autos = affectations_automatiques(row_updated)
+                                
+                                for c_auto in creneaux_autos:
+                                    if c_auto not in st.session_state['db']['affectations_creneaux']:
+                                        st.session_state['db']['affectations_creneaux'][c_auto] = []
+                                    if nv_identite not in st.session_state['db']['affectations_creneaux'][c_auto]:
+                                        st.session_state['db']['affectations_creneaux'][c_auto].append(nv_identite)
+                                        
+                                if nv_identite not in st.session_state['db'].get('eleves_deja_affectes', []):
+                                    st.session_state['db']['eleves_deja_affectes'].append(nv_identite)
+                                if nv_identite not in st.session_state['db'].get('identites_helloasso_connues', []):
+                                    st.session_state['db']['identites_helloasso_connues'].append(nv_identite)
+                                    
+                                if identite_cible not in st.session_state['df_adherents']['Identité'].values:
+                                    for c in st.session_state['db']['affectations_creneaux']:
+                                        if identite_cible in st.session_state['db']['affectations_creneaux'][c]:
+                                            st.session_state['db']['affectations_creneaux'][c].remove(identite_cible)
+                                    if identite_cible in st.session_state['db'].get('eleves_deja_affectes', []):
+                                        st.session_state['db']['eleves_deja_affectes'].remove(identite_cible)
+                                    st.session_state['db']['elos_crevette'].pop(identite_cible, None)
+                                    st.session_state['db']['validations_promo'].pop(identite_cible, None)
+                                    st.session_state['db']['sorties_manuelles'].pop(identite_cible, None)
+
+                                sauvegarder_base_cloud(st.session_state['db'])
+                                sauvegarder_adherents_cloud(st.session_state['df_adherents'])
+                                st.success(f"✅ L'élève s'appelle maintenant {nv_identite} !")
+                                st.rerun()
+                            elif nv_identite == identite_cible:
+                                st.info("Le nom est identique, aucune modification n'a été faite.")
+                            else:
+                                st.error("Les champs ne peuvent pas être vides.")
+
+            st.markdown("---")
             # --- DOSSIER ÉLÈVE DÉTAILLÉ ---
             st.markdown('<div class="recherche-rapide">', unsafe_allow_html=True)
             st.markdown("#### 🔍 Dossier Complet de l'Élève")
@@ -613,6 +690,7 @@ else:
             
             if recherche_nom:
                 contact = df[df["Identité"] == recherche_nom].iloc[0].copy()
+                
                 s_actuelle = st.session_state['db']['sorties_manuelles'].get(contact["Identité"], contact.get("Sortie Seul", "-"))
                 contact["Sortie Seul (Temps Réel)"] = s_actuelle
                 contact["Elo Crevette 🦐"] = st.session_state['db']['elos_crevette'].get(contact["Identité"], 400)
@@ -620,9 +698,11 @@ else:
                 
                 st.markdown("---")
                 c_info1, c_info2 = st.columns(2)
+                
                 infos = {k: v for k, v in contact.items() if k not in ["_orig_index", "Identité"] and str(v).strip() and str(v) != "nan"}
                 items = list(infos.items())
                 mid = (len(items) + 1) // 2
+                
                 for i, (k, v) in enumerate(items):
                     if i < mid: c_info1.markdown(f"**{k}:** {v}")
                     else: c_info2.markdown(f"**{k}:** {v}")
@@ -631,16 +711,34 @@ else:
             col_ad1, col_ad2 = st.columns(2)
             with col_ad1: filtre_camp_admin = st.multiselect("Campagnes :", options=df["Campagne"].unique(), default=df["Campagne"].unique())
             with col_ad2: filtre_type_admin = st.multiselect("Types :", options=df["Type"].unique(), default=df["Type"].unique())
+            
+            st.markdown("##### ⚡ Filtres d'Action Rapide")
+            c_f1, c_f2, c_f3, c_f4 = st.columns(4)
+            with c_f1: filtre_licence = st.checkbox("🚫 Sans Licence")
+            with c_f2: filtre_allergie = st.checkbox("🤧 Allergies / Médical")
+            with c_f3: filtre_sortie = st.checkbox("🚶 Sorties Autorisées (OUI)")
+            with c_f4: filtre_carte = st.checkbox("🎟️ Carte Cassis/Carnoux Manquante")
                 
             df_admin = df[(df["Campagne"].isin(filtre_camp_admin)) & (df["Type"].isin(filtre_type_admin))].copy()
             
+            if filtre_licence and "Licence_FFE" in df_admin.columns: df_admin = df_admin[(df_admin["Licence_FFE"] == "Non croisé") | (df_admin["Licence_FFE"] == "")]
+            if filtre_allergie and "Allergies / Médical" in df_admin.columns:
+                mots_sains = ["non", "ras", "rien", "néant", "neant", "aucun", "aucune", "-"]
+                df_admin = df_admin[(df_admin["Allergies / Médical"] != "") & (~df_admin["Allergies / Médical"].str.lower().isin(mots_sains))]
+            if filtre_sortie: df_admin = df_admin[df_admin.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Identité'], r['Sortie Seul']) == "✅ OUI", axis=1)]
+            if filtre_carte:
+                def is_carte_manquante(row):
+                    identite, camp, ville = row["Identité"], str(row.get("Campagne", "")).lower(), str(row.get("Dans quel ville sera votre créneaux principale", "")).lower()
+                    if ("cassis" in camp or "cassis" in ville) and not st.session_state['db']['cartes_membres'].get(identite, {}).get("Cassis", False): return True
+                    if ("carnoux" in camp or "carnoux" in ville) and not st.session_state['db']['cartes_membres'].get(identite, {}).get("Carnoux", False): return True
+                    return False
+                df_admin = df_admin[df_admin.apply(is_carte_manquante, axis=1)]
+
             df_admin['Elo Crevette 🦐'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['elos_crevette'].get(x, 400))
             df_admin['Promo Validée ✅'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['validations_promo'].get(x, False))
             df_admin['Sortie Seul'] = df_admin.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Identité'], r['Sortie Seul']), axis=1)
             
-            # --- CONSTITUTION D'UN INDEX INCASSABLE ---
-            df_admin["_orig_index"] = df_admin.index 
-            
+            df_admin["_orig_index"] = df_admin.index
             noms_bruts = df_admin["Nom"].fillna("Inconnu").astype(str) + " " + df_admin["Prénom"].fillna("").astype(str)
             s_counts = df_admin.groupby(noms_bruts, dropna=False).cumcount()
             index_names = noms_bruts + s_counts.apply(lambda x: f" ({x})" if x > 0 else "")
@@ -648,7 +746,7 @@ else:
             df_admin.insert(0, "👤 Élève (Fige)", index_names)
             df_display = df_admin.set_index("_orig_index")
             
-            colonnes_a_cacher = ["Identité", "Nom payeur", "Prénom payeur", "Email payeur", "ID_Dossier"]
+            colonnes_a_cacher = ["Identité", "Nom payeur", "Prénom payeur", "Email payeur", "ID_Dossier", "_orig_index"]
             colonnes_possibles = [c for c in df_display.columns if c not in colonnes_a_cacher]
             
             ordre_prefere = ["👤 Élève (Fige)", "Nom", "Prénom", "Licence_FFE", "Type", "Elo_FFE", "Elo Crevette 🦐", "Formule", "Campagne", "Sortie Seul", "Promo Validée ✅", "N° Portable", "EMail"]
@@ -665,16 +763,15 @@ else:
             )
             
             colonnes_finales = ["👤 Élève (Fige)"] + colonnes_choisies
-            
             st.metric("Dossiers affichés", len(df_display))
             
-            # --- TABLEAU ÉDITABLE SANS FORMULAIRE BLOQUANT ---
+            # --- TABLEAU ÉDITABLE ---
             st.info("✏️ Modifiez le tableau ci-dessous, puis cliquez impérativement sur le bouton d'enregistrement en bas.")
             edited_df = st.data_editor(
                 df_display[colonnes_finales],
                 use_container_width=True,
                 column_config={
-                    "👤 Élève (Fige)": st.column_config.Column(disabled=True),
+                    "👤 Élève (Fige)": st.column_config.Column("👤 Élève (Bloqué pour la sécurité)", disabled=True),
                     "Promo Validée ✅": st.column_config.CheckboxColumn("Promo Validée ✅"),
                     "Sortie Seul": st.column_config.SelectboxColumn("Sortie Seul", options=["✅ OUI", "❌ NON", "N/A (École)", "-"])
                 }
@@ -682,12 +779,17 @@ else:
             
             bouton_sauvegarde = st.button("💾 Enregistrer toutes les modifications du tableau", use_container_width=True)
 
-            # --- SAUVEGARDE CHIRURGICALE (SÉPARATION DES SŒURS) ---
             if bouton_sauvegarde:
                 changement_detecte = False
                 for idx_main in edited_df.index:
+                    if idx_main not in df_display.index:
+                        continue
+                        
                     row_old = df_display.loc[idx_main]
                     row_new = edited_df.loc[idx_main]
+                    
+                    if isinstance(row_old, pd.DataFrame): row_old = row_old.iloc[0]
+                    if isinstance(row_new, pd.DataFrame): row_new = row_new.iloc[0]
                     
                     changed_cols = [c for c in colonnes_finales if is_different(row_old[c], row_new[c]) and c != "👤 Élève (Fige)"]
                     
@@ -704,14 +806,12 @@ else:
                             elif col == "Elo Crevette 🦐": st.session_state['db']['elos_crevette'][identite_actuelle] = int(new_val) if str(new_val).isdigit() else 400
                             else: st.session_state['df_adherents'].at[idx_main, col] = new_val
                                 
-                        # Si le NOM ou PRÉNOM change
                         if "Nom" in changed_cols or "Prénom" in changed_cols:
                             new_nom = str(st.session_state['df_adherents'].at[idx_main, "Nom"]).strip().upper()
                             new_prenom = str(st.session_state['df_adherents'].at[idx_main, "Prénom"]).strip().title()
                             new_identite = f"{new_prenom} {new_nom}"
 
                             if new_identite != identite_actuelle:
-                                # ON NE MODIFIE QUE LA LIGNE EN COURS, ON NE TOUCHE PAS A LA SOEUR !
                                 st.session_state['df_adherents'].at[idx_main, "Identité"] = new_identite
                                 
                                 if new_identite not in st.session_state['db']['elos_crevette']:
@@ -735,7 +835,6 @@ else:
                                 if new_identite not in st.session_state['db'].get('identites_helloasso_connues', []):
                                     st.session_state['db']['identites_helloasso_connues'].append(new_identite)
                                     
-                                # On nettoie l'ancienne identité SEULEMENT SI l'autre sœur/frère n'en a plus besoin
                                 if identite_actuelle not in st.session_state['df_adherents']['Identité'].values:
                                     for c in st.session_state['db']['affectations_creneaux']:
                                         if identite_actuelle in st.session_state['db']['affectations_creneaux'][c]:
