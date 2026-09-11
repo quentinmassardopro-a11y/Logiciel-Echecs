@@ -82,8 +82,10 @@ def sauvegarder_base_cloud(db):
         json_str = json.dumps(db, ensure_ascii=False)
         chunks = [[json_str[i:i+40000]] for i in range(0, len(json_str), 40000)]
         ws.clear()
-        try: ws.update(chunks)
-        except: ws.update("A1", chunks)
+        try: ws.update(values=chunks, range_name="A1")
+        except TypeError: 
+            try: ws.update("A1", chunks)
+            except Exception: pass
     except Exception as e:
         pass
 
@@ -93,7 +95,18 @@ def charger_adherents_cloud():
         sh = client.open("Base_Calanques_DB")
         ws = get_or_create_worksheet(sh, "Adherents")
         data = ws.get_all_records()
-        if data: return pd.DataFrame(data)
+        if data: 
+            df = pd.DataFrame(data)
+            # DÉDUPLICATION THERMONUCLÉAIRE : Détruit les clones parfaits dès le chargement
+            taille_avant = len(df)
+            df['Nom_Temp'] = df['Nom'].astype(str).str.strip().str.upper()
+            df['Prenom_Temp'] = df['Prénom'].astype(str).str.strip().str.title()
+            df = df.drop_duplicates(subset=['Nom_Temp', 'Prenom_Temp', 'Campagne', 'Formule'], keep='last')
+            df = df.drop(columns=['Nom_Temp', 'Prenom_Temp']).reset_index(drop=True)
+            # Sauvegarder automatiquement si on a nettoyé des clones
+            if len(df) < taille_avant:
+                sauvegarder_adherents_cloud(df)
+            return df
     except Exception as e:
         pass
     return pd.DataFrame()
@@ -106,31 +119,21 @@ def sauvegarder_adherents_cloud(df):
         ws.clear()
         if not df.empty:
             data = [df.columns.values.tolist()] + df.fillna("").astype(str).values.tolist()
-            try: ws.update(data)
-            except: ws.update("A1", data)
+            try: ws.update(values=data, range_name="A1")
+            except TypeError: 
+                try: ws.update("A1", data)
+                except Exception: pass
     except Exception as e:
         pass
 
-# --- CHARGEMENT SÉCURISÉ & AUTO-NETTOYAGE DES DOUBLONS ---
+# --- CHARGEMENT SÉCURISÉ ---
 if 'db' not in st.session_state: 
     with st.spinner("Connexion sécurisée au Cloud Google..."):
         st.session_state['db'] = charger_base_cloud()
 
 if 'df_adherents' not in st.session_state:
     with st.spinner("Récupération et nettoyage de la base adhérents..."):
-        df_loaded = charger_adherents_cloud()
-        if not df_loaded.empty: 
-            len_avant = len(df_loaded)
-            if 'ID_Dossier' in df_loaded.columns:
-                df_loaded['ID_Dossier'] = df_loaded['ID_Dossier'].replace('', float('nan'))
-                mask_valid_id = df_loaded['ID_Dossier'].notna() & (df_loaded['ID_Dossier'].astype(str) != 'nan') & (df_loaded['ID_Dossier'].astype(str).str.strip() != '')
-                df_valid = df_loaded[mask_valid_id].drop_duplicates(subset=['ID_Dossier'], keep='last')
-                df_invalid = df_loaded[~mask_valid_id]
-                df_loaded = pd.concat([df_valid, df_invalid]).reset_index(drop=True)
-                
-            st.session_state['df_adherents'] = df_loaded
-            if len(df_loaded) < len_avant:
-                sauvegarder_adherents_cloud(df_loaded)
+        st.session_state['df_adherents'] = charger_adherents_cloud()
 
 # --- BOUCLIER ANTI-KEYERROR ABSOLU ---
 default_mem = initialiser_memoire_vierge()
@@ -458,7 +461,10 @@ if st.sidebar.button("⬇️ Lancer la Synchronisation HelloAsso"):
                     
                     def est_valide(r):
                         id_dos = str(r.get('ID_Dossier', ''))
+                        
+                        # Bloque les dossiers mis manuellement à la corbeille
                         if id_dos and id_dos != 'nan' and id_dos in ids_supprimes: return False
+                        
                         if not df_local.empty:
                             if 'ID_Dossier' in df_local.columns and id_dos in df_local['ID_Dossier'].dropna().astype(str).values: return False
                         return True
@@ -533,6 +539,47 @@ else:
         tab_admin, tab_ecoles, tab_cartes, tab_historique = st.tabs(["📊 Base Adhérents", "🏫 Écoles", "🎟️ Cartes de Centres", "📅 Historique Appels"])
         
         with tab_admin:
+            # --- AJOUT MANUEL (Nouveau !) ---
+            st.markdown("##### ➕ Inscription Manuelle")
+            with st.expander("Ajouter un élève manuellement (Chèque, Espèces...)"):
+                with st.form("form_ajout_manuel"):
+                    st.write("Créez ici un dossier pour un élève qui n'est pas passé par HelloAsso.")
+                    c_m1, c_m2 = st.columns(2)
+                    nv_nom = c_m1.text_input("Nom de l'élève").upper()
+                    nv_prenom = c_m2.text_input("Prénom de l'élève").title()
+                    nv_campagne = st.selectbox("Établissement / Campagne", ["Adhésions Club", "Sainte Trinité", "Saint Augustin", "Don Bosco", "Autre"])
+                    nv_formule = st.text_input("Formule / Cours (ex: Lundi, Créneau collège...)")
+                    nv_tel = st.text_input("Téléphone parent")
+                    nv_mail = st.text_input("Email parent")
+                    
+                    if st.form_submit_button("Créer le dossier de l'élève"):
+                        if nv_nom and nv_prenom:
+                            nv_identite = f"{nv_prenom} {nv_nom}"
+                            nouvelle_ligne = {
+                                "ID_Dossier": f"MANUEL-{random.randint(100000, 999999)}",
+                                "Campagne": nv_campagne, "Nom": nv_nom, "Prénom": nv_prenom, "Identité": nv_identite,
+                                "Montant Payé": "0 € (Manuel)", "Code Promo": "", "Allergies / Médical": "-",
+                                "Formule": nv_formule, "Type": "Club" if "Club" in nv_campagne else "École", "Licence_FFE": "Non croisé",
+                                "Nom payeur": nv_nom, "Prénom payeur": nv_prenom, "Email payeur": nv_mail, "N° Portable": nv_tel,
+                                "N° Portable 2 (en cas d'urgence)": "", "EMail": nv_mail, "Adresse": "", "Ville": "", 
+                                "Nom et prénom du responsable légal": "", "Classe": "", "Date de naissance": "", 
+                                "Taille du t-shirt": "", "Dans quel ville sera votre créneaux principale": "",
+                                "J'autorise le club à diffuser des photos de moi ou mon enfant en lien avec notre activité sur notre site et sur les réseaux sociaux (Facebook ; Instagram, Twitter):": "",
+                                "J’autorise le club à utiliser des images de moi ou mon enfant pour des objets publicitaires (prospectus de présentation du club, oriflamme, kakemono) :": "",
+                                "J’accepte de recevoir les informations sur l’actualité du club (soirée blitz, organisation de stages pendant les vacances…) ainsi que les annonces des prochains tournois par mail": "",
+                                "Sortie Seul": "-"
+                            }
+                            st.session_state['df_adherents'] = pd.concat([st.session_state['df_adherents'], pd.DataFrame([nouvelle_ligne])], ignore_index=True)
+                            st.session_state['db']['elos_crevette'][nv_identite] = 400
+                            st.session_state['db']['validations_promo'][nv_identite] = False
+                            st.session_state['db']['sorties_manuelles'][nv_identite] = "-"
+                            sauvegarder_adherents_cloud(st.session_state['df_adherents'])
+                            sauvegarder_base_cloud(st.session_state['db'])
+                            st.success(f"✅ {nv_identite} a été ajouté avec succès !")
+                            st.rerun()
+                        else:
+                            st.error("Le Nom et le Prénom sont obligatoires.")
+
             # --- DOSSIER ÉLÈVE DÉTAILLÉ ---
             st.markdown('<div class="recherche-rapide">', unsafe_allow_html=True)
             st.markdown("#### 🔍 Dossier Complet de l'Élève")
@@ -688,7 +735,6 @@ else:
                                 if new_identite not in st.session_state['db'].get('identites_helloasso_connues', []):
                                     st.session_state['db']['identites_helloasso_connues'].append(new_identite)
                                     
-                                # Nettoyage sécurisé : on efface l'ancienne identité SEULEMENT si aucun autre frère/sœur ne l'utilise
                                 if identite not in st.session_state['df_adherents']['Identité'].values:
                                     for c in st.session_state['db']['affectations_creneaux']:
                                         if identite in st.session_state['db']['affectations_creneaux'][c]:
@@ -709,10 +755,9 @@ else:
 
             # --- OUTIL DE SUPPRESSION (ZONE DE DANGER) ---
             st.markdown("---")
-            with st.expander("🗑️ Zone de Danger : Nettoyage et Suppressions"):
+            with st.expander("🗑️ Zone de Danger : Suppressions"):
                 st.warning("Les élèves supprimés n'apparaîtront plus. Leur identifiant de paiement est mis sur Liste Noire.")
                 
-                st.markdown("---")
                 options_suppr = []
                 mapping_suppr = {}
                 for idx, row in df.iterrows():
