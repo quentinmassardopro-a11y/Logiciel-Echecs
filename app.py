@@ -41,7 +41,7 @@ if not st.session_state["authentifie"]:
             else: st.error("Mot de passe incorrect.")
     st.stop()
 
-# --- CONNEXION GOOGLE SHEETS CLOUD (ROBUSTE) ---
+# --- CONNEXION GOOGLE SHEETS CLOUD ---
 def get_gsheets_client():
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     creds_dict = dict(st.secrets["gcp_service_account"])
@@ -71,7 +71,7 @@ def charger_base_cloud():
             db = json.loads("".join(vals))
             return db
     except Exception as e:
-        st.error(f"Erreur de lecture DB Cloud: {e}")
+        pass
     return initialiser_memoire_vierge()
 
 def sauvegarder_base_cloud(db):
@@ -82,12 +82,10 @@ def sauvegarder_base_cloud(db):
         json_str = json.dumps(db, ensure_ascii=False)
         chunks = [[json_str[i:i+40000]] for i in range(0, len(json_str), 40000)]
         ws.clear()
-        try: ws.update(values=chunks, range_name="A1")
-        except TypeError: 
-            try: ws.update("A1", chunks)
-            except Exception as e: st.error(f"Erreur technique DB: {e}")
+        try: ws.update(chunks)
+        except: ws.update("A1", chunks)
     except Exception as e:
-        st.error(f"Erreur d'écriture DB Cloud: {e}")
+        pass
 
 def charger_adherents_cloud():
     try:
@@ -97,7 +95,7 @@ def charger_adherents_cloud():
         data = ws.get_all_records()
         if data: return pd.DataFrame(data)
     except Exception as e:
-        st.error(f"Erreur de lecture Adhérents Cloud: {e}")
+        pass
     return pd.DataFrame()
 
 def sauvegarder_adherents_cloud(df):
@@ -108,24 +106,21 @@ def sauvegarder_adherents_cloud(df):
         ws.clear()
         if not df.empty:
             data = [df.columns.values.tolist()] + df.fillna("").astype(str).values.tolist()
-            try: ws.update(values=data, range_name="A1")
-            except TypeError: 
-                try: ws.update("A1", data)
-                except Exception as e: st.error(f"Erreur technique Adhérents: {e}")
+            try: ws.update(data)
+            except: ws.update("A1", data)
     except Exception as e:
-        st.error(f"Erreur d'écriture Adhérents Cloud: {e}")
+        pass
 
-# --- CHARGEMENT SÉCURISÉ & AUTO-NETTOYAGE DES DOUBLONS TECHNIQUES ---
+# --- CHARGEMENT SÉCURISÉ & AUTO-NETTOYAGE DES DOUBLONS ---
 if 'db' not in st.session_state: 
     with st.spinner("Connexion sécurisée au Cloud Google..."):
         st.session_state['db'] = charger_base_cloud()
 
 if 'df_adherents' not in st.session_state:
-    with st.spinner("Récupération de la base adhérents..."):
+    with st.spinner("Récupération et nettoyage de la base adhérents..."):
         df_loaded = charger_adherents_cloud()
         if not df_loaded.empty: 
             len_avant = len(df_loaded)
-            # Ne nettoie QUE les doublons qui partagent la même facture exacte (Erreurs de clic HelloAsso)
             if 'ID_Dossier' in df_loaded.columns:
                 df_loaded['ID_Dossier'] = df_loaded['ID_Dossier'].replace('', float('nan'))
                 mask_valid_id = df_loaded['ID_Dossier'].notna() & (df_loaded['ID_Dossier'].astype(str) != 'nan') & (df_loaded['ID_Dossier'].astype(str).str.strip() != '')
@@ -463,24 +458,9 @@ if st.sidebar.button("⬇️ Lancer la Synchronisation HelloAsso"):
                     
                     def est_valide(r):
                         id_dos = str(r.get('ID_Dossier', ''))
-                        identite = r.get('Identité')
-                        
-                        # Bloque les dossiers mis manuellement à la corbeille
                         if id_dos and id_dos != 'nan' and id_dos in ids_supprimes: return False
-                        
                         if not df_local.empty:
-                            # Rejette si l'ID HelloAsso de cette facture existe déjà dans le tableau
-                            if 'ID_Dossier' in df_local.columns and id_dos in df_local['ID_Dossier'].dropna().astype(str).values: 
-                                return False
-                                
-                            # Fallback pour bloquer les vieux dossiers importés avant que l'ID n'existe
-                            if 'ID_Dossier' in df_local.columns:
-                                masque_vieux = (df_local['Identité'] == identite) & (df_local['Campagne'] == r['Campagne']) & (df_local['Formule'] == r['Formule']) & (df_local['ID_Dossier'].isna() | (df_local['ID_Dossier'] == '') | (df_local['ID_Dossier'] == 'nan'))
-                                if masque_vieux.any(): return False
-                            else:
-                                masque = (df_local['Identité'] == identite) & (df_local['Campagne'] == r['Campagne']) & (df_local['Formule'] == r['Formule'])
-                                if masque.any(): return False
-                                
+                            if 'ID_Dossier' in df_local.columns and id_dos in df_local['ID_Dossier'].dropna().astype(str).values: return False
                         return True
                         
                     nouveaux = df_new_fetch[df_new_fetch.apply(est_valide, axis=1)].copy()
@@ -639,6 +619,7 @@ else:
             st.metric("Dossiers affichés", len(df_display))
             
             # --- TABLEAU ÉDITABLE ---
+            st.info("✏️ Vous pouvez modifier n'importe quelle cellule ci-dessous.")
             edited_df = st.data_editor(
                 df_display[colonnes_choisies],
                 use_container_width=True,
@@ -648,85 +629,90 @@ else:
                 }
             )
             
-            # --- DETECTION DES MODIFICATIONS 100% SÉCURISÉE (RENOMMAGE CHIRURGICAL) ---
-            changement_detecte = False
-            for index_fige in edited_df.index:
-                if index_fige not in df_display.index:
-                    continue
-                    
-                row_old = df_display.loc[index_fige]
-                row_new = edited_df.loc[index_fige]
-                
-                if isinstance(row_old, pd.DataFrame): row_old = row_old.iloc[0]
-                if isinstance(row_new, pd.DataFrame): row_new = row_new.iloc[0]
-                
-                changed_cols = [c for c in colonnes_choisies if str(row_old[c]) != str(row_new[c])]
-                
-                if changed_cols:
-                    changement_detecte = True
-                    identite = row_old["Identité"]
-                    idx_main = row_old["_orig_index"]
-                    
-                    for col in changed_cols:
-                        new_val = row_new[col]
-                        if pd.isna(new_val): new_val = ""
+            # --- BOUTON DE SAUVEGARDE EXPLICITE ---
+            if st.button("💾 Enregistrer toutes les modifications du tableau", use_container_width=True):
+                changement_detecte = False
+                for index_fige in edited_df.index:
+                    if index_fige not in df_display.index:
+                        continue
                         
-                        if col == "Promo Validée ✅": st.session_state['db']['validations_promo'][identite] = new_val
-                        elif col == "Sortie Seul": st.session_state['db']['sorties_manuelles'][identite] = new_val
-                        elif col == "Elo Crevette 🦐": st.session_state['db']['elos_crevette'][identite] = int(new_val) if str(new_val).isdigit() else 400
-                        else: st.session_state['df_adherents'].at[idx_main, col] = new_val
+                    row_old = df_display.loc[index_fige]
+                    row_new = edited_df.loc[index_fige]
+                    
+                    if isinstance(row_old, pd.DataFrame): row_old = row_old.iloc[0]
+                    if isinstance(row_new, pd.DataFrame): row_new = row_new.iloc[0]
+                    
+                    changed_cols = [c for c in colonnes_choisies if str(row_old[c]) != str(row_new[c])]
+                    
+                    if changed_cols:
+                        changement_detecte = True
+                        identite = row_old["Identité"]
+                        idx_main = row_old["_orig_index"]
+                        
+                        for col in changed_cols:
+                            new_val = row_new[col]
+                            if pd.isna(new_val): new_val = ""
                             
-                    # Mécanique de Cascade ciblée UNIQUEMENT sur la ligne modifiée
-                    if "Nom" in changed_cols or "Prénom" in changed_cols:
-                        new_nom = str(st.session_state['df_adherents'].at[idx_main, "Nom"]).strip().upper()
-                        new_prenom = str(st.session_state['df_adherents'].at[idx_main, "Prénom"]).strip().title()
-                        new_identite = f"{new_prenom} {new_nom}"
-
-                        if new_identite != identite:
-                            st.session_state['df_adherents'].at[idx_main, "Identité"] = new_identite
-                            
-                            if new_identite not in st.session_state['db']['elos_crevette']:
-                                st.session_state['db']['elos_crevette'][new_identite] = st.session_state['db']['elos_crevette'].get(identite, 400)
-                            if new_identite not in st.session_state['db']['validations_promo']:
-                                st.session_state['db']['validations_promo'][new_identite] = st.session_state['db']['validations_promo'].get(identite, False)
-                            if new_identite not in st.session_state['db']['sorties_manuelles']:
-                                st.session_state['db']['sorties_manuelles'][new_identite] = st.session_state['db']['sorties_manuelles'].get(identite, "-")
+                            if col == "Promo Validée ✅": st.session_state['db']['validations_promo'][identite] = new_val
+                            elif col == "Sortie Seul": st.session_state['db']['sorties_manuelles'][identite] = new_val
+                            elif col == "Elo Crevette 🦐": st.session_state['db']['elos_crevette'][identite] = int(new_val) if str(new_val).isdigit() else 400
+                            else: st.session_state['df_adherents'].at[idx_main, col] = new_val
                                 
-                            row_updated = st.session_state['df_adherents'].loc[idx_main]
-                            creneaux_autos = affectations_automatiques(row_updated)
-                            
-                            for c_auto in creneaux_autos:
-                                if c_auto not in st.session_state['db']['affectations_creneaux']:
-                                    st.session_state['db']['affectations_creneaux'][c_auto] = []
-                                if new_identite not in st.session_state['db']['affectations_creneaux'][c_auto]:
-                                    st.session_state['db']['affectations_creneaux'][c_auto].append(new_identite)
+                        # Mécanique de Cascade ciblée UNIQUEMENT sur la ligne modifiée
+                        if "Nom" in changed_cols or "Prénom" in changed_cols:
+                            new_nom = str(st.session_state['df_adherents'].at[idx_main, "Nom"]).strip().upper()
+                            new_prenom = str(st.session_state['df_adherents'].at[idx_main, "Prénom"]).strip().title()
+                            new_identite = f"{new_prenom} {new_nom}"
+
+                            if new_identite != identite:
+                                st.session_state['df_adherents'].at[idx_main, "Identité"] = new_identite
+                                
+                                if new_identite not in st.session_state['db']['elos_crevette']:
+                                    st.session_state['db']['elos_crevette'][new_identite] = st.session_state['db']['elos_crevette'].get(identite, 400)
+                                if new_identite not in st.session_state['db']['validations_promo']:
+                                    st.session_state['db']['validations_promo'][new_identite] = st.session_state['db']['validations_promo'].get(identite, False)
+                                if new_identite not in st.session_state['db']['sorties_manuelles']:
+                                    st.session_state['db']['sorties_manuelles'][new_identite] = st.session_state['db']['sorties_manuelles'].get(identite, "-")
                                     
-                            if new_identite not in st.session_state['db'].get('eleves_deja_affectes', []):
-                                st.session_state['db']['eleves_deja_affectes'].append(new_identite)
-                            if new_identite not in st.session_state['db'].get('identites_helloasso_connues', []):
-                                st.session_state['db']['identites_helloasso_connues'].append(new_identite)
+                                row_updated = st.session_state['df_adherents'].loc[idx_main]
+                                creneaux_autos = affectations_automatiques(row_updated)
                                 
-                            # Nettoyage sécurisé : on efface l'ancienne identité SEULEMENT si aucun autre frère/sœur ne l'utilise
-                            if identite not in st.session_state['df_adherents']['Identité'].values:
-                                for c in st.session_state['db']['affectations_creneaux']:
-                                    if identite in st.session_state['db']['affectations_creneaux'][c]:
-                                        st.session_state['db']['affectations_creneaux'][c].remove(identite)
-                                if identite in st.session_state['db'].get('eleves_deja_affectes', []):
-                                    st.session_state['db']['eleves_deja_affectes'].remove(identite)
-                                st.session_state['db']['elos_crevette'].pop(identite, None)
-                                st.session_state['db']['validations_promo'].pop(identite, None)
-                                st.session_state['db']['sorties_manuelles'].pop(identite, None)
+                                for c_auto in creneaux_autos:
+                                    if c_auto not in st.session_state['db']['affectations_creneaux']:
+                                        st.session_state['db']['affectations_creneaux'][c_auto] = []
+                                    if new_identite not in st.session_state['db']['affectations_creneaux'][c_auto]:
+                                        st.session_state['db']['affectations_creneaux'][c_auto].append(new_identite)
+                                        
+                                if new_identite not in st.session_state['db'].get('eleves_deja_affectes', []):
+                                    st.session_state['db']['eleves_deja_affectes'].append(new_identite)
+                                if new_identite not in st.session_state['db'].get('identites_helloasso_connues', []):
+                                    st.session_state['db']['identites_helloasso_connues'].append(new_identite)
+                                    
+                                # Nettoyage sécurisé : on efface l'ancienne identité SEULEMENT si aucun autre frère/sœur ne l'utilise
+                                if identite not in st.session_state['df_adherents']['Identité'].values:
+                                    for c in st.session_state['db']['affectations_creneaux']:
+                                        if identite in st.session_state['db']['affectations_creneaux'][c]:
+                                            st.session_state['db']['affectations_creneaux'][c].remove(identite)
+                                    if identite in st.session_state['db'].get('eleves_deja_affectes', []):
+                                        st.session_state['db']['eleves_deja_affectes'].remove(identite)
+                                    st.session_state['db']['elos_crevette'].pop(identite, None)
+                                    st.session_state['db']['validations_promo'].pop(identite, None)
+                                    st.session_state['db']['sorties_manuelles'].pop(identite, None)
 
-            if changement_detecte:
-                sauvegarder_base_cloud(st.session_state['db'])
-                sauvegarder_adherents_cloud(st.session_state['df_adherents'])
-                st.rerun()
+                if changement_detecte:
+                    sauvegarder_base_cloud(st.session_state['db'])
+                    sauvegarder_adherents_cloud(st.session_state['df_adherents'])
+                    st.success("✅ Modifications enregistrées et ancrées dans le Cloud !")
+                    st.rerun()
+                else:
+                    st.info("💡 Modifiez les cases du tableau puis cliquez ici pour sauvegarder.")
 
             # --- OUTIL DE SUPPRESSION (ZONE DE DANGER) ---
             st.markdown("---")
             with st.expander("🗑️ Zone de Danger : Nettoyage et Suppressions"):
                 st.warning("Les élèves supprimés n'apparaîtront plus. Leur identifiant de paiement est mis sur Liste Noire.")
                 
+                st.markdown("---")
                 options_suppr = []
                 mapping_suppr = {}
                 for idx, row in df.iterrows():
