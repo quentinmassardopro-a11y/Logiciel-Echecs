@@ -26,7 +26,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- VERROUILLAGE PAR MOT DE PASSE (VALIDATION AVEC ENTRÉE) ---
+# --- VERROUILLAGE PAR MOT DE PASSE ---
 if "authentifie" not in st.session_state: st.session_state["authentifie"] = False
 if not st.session_state["authentifie"]:
     col1, col2, col3 = st.columns([1, 2, 1])
@@ -260,6 +260,7 @@ def get_helloasso_token(client_id, client_secret):
         return r.json().get("access_token") if r.status_code == 200 else None
     except: return None
 
+# --- FETCH HELLOASSO CORRIGÉ (ANTI-BOUCLE INFINIE) ---
 def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
     url_base = f"https://api.helloasso.com/v5/organizations/echecs-cassis/forms/{form_type}/{form_slug}/items"
     rows = []
@@ -271,11 +272,16 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
             params["continuationToken"] = continuation_token
             
         try:
-            r = requests.get(url_base, headers={"Authorization": f"Bearer {token}"}, params=params)
+            # Sécurité 1: Ajout d'un timeout de 15s
+            r = requests.get(url_base, headers={"Authorization": f"Bearer {token}"}, params=params, timeout=15)
             if r.status_code != 200: break
             
             data = r.json()
             items = data.get("data", [])
+            
+            # Sécurité 2: Si la page est vide, on arrête immédiatement
+            if not items:
+                break
             
             for item in items:
                 if item.get("type") == "Donation": continue
@@ -355,8 +361,14 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
                             elif reponse == "": row["Sortie Seul"] = "-"
                             else: row["Sortie Seul"] = f"❓ {reponse}"
             rows.append(row)
-            continuation_token = data.get("pagination", {}).get("continuationToken")
-            if not continuation_token: break
+            
+            next_token = data.get("pagination", {}).get("continuationToken")
+            
+            # Sécurité 3: Si le token ne change pas, on est bloqué, on force l'arrêt
+            if not next_token or next_token == continuation_token:
+                break
+            
+            continuation_token = next_token
             
         except Exception: break
         
