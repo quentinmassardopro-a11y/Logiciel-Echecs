@@ -26,7 +26,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- VERROUILLAGE PAR MOT DE PASSE (VALIDATION AVEC ENTRÉE) ---
+# --- VERROUILLAGE PAR MOT DE PASSE ---
 if "authentifie" not in st.session_state: st.session_state["authentifie"] = False
 if not st.session_state["authentifie"]:
     col1, col2, col3 = st.columns([1, 2, 1])
@@ -43,7 +43,7 @@ if not st.session_state["authentifie"]:
                 else: st.error("Mot de passe incorrect.")
     st.stop()
 
-# --- CONNEXION GOOGLE SHEETS CLOUD ---
+# --- CONNEXION GOOGLE SHEETS CLOUD (SÉCURISÉE) ---
 def get_gsheets_client():
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     creds_dict = dict(st.secrets["gcp_service_account"])
@@ -72,10 +72,12 @@ def charger_base_cloud():
         ws = get_or_create_worksheet(sh, "DB_JSON")
         vals = ws.col_values(1)
         if vals:
-            db = json.loads("".join(vals))
-            return db
-    except Exception: pass
-    return initialiser_memoire_vierge()
+            return json.loads("".join(vals))
+        return initialiser_memoire_vierge()
+    except Exception as e:
+        # ARRET D'URGENCE: Ne retourne pas une base vierge si l'API Google plante !
+        st.error(f"Erreur de connexion à Google Sheets (DB). Données protégées. Erreur: {e}")
+        return None 
 
 def sauvegarder_base_cloud(db):
     try:
@@ -86,10 +88,9 @@ def sauvegarder_base_cloud(db):
         chunks = [[json_str[i:i+40000]] for i in range(0, len(json_str), 40000)]
         ws.clear()
         try: ws.update(values=chunks, range_name="A1")
-        except TypeError: 
-            try: ws.update("A1", chunks)
-            except Exception: pass
-    except Exception: pass
+        except TypeError: ws.update("A1", chunks)
+    except Exception as e:
+        st.error(f"Échec de la sauvegarde Cloud (DB): {e}")
 
 def charger_adherents_cloud():
     try:
@@ -98,23 +99,25 @@ def charger_adherents_cloud():
         ws = get_or_create_worksheet(sh, "Adherents")
         data = ws.get_all_records()
         if data: return pd.DataFrame(data)
-    except Exception: pass
-    return pd.DataFrame()
+        return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Erreur de connexion à Google Sheets (Adhérents). Données protégées. Erreur: {e}")
+        return None
 
 def sauvegarder_adherents_cloud(df):
     try:
+        if df is None or df.empty: return
         client = get_gsheets_client()
         sh = client.open("Base_Calanques_DB")
         ws = get_or_create_worksheet(sh, "Adherents")
-        ws.clear()
-        if not df.empty:
-            data = [df.columns.values.tolist()] + df.fillna("").astype(str).values.tolist()
-            try: ws.update(values=data, range_name="A1")
-            except TypeError: 
-                try: ws.update("A1", data)
-                except Exception: pass
-    except Exception: pass
+        data = [df.columns.values.tolist()] + df.fillna("").astype(str).values.tolist()
+        ws.clear() # On ne clear QUE si la préparation des données a réussi
+        try: ws.update(values=data, range_name="A1")
+        except TypeError: ws.update("A1", data)
+    except Exception as e:
+        st.error(f"Échec de la sauvegarde Cloud (Adhérents): {e}")
 
+# --- FONCTIONS DE FORMATAGE ET SÉCURITÉ ---
 def is_different(val1, val2):
     v1 = str(val1).strip().lower() if pd.notna(val1) and str(val1) != "nan" else ""
     v2 = str(val2).strip().lower() if pd.notna(val2) and str(val2) != "nan" else ""
@@ -122,22 +125,61 @@ def is_different(val1, val2):
 
 def nettoyer_id_dossier(val):
     val_str = str(val).strip()
-    if val_str.endswith('.0'):
-        return val_str[:-2]
-    if val_str.lower() in ['nan', 'none', '']:
-        return ""
+    if val_str.endswith('.0'): return val_str[:-2]
+    if val_str.lower() in ['nan', 'none', '']: return ""
     return val_str
 
-# --- CHARGEMENT SÉCURISÉ & DÉDUPLICATION STRICTE PAR FACTURE ---
+def format_phone(tel):
+    if pd.isna(tel) or str(tel).strip().lower() in ["nan", "none", ""]: return ""
+    t = str(tel).strip().replace(" ", "").replace(".", "").replace("-", "")
+    if t.startswith("+33"): t = "0" + t[3:]
+    elif t.startswith("33") and len(t) == 11: t = "0" + t[2:]
+    elif len(t) == 9 and not t.startswith("0"): t = "0" + t
+    if len(t) == 10 and t.isdigit():
+        return f"{t[0:2]}.{t[2:4]}.{t[4:6]}.{t[6:8]}.{t[8:10]}"
+    return str(tel)
+
+def generer_vcard(contact):
+    vcard = "BEGIN:VCARD\nVERSION:3.0\n"
+    nom = str(contact.get("Nom", "")).strip()
+    prenom = str(contact.get("Prénom", "")).strip()
+    vcard += f"N:{nom};{prenom};;;\n"
+    vcard += f"FN:{prenom} {nom}\n"
+    vcard += f"ORG:Académie d'Échecs des Calanques\n"
+    
+    tel1 = contact.get("N° Portable", "")
+    if tel1: vcard += f"TEL;TYPE=CELL,VOICE:{tel1}\n"
+    
+    tel2 = contact.get("N° Portable 2 (en cas d'urgence)", "")
+    if tel2: vcard += f"TEL;TYPE=HOME,VOICE:{tel2}\n"
+    
+    email = contact.get("EMail", "")
+    if email: vcard += f"EMAIL;TYPE=PREF,INTERNET:{email}\n"
+    
+    vcard += "END:VCARD"
+    return vcard.encode('utf-8')
+
+# --- INITIALISATION SÉCURISÉE DES DONNÉES ---
 if 'db' not in st.session_state: 
     with st.spinner("Connexion sécurisée au Cloud Google..."):
-        st.session_state['db'] = charger_base_cloud()
+        db_loaded = charger_base_cloud()
+        if db_loaded is None: st.stop() # Bloque l'appli si Google Sheets est inaccessible
+        st.session_state['db'] = db_loaded
 
 if 'df_adherents' not in st.session_state:
     with st.spinner("Récupération de la base adhérents..."):
         df_loaded = charger_adherents_cloud()
+        if df_loaded is None: st.stop() # Bloque l'appli si Google Sheets est inaccessible
+        
         if not df_loaded.empty: 
             len_avant = len(df_loaded)
+            
+            # Nettoyage automatique au démarrage
+            if 'N° Portable' in df_loaded.columns:
+                df_loaded['N° Portable'] = df_loaded['N° Portable'].apply(format_phone)
+            if "N° Portable 2 (en cas d'urgence)" in df_loaded.columns:
+                df_loaded["N° Portable 2 (en cas d'urgence)"] = df_loaded["N° Portable 2 (en cas d'urgence)"].apply(format_phone)
+
             if 'ID_Dossier' in df_loaded.columns:
                 df_loaded['ID_Dossier'] = df_loaded['ID_Dossier'].apply(nettoyer_id_dossier)
                 mask_valid_id = df_loaded['ID_Dossier'] != ""
@@ -146,9 +188,12 @@ if 'df_adherents' not in st.session_state:
                 df_loaded = pd.concat([df_valid, df_invalid]).reset_index(drop=True)
                 
             st.session_state['df_adherents'] = df_loaded
-            if len(df_loaded) < len_avant:
+            if len(df_loaded) < len_avant or True:
                 sauvegarder_adherents_cloud(df_loaded)
+        else:
+            st.session_state['df_adherents'] = pd.DataFrame()
 
+# Assurance absolue que les dictionnaires clés existent
 default_mem = initialiser_memoire_vierge()
 for cle, val_defaut in default_mem.items():
     if cle not in st.session_state['db']:
@@ -162,7 +207,7 @@ with col2:
     st.title("Académie d'Échecs des Calanques")
     st.markdown("**Plateforme Globale : Administration, Écoles, Boutique & Entraînements**")
 
-# --- FONCTIONS UTILITAIRES ---
+# --- MOTEUR LOGIQUE ---
 def calculer_nouveau_elo(r_a, r_b, score_a, k=40):
     e_a = 1.0 / (1.0 + 10.0 ** ((r_b - r_a) / 400.0))
     return max(100, round(r_a + k * (score_a - e_a)))
@@ -273,6 +318,88 @@ def get_helloasso_token(client_id, client_secret):
         return r.json().get("access_token") if r.status_code == 200 else None
     except: return None
 
+# --- SOUS-USINE D'EXTRACTION HELLOASSO (Code refactorisé pour plus de rapidité) ---
+def formater_donnees_helloasso(item, nom_campagne):
+    """Transforme la transaction brute HelloAsso en un dictionnaire propre pour le tableau."""
+    if item.get("type") == "Donation": return None
+    nom_tarif = str(item.get("name", "")).strip()
+    if "don " in nom_tarif.lower() or nom_tarif.lower() == "don": return None
+        
+    order = item.get("order", {})
+    user = item.get("user", {})
+    payer = item.get("payer") or order.get("payer") or {}
+    
+    discount = item.get("discount")
+    code_promo = discount.get("code", "") if isinstance(discount, dict) else ""
+    if not code_promo and "amountDiscount" in item: code_promo = "Oui (Réduit)"
+    
+    type_formule = "Club" if "club" in nom_campagne.lower() or "club" in nom_tarif.lower() else "École"
+    if "boutique" in nom_campagne.lower(): type_formule = "Boutique"
+    
+    last_name = user.get("lastName") or payer.get("lastName") or "Inconnu"
+    first_name = user.get("firstName") or payer.get("firstName") or "Inconnu"
+    nom_propre = str(last_name).replace("*", "").strip().upper()
+    prenom_propre = str(first_name).replace("*", "").strip().title()
+    
+    montant_paye = item.get('amount', 0)
+    item_id = item.get("id")
+    
+    if not item_id:
+        # Hachage sécurisé MD5 (Insensible au redémarrage serveur)
+        chaine_unique = f"{nom_propre}{prenom_propre}{nom_campagne}{montant_paye}{random.randint(1,999999)}".encode('utf-8')
+        item_id = f"HA_{hashlib.md5(chaine_unique).hexdigest()[:10]}"
+    
+    row = {
+        "ID_Dossier": nettoyer_id_dossier(item_id), 
+        "Campagne": nom_campagne, "Nom": nom_propre, "Prénom": prenom_propre, 
+        "Identité": f"{prenom_propre} {nom_propre}",
+        "Montant Payé": f"{montant_paye / 100} €", "Code Promo": code_promo, "Allergies / Médical": "-",
+        "Formule": nom_tarif, "Type": type_formule, "Licence_FFE": "Non croisé", 
+        "Nom payeur": str(payer.get("lastName", "")).replace("*", "").strip(),
+        "Prénom payeur": str(payer.get("firstName", "")).replace("*", "").strip(), 
+        "Email payeur": str(user.get("email") or payer.get("email") or ""), 
+        "N° Portable": "", "N° Portable 2 (en cas d'urgence)": "", 
+        "EMail": str(user.get("email") or payer.get("email") or ""), 
+        "Adresse": str(user.get("address") or payer.get("address") or ""), 
+        "Ville": str(user.get("city") or payer.get("city") or ""), 
+        "Nom et prénom du responsable légal": "", "Classe": "", 
+        "Date de naissance": str(user.get("birthDate") or user.get("dateOfBirth") or payer.get("dateOfBirth") or "")[:10], 
+        "Taille du t-shirt": "", "Dans quel ville sera votre créneaux principale": "",
+        "Sortie Seul": "-"
+    }
+    
+    # Intégration des questions personnalisées HelloAsso
+    for field in item.get("customFields", []):
+        n_champ = str(field.get("name", "")).strip() 
+        rep = str(field.get("answer", "")).strip()
+        n_low = n_champ.lower()
+        
+        row[n_champ] = rep
+        if "promo" in n_low: row["Code Promo"] = rep
+        elif any(m in n_low for m in ["allergie", "médical", "sante", "santé"]):
+            row["Allergies / Médical"] = rep if row["Allergies / Médical"] == "-" else f"{row['Allergies / Médical']} | {rep}"
+        elif "classe" in n_low or "niveau" in n_low: row["Classe"] = rep
+        elif "portable 2" in n_low or "urgence" in n_low: row["N° Portable 2 (en cas d'urgence)"] = format_phone(rep)
+        elif "portable" in n_low or "téléphone" in n_low or "tel" in n_low: 
+            if not row["N° Portable"]: row["N° Portable"] = format_phone(rep)
+        elif "responsable" in n_low or "légal" in n_low: row["Nom et prénom du responsable légal"] = rep
+        elif "t-shirt" in n_low: row["Taille du t-shirt"] = rep
+        elif "créneaux" in n_low and "principale" in n_low: row["Dans quel ville sera votre créneaux principale"] = rep
+        elif "adresse" in n_low and len(rep) > 2: row["Adresse"] = rep
+        elif "ville" in n_low and "créneaux" not in n_low and len(rep) > 1: row["Ville"] = rep
+        elif "naissance" in n_low and len(rep) > 2: row["Date de naissance"] = rep
+        elif "email" in n_low or "courriel" in n_low: row["EMail"] = rep
+        elif "quitter" in n_low and "seul" in n_low:
+            if type_formule == "École": row["Sortie Seul"] = "N/A (École)"
+            else:
+                r_low = rep.lower()
+                if "oui" in r_low or r_low == "true": row["Sortie Seul"] = "✅ OUI"
+                elif "non" in r_low or r_low == "false": row["Sortie Seul"] = "❌ NON"
+                elif rep == "": row["Sortie Seul"] = "-"
+                else: row["Sortie Seul"] = f"❓ {rep}"
+                
+    return row
+
 def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
     url_base = f"https://api.helloasso.com/v5/organizations/echecs-cassis/forms/{form_type}/{form_slug}/items"
     rows = []
@@ -280,8 +407,7 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
     
     while True:
         params = {"pageSize": 100, "withDetails": "true"}
-        if continuation_token:
-            params["continuationToken"] = continuation_token
+        if continuation_token: params["continuationToken"] = continuation_token
             
         try:
             r = requests.get(url_base, headers={"Authorization": f"Bearer {token}"}, params=params, timeout=15)
@@ -293,112 +419,23 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
             
             for item in items:
                 try: 
-                    if item.get("type") == "Donation": continue
-                    nom_tarif = str(item.get("name", "")).strip()
-                    if "don " in nom_tarif.lower() or nom_tarif.lower() == "don": continue
-                        
-                    order = item.get("order") or {}
-                    user = item.get("user") or {}
-                    payer = item.get("payer") or order.get("payer") or {}
-                    
-                    discount = item.get("discount")
-                    code_promo_utilise = ""
-                    if discount and isinstance(discount, dict): code_promo_utilise = discount.get("code", "")
-                    if not code_promo_utilise and "amountDiscount" in item: code_promo_utilise = "Oui (Montant Réduit)"
-                    
-                    type_formule = "Club" if "club" in nom_campagne.lower() else "École"
-                    if "boutique" in nom_campagne.lower(): type_formule = "Boutique"
-                    
-                    last_name = user.get("lastName") or payer.get("lastName") or "Inconnu"
-                    first_name = user.get("firstName") or payer.get("firstName") or "Inconnu"
-                    nom_propre = str(last_name).replace("*", "").strip().upper()
-                    prenom_propre = str(first_name).replace("*", "").strip().title()
-                    
-                    email_def = str(user.get("email") or payer.get("email") or "")
-                    adresse_def = str(user.get("address") or payer.get("address") or "")
-                    ville_def = str(user.get("city") or payer.get("city") or "")
-                    naissance_def = str(user.get("birthDate") or user.get("dateOfBirth") or payer.get("dateOfBirth") or "")
-                    
-                    montant_paye = item.get('amount', 0)
-                    item_id = item.get("id")
-                    
-                    if not item_id:
-                        chaine_unique = f"{nom_propre}{prenom_propre}{nom_campagne}{montant_paye}{random.randint(1,999999)}".encode('utf-8')
-                        empreinte_md5 = hashlib.md5(chaine_unique).hexdigest()[:10]
-                        item_id = f"HA_{empreinte_md5}"
-                    
-                    item_id = nettoyer_id_dossier(item_id)
-                    
-                    nom_payeur = str(payer.get("lastName") or "").replace("*", "").strip()
-                    prenom_payeur = str(payer.get("firstName") or "").replace("*", "").strip()
-
-                    row = {
-                        "ID_Dossier": str(item_id), 
-                        "Campagne": nom_campagne, "Nom": nom_propre, "Prénom": prenom_propre, "Identité": f"{prenom_propre} {nom_propre}",
-                        "Montant Payé": f"{montant_paye / 100} €", "Code Promo": code_promo_utilise, "Allergies / Médical": "-",
-                        "Formule": nom_tarif, "Type": type_formule, "Licence_FFE": "Non croisé", "Nom payeur": nom_payeur,
-                        "Prénom payeur": prenom_payeur, "Email payeur": email_def, "N° Portable": "",
-                        "N° Portable 2 (en cas d'urgence)": "", "EMail": email_def, "Adresse": adresse_def, "Ville": ville_def, "Nom et prénom du responsable légal": "",
-                        "Classe": "", "Date de naissance": naissance_def, "Taille du t-shirt": "", "Dans quel ville sera votre créneaux principale": "",
-                        "J'autorise le club à diffuser des photos de moi ou mon enfant en lien avec notre activité sur notre site et sur les réseaux sociaux (Facebook ; Instagram, Twitter):": "",
-                        "J’autorise le club à utiliser des images de moi ou mon enfant pour des objets publicitaires (prospectus de présentation du club, oriflamme, kakemono) :": "",
-                        "J’accepte de recevoir les informations sur l’actualité du club (soirée blitz, organisation de stages pendant les vacances…) ainsi que les annonces des prochains tournois par mail": "",
-                        "Sortie Seul": "-"
-                    }
-                    if row["Date de naissance"] and len(str(row["Date de naissance"])) >= 10: row["Date de naissance"] = str(row["Date de naissance"])[:10]
-                    
-                    # C'EST ICI QUE LES CHAMPS DYNAMIQUES DE LA BOUTIQUE SONT AJOUTÉS
-                    for field in item.get("customFields", []):
-                        nom_champ = str(field.get("name") or "").strip() 
-                        reponse = str(field.get("answer") or "").strip()
-                        nom_lower = nom_champ.lower()
-                        
-                        row[nom_champ] = reponse
-                        if "promo" in nom_lower: row["Code Promo"] = reponse
-                        if any(mot in nom_lower for mot in ["allergie", "médical", "sante", "santé"]):
-                            if row["Allergies / Médical"] == "-": row["Allergies / Médical"] = reponse
-                            else: row["Allergies / Médical"] += f" | {reponse}"
-                        if "classe" in nom_lower or "niveau" in nom_lower: row["Classe"] = reponse
-                        if "portable 2" in nom_lower or "urgence" in nom_lower: row["N° Portable 2 (en cas d'urgence)"] = reponse
-                        elif "portable" in nom_lower or "téléphone" in nom_lower or "telephone" in nom_lower or "tel" in nom_lower: 
-                            if not row["N° Portable"]: row["N° Portable"] = reponse
-                        if "responsable" in nom_lower or "légal" in nom_lower: row["Nom et prénom du responsable légal"] = reponse
-                        if "t-shirt" in nom_lower: row["Taille du t-shirt"] = reponse
-                        if "créneaux" in nom_lower and "principale" in nom_lower: row["Dans quel ville sera votre créneaux principale"] = reponse
-                        if "diffuser" in nom_lower and "photos" in nom_lower: row["J'autorise le club à diffuser des photos de moi ou mon enfant en lien avec notre activité sur notre site et sur les réseaux sociaux (Facebook ; Instagram, Twitter):"] = reponse
-                        if "publicitaires" in nom_lower or "prospectus" in nom_lower: row["J’autorise le club à utiliser des images de moi ou mon enfant pour des objets publicitaires (prospectus de présentation du club, oriflamme, kakemono) :"] = reponse
-                        if "actualité" in nom_lower or "blitz" in nom_lower: row["J’accepte de recevoir les informations sur l’actualité du club (soirée blitz, organisation de stages pendant les vacances…) ainsi que les annonces des prochains tournois par mail"] = reponse
-                        if "adresse" in nom_lower and len(reponse) > 2: row["Adresse"] = reponse
-                        if "ville" in nom_lower and "créneaux" not in nom_lower and len(reponse) > 1: row["Ville"] = reponse
-                        if "naissance" in nom_lower and len(reponse) > 2: row["Date de naissance"] = reponse
-                        if "email" in nom_lower or "courriel" in nom_lower: row["EMail"] = reponse
-                        if "quitter" in nom_lower and "seul" in nom_lower:
-                            if type_formule == "École": row["Sortie Seul"] = "N/A (École)"
-                            else:
-                                if "oui" in reponse.lower() or reponse.lower() == "true": row["Sortie Seul"] = "✅ OUI"
-                                elif "non" in reponse.lower() or reponse.lower() == "false": row["Sortie Seul"] = "❌ NON"
-                                elif reponse == "": row["Sortie Seul"] = "-"
-                                else: row["Sortie Seul"] = f"❓ {reponse}"
-                    rows.append(row)
-                except Exception:
-                    continue
+                    row = formater_donnees_helloasso(item, nom_campagne)
+                    if row: rows.append(row)
+                except Exception: continue
                     
             next_token = data.get("pagination", {}).get("continuationToken")
             if not next_token or next_token == continuation_token: break
             continuation_token = next_token
-            
         except Exception: break
         
     return rows
 
 def analyser_fichier_ffe(fichier):
-    FFE_LOCAL = "base_ffe_locale_tmp.csv"
     try:
         if not isinstance(fichier, str):
-            with open(FFE_LOCAL, "wb") as f: f.write(fichier.getbuffer())
-            fichier_a_lire = FFE_LOCAL
-        else:
-            fichier_a_lire = fichier
+            with open("base_ffe_locale_tmp.csv", "wb") as f: f.write(fichier.getbuffer())
+            fichier_a_lire = "base_ffe_locale_tmp.csv"
+        else: fichier_a_lire = fichier
             
         try: df_ffe = pd.read_csv(fichier_a_lire, sep=None, engine='python', encoding='utf-8')
         except UnicodeDecodeError: df_ffe = pd.read_csv(fichier_a_lire, sep=None, engine='python', encoding='latin1')
@@ -407,21 +444,21 @@ def analyser_fichier_ffe(fichier):
         col_prenom = next((c for c in df_ffe.columns if "prenom" in str(c).lower() or "prénom" in str(c).lower()), None)
         col_elo = next((c for c in df_ffe.columns if "rapide" in str(c).lower()), None)
         if not col_elo: col_elo = next((c for c in df_ffe.columns if "elo" in str(c).lower()), None)
-        col_licence = next((c for c in df_ffe.columns if any(mot in str(c).lower() for mot in ["n° ffe", "licence", "code", "ref", "identifiant"])), None)
-        col_dna = next((c for c in df_ffe.columns if any(mot in str(c).lower() for mot in ["dna", "né", "naissance"])), None)
+        col_licence = next((c for c in df_ffe.columns if any(m in str(c).lower() for m in ["n° ffe", "licence", "code", "ref", "identifiant"])), None)
+        col_dna = next((c for c in df_ffe.columns if any(m in str(c).lower() for m in ["dna", "né", "naissance"])), None)
 
         if col_nom and col_prenom:
-            df_ffe['Nom_Norm'] = df_ffe[col_nom].apply(normaliser_nom)
-            df_ffe['Prenom_Norm'] = df_ffe[col_prenom].apply(normaliser_nom)
+            df_ffe['Nom_Norm'] = df_ffe[col_nom].astype(str).apply(normaliser_nom)
+            df_ffe['Prenom_Norm'] = df_ffe[col_prenom].astype(str).apply(normaliser_nom)
             if col_dna: df_ffe['Annee_FFE'] = df_ffe[col_dna].astype(str).str.extract(r'(\d{4})')[0].fillna("")
             else: df_ffe['Annee_FFE'] = ""
-            df_ffe['Cle_Forte'] = df_ffe['Nom_Norm'] + df_ffe['Prenom_Norm'] + df_ffe['Annee_FFE']
-            df_ffe['Cle_Souple'] = df_ffe['Nom_Norm'] + df_ffe['Prenom_Norm']
+            df_ffe['Cle_Forte'] = df_ffe['Nom_Norm'].astype(str) + df_ffe['Prenom_Norm'].astype(str) + df_ffe['Annee_FFE'].astype(str)
+            df_ffe['Cle_Souple'] = df_ffe['Nom_Norm'].astype(str) + df_ffe['Prenom_Norm'].astype(str)
             df_ffe['Elo_FFE'] = df_ffe[col_elo] if col_elo else 0
             df_ffe['Licence_FFE'] = df_ffe[col_licence].astype(str) if col_licence else "Non croisé"
             return df_ffe[['Cle_Forte', 'Cle_Souple', 'Elo_FFE', 'Licence_FFE']]
     except Exception as e: 
-        st.sidebar.error(f"Erreur d'analyse du fichier FFE: {e}")
+        st.sidebar.error(f"Erreur d'analyse FFE: {e}")
         return pd.DataFrame()
     return pd.DataFrame()
 
@@ -433,10 +470,12 @@ st.sidebar.markdown("---")
 st.sidebar.header("☁️ CLOUD & TEMPS RÉEL")
 st.sidebar.info("La Base de données et les Adhérents sont synchronisés avec Google Sheets.")
 if st.sidebar.button("🔄 Rafraîchir les données (Cloud)"):
-    with st.spinner("Récupération des modifications des autres utilisateurs..."):
-        st.session_state['db'] = charger_base_cloud()
+    with st.spinner("Récupération des modifications..."):
+        db_loaded = charger_base_cloud()
+        if db_loaded: st.session_state['db'] = db_loaded
+        
         df_loaded = charger_adherents_cloud()
-        if not df_loaded.empty: st.session_state['df_adherents'] = df_loaded
+        if df_loaded is not None and not df_loaded.empty: st.session_state['df_adherents'] = df_loaded
         
         for cle, val_defaut in initialiser_memoire_vierge().items():
             if cle not in st.session_state['db']: st.session_state['db'][cle] = val_defaut
@@ -459,12 +498,12 @@ if 'df_ffe' in st.session_state:
             with st.spinner("Recherche des correspondances dans la base FFE..."):
                 df_base = st.session_state['df_adherents'].copy()
                 
-                df_base['Nom_Norm'] = df_base['Nom'].apply(normaliser_nom)
-                df_base['Prenom_Norm'] = df_base['Prénom'].apply(normaliser_nom)
+                df_base['Nom_Norm'] = df_base['Nom'].astype(str).apply(normaliser_nom)
+                df_base['Prenom_Norm'] = df_base['Prénom'].astype(str).apply(normaliser_nom)
                 df_base['Annee_HA'] = df_base['Date de naissance'].astype(str).str.extract(r'(\d{4})')[0].fillna("")
                 
-                df_base['Cle_Forte'] = df_base['Nom_Norm'] + df_base['Prenom_Norm'] + df_base['Annee_HA']
-                df_base['Cle_Souple'] = df_base['Nom_Norm'] + df_base['Prenom_Norm']
+                df_base['Cle_Forte'] = df_base['Nom_Norm'].astype(str) + df_base['Prenom_Norm'].astype(str) + df_base['Annee_HA'].astype(str)
+                df_base['Cle_Souple'] = df_base['Nom_Norm'].astype(str) + df_base['Prenom_Norm'].astype(str)
                 
                 df_ffe_strict = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Forte'])
                 df_ffe_souple = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Souple'])
@@ -488,7 +527,7 @@ if 'df_ffe' in st.session_state:
                 st.sidebar.success("✅ Licences et Elos recroisés avec succès !")
                 st.rerun()
         else:
-            st.sidebar.warning("Aucun adhérent dans la base à croiser.")
+            st.sidebar.warning("Aucun adhérent dans la base.")
 
 st.sidebar.markdown("---")
 st.sidebar.header("2️⃣ HelloAsso (Nouveaux Inscrits)")
@@ -517,26 +556,26 @@ if st.sidebar.button("⬇️ Lancer la Synchronisation HelloAsso"):
                 
                 if all_data:
                     df_new_fetch = pd.DataFrame(all_data)
-                    df_local = st.session_state.get('df_adherents', pd.DataFrame())
+                    df_local = st.session_state.get('df_adherents', pd.DataFrame()).copy()
                     ids_supprimes = [str(x) for x in st.session_state['db'].get('dossiers_supprimes', [])]
                     
                     def est_valide(r):
-                        id_dos = str(r.get('ID_Dossier', ''))
+                        id_dos = nettoyer_id_dossier(r.get('ID_Dossier', ''))
                         if id_dos and id_dos != 'nan' and id_dos in ids_supprimes: return False
-                        if not df_local.empty:
-                            if 'ID_Dossier' in df_local.columns and id_dos in df_local['ID_Dossier'].dropna().astype(str).values: return False
+                        if not df_local.empty and 'ID_Dossier' in df_local.columns:
+                            if id_dos in df_local['ID_Dossier'].dropna().astype(str).values: return False
                         return True
                         
                     nouveaux = df_new_fetch[df_new_fetch.apply(est_valide, axis=1)].copy()
 
                     if not nouveaux.empty:
                         if 'df_ffe' in st.session_state and not st.session_state['df_ffe'].empty:
-                            nouveaux['Nom_Norm'] = nouveaux['Nom'].apply(normaliser_nom)
-                            nouveaux['Prenom_Norm'] = nouveaux['Prénom'].apply(normaliser_nom)
+                            nouveaux['Nom_Norm'] = nouveaux['Nom'].astype(str).apply(normaliser_nom)
+                            nouveaux['Prenom_Norm'] = nouveaux['Prénom'].astype(str).apply(normaliser_nom)
                             nouveaux['Annee_HA'] = nouveaux['Date de naissance'].astype(str).str.extract(r'(\d{4})')[0].fillna("")
                             
-                            nouveaux['Cle_Forte'] = nouveaux['Nom_Norm'] + nouveaux['Prenom_Norm'] + nouveaux['Annee_HA']
-                            nouveaux['Cle_Souple'] = nouveaux['Nom_Norm'] + nouveaux['Prenom_Norm']
+                            nouveaux['Cle_Forte'] = nouveaux['Nom_Norm'].astype(str) + nouveaux['Prenom_Norm'].astype(str) + nouveaux['Annee_HA'].astype(str)
+                            nouveaux['Cle_Souple'] = nouveaux['Nom_Norm'].astype(str) + nouveaux['Prenom_Norm'].astype(str)
                             
                             df_ffe_strict = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Forte'])
                             df_ffe_souple = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Souple'])
@@ -573,7 +612,7 @@ if st.sidebar.button("⬇️ Lancer la Synchronisation HelloAsso"):
                         st.session_state['df_adherents'] = df_final
                         sauvegarder_adherents_cloud(df_final)
                         sauvegarder_base_cloud(st.session_state['db'])
-                        st.sidebar.success(f"Opération réussie ! {len(nouveaux)} nouveaux ajoutés dans le Cloud.")
+                        st.sidebar.success(f"Opération réussie ! {len(nouveaux)} nouveaux ajoutés.")
                     else: st.sidebar.info("Aucun nouvel inscrit détecté.")
                 else: st.sidebar.warning("Aucune donnée trouvée sur HelloAsso.")
             else: st.sidebar.error("Erreur API HelloAsso.")
@@ -609,7 +648,7 @@ else:
                         nv_prenom = c_m2.text_input("Prénom de l'élève").title()
                         nv_campagne = st.selectbox("Établissement / Campagne", ["Adhésions Club", "Sainte Trinité", "Saint Augustin", "Don Bosco", "Autre"])
                         nv_formule = st.text_input("Formule / Cours (ex: Lundi, Créneau collège...)")
-                        nv_tel = st.text_input("Téléphone parent")
+                        nv_tel = format_phone(st.text_input("Téléphone parent"))
                         nv_mail = st.text_input("Email parent")
                         
                         if st.form_submit_button("Créer le dossier de l'élève"):
@@ -645,7 +684,7 @@ else:
             with c_tools2:
                 st.markdown("##### ✏️ Correction d'Identité")
                 with st.expander("Corriger une faute dans un Nom / Prénom"):
-                    st.write("Sélectionnez la transaction précise de l'élève pour corriger son nom :")
+                    st.write("Sélectionnez la transaction de l'élève pour corriger son nom :")
                     
                     df_correction = df[df["Type"] != "Boutique"]
                     
@@ -743,6 +782,16 @@ else:
                 for i, (k, v) in enumerate(items):
                     if i < mid: c_info1.markdown(f"**{k}:** {v}")
                     else: c_info2.markdown(f"**{k}:** {v}")
+                    
+                st.markdown("---")
+                vcard_data = generer_vcard(contact)
+                st.download_button(
+                    label=f"📱 Enregistrer {contact.get('Prénom', '')} dans mes contacts (vCard)",
+                    data=vcard_data,
+                    file_name=f"{contact.get('Prénom', '')}_{contact.get('Nom', '')}.vcf",
+                    mime="text/vcard",
+                    use_container_width=True
+                )
             st.markdown('</div>', unsafe_allow_html=True)
 
             col_ad1, col_ad2 = st.columns(2)
@@ -760,7 +809,7 @@ else:
             
             noms_bruts = df_admin["Nom"].fillna("Inconnu").astype(str) + " " + df_admin["Prénom"].fillna("").astype(str)
             s_counts = df_admin.groupby(noms_bruts, dropna=False).cumcount()
-            index_names = noms_bruts + s_counts.apply(lambda x: f" ({x})" if x > 0 else "")
+            index_names = noms_bruts.astype(str) + s_counts.apply(lambda x: f" ({x})" if x > 0 else "").astype(str)
             
             df_admin.insert(0, "👤 Élève (Fige)", index_names)
             df_display = df_admin.set_index("_orig_index")
@@ -768,10 +817,10 @@ else:
             colonnes_a_cacher = ["Identité", "Nom payeur", "Prénom payeur", "Email payeur", "ID_Dossier", "_orig_index"]
             colonnes_possibles = [c for c in df_display.columns if c not in colonnes_a_cacher]
             
-            ordre_prefere = ["👤 Élève (Fige)", "Nom", "Prénom", "Licence_FFE", "Type", "Elo_FFE", "Elo Crevette 🦐", "T-shirt donné 👕", "Formule", "Campagne", "Sortie Seul", "Promo Validée ✅", "N° Portable", "EMail"]
+            ordre_prefere = ["👤 Élève (Fige)", "T-shirt donné 👕", "Promo Validée ✅", "Nom", "Prénom", "Licence_FFE", "Type", "Elo_FFE", "Elo Crevette 🦐", "Formule", "Campagne", "Sortie Seul", "N° Portable", "EMail"]
             colonnes_possibles = sorted(colonnes_possibles, key=lambda x: ordre_prefere.index(x) if x in ordre_prefere else 999)
 
-            colonnes_par_defaut = ["👤 Élève (Fige)", "Licence_FFE", "Type", "Elo_FFE", "Elo Crevette 🦐", "T-shirt donné 👕", "Formule", "Campagne"]
+            colonnes_par_defaut = ["👤 Élève (Fige)", "T-shirt donné 👕", "Promo Validée ✅", "Licence_FFE", "Type", "Elo_FFE", "Elo Crevette 🦐", "Formule", "Campagne"]
             colonnes_par_defaut = [c for c in colonnes_par_defaut if c in colonnes_possibles]
             
             st.markdown("##### ⚙️ Affichage sur mesure")
@@ -799,49 +848,54 @@ else:
             bouton_sauvegarde = st.button("💾 Enregistrer toutes les modifications du tableau", use_container_width=True)
 
             if bouton_sauvegarde:
-                changement_detecte = False
-                for idx_main in edited_df.index:
-                    if idx_main not in df_display.index:
-                        continue
-                        
-                    row_old = df_display.loc[idx_main]
-                    row_new = edited_df.loc[idx_main]
-                    
-                    if isinstance(row_old, pd.DataFrame): row_old = row_old.iloc[0]
-                    if isinstance(row_new, pd.DataFrame): row_new = row_new.iloc[0]
-                    
-                    changed_cols = [c for c in colonnes_finales if is_different(row_old[c], row_new[c]) and c != "👤 Élève (Fige)"]
-                    
-                    if changed_cols:
-                        changement_detecte = True
-                        identite_actuelle = row_old["Identité"]
-                        
-                        for col in changed_cols:
-                            new_val = row_new[col]
-                            if pd.isna(new_val): new_val = ""
+                with st.spinner("Sauvegarde en cours..."):
+                    changement_detecte = False
+                    for idx_main in edited_df.index:
+                        if idx_main not in df_display.index: continue
                             
-                            if col == "Promo Validée ✅": st.session_state['db']['validations_promo'][identite_actuelle] = bool(new_val)
-                            elif col == "Sortie Seul": st.session_state['db']['sorties_manuelles'][identite_actuelle] = new_val
-                            elif col == "T-shirt donné 👕": st.session_state['db']['tshirts_donnes'][identite_actuelle] = bool(new_val)
-                            elif col == "Elo Crevette 🦐": 
-                                try: st.session_state['db']['elos_crevette'][identite_actuelle] = int(float(new_val))
-                                except ValueError: st.session_state['db']['elos_crevette'][identite_actuelle] = 400
-                            else: st.session_state['df_adherents'].at[idx_main, col] = new_val
+                        row_old = df_display.loc[idx_main]
+                        row_new = edited_df.loc[idx_main]
+                        
+                        if isinstance(row_old, pd.DataFrame): row_old = row_old.iloc[0]
+                        if isinstance(row_new, pd.DataFrame): row_new = row_new.iloc[0]
+                        
+                        changed_cols = [c for c in colonnes_finales if is_different(row_old[c], row_new[c]) and c != "👤 Élève (Fige)"]
+                        
+                        if changed_cols:
+                            changement_detecte = True
+                            identite_actuelle = row_old["Identité"]
+                            
+                            for col in changed_cols:
+                                new_val = row_new[col]
+                                if pd.isna(new_val): new_val = ""
                                 
-                        if any(c in changed_cols for c in ["Formule", "Campagne", "Dans quel ville sera votre créneaux principale", "Classe"]):
-                            row_updated = st.session_state['df_adherents'].loc[idx_main]
-                            nouveaux_creneaux = affectations_automatiques(row_updated)
-                            for c_auto in nouveaux_creneaux:
-                                if c_auto not in st.session_state['db']['affectations_creneaux']:
-                                    st.session_state['db']['affectations_creneaux'][c_auto] = []
-                                if identite_actuelle not in st.session_state['db']['affectations_creneaux'][c_auto]:
-                                    st.session_state['db']['affectations_creneaux'][c_auto].append(identite_actuelle)
+                                if col == "Promo Validée ✅": st.session_state['db']['validations_promo'][identite_actuelle] = bool(new_val)
+                                elif col == "Sortie Seul": st.session_state['db']['sorties_manuelles'][identite_actuelle] = new_val
+                                elif col == "T-shirt donné 👕": st.session_state['db']['tshirts_donnes'][identite_actuelle] = bool(new_val)
+                                elif col in ["N° Portable", "N° Portable 2 (en cas d'urgence)"]: 
+                                    new_val = format_phone(new_val)
+                                    st.session_state['df_adherents'].at[idx_main, col] = new_val
+                                elif col == "Elo Crevette 🦐": 
+                                    try: st.session_state['db']['elos_crevette'][identite_actuelle] = int(float(new_val))
+                                    except ValueError: st.session_state['db']['elos_crevette'][identite_actuelle] = 400
+                                else: st.session_state['df_adherents'].at[idx_main, col] = new_val
+                                    
+                            if any(c in changed_cols for c in ["Formule", "Campagne", "Dans quel ville sera votre créneaux principale", "Classe"]):
+                                row_updated = st.session_state['df_adherents'].loc[idx_main]
+                                nouveaux_creneaux = affectations_automatiques(row_updated)
+                                for c_auto in nouveaux_creneaux:
+                                    if c_auto not in st.session_state['db']['affectations_creneaux']:
+                                        st.session_state['db']['affectations_creneaux'][c_auto] = []
+                                    if identite_actuelle not in st.session_state['db']['affectations_creneaux'][c_auto]:
+                                        st.session_state['db']['affectations_creneaux'][c_auto].append(identite_actuelle)
 
-                if changement_detecte:
-                    sauvegarder_base_cloud(st.session_state['db'])
-                    sauvegarder_adherents_cloud(st.session_state['df_adherents'])
-                    st.success("✅ Modifications enregistrées et ancrées dans le Cloud !")
-                    st.rerun()
+                    if changement_detecte:
+                        sauvegarder_base_cloud(st.session_state['db'])
+                        sauvegarder_adherents_cloud(st.session_state['df_adherents'])
+                        st.success("✅ Modifications enregistrées et ancrées dans le Cloud !")
+                        st.rerun()
+                    else:
+                        st.info("Aucune modification détectée.")
 
             st.markdown("---")
             with st.expander("🗑️ Zone de Danger : Suppressions"):
@@ -937,7 +991,7 @@ else:
                     
                     noms_bruts_ec = df_ec["Nom"].fillna("Inconnu").astype(str) + " " + df_ec["Prénom"].fillna("").astype(str)
                     s_counts_ec = df_ec.groupby(noms_bruts_ec, dropna=False).cumcount()
-                    index_names_ec = noms_bruts_ec + s_counts_ec.apply(lambda x: f" ({x})" if x > 0 else "")
+                    index_names_ec = noms_bruts_ec.astype(str) + s_counts_ec.apply(lambda x: f" ({x})" if x > 0 else "").astype(str)
                     
                     df_ec.insert(0, "👤 Élève (Fige)", index_names_ec)
                     df_ec_display = df_ec.set_index("👤 Élève (Fige)")
@@ -982,7 +1036,6 @@ else:
                     with st.expander(f"📁 Présences du {date_appel}"):
                         for groupe, infos in data_groupes.items(): st.write(f"**{groupe}** (par {infos.get('entraineur', 'Inconnu')}) : {len(infos.get('presents', []))} présents")
 
-    # --- NOUVEAU MODULE BOUTIQUE DYNAMIQUE ---
     elif module_choisi == "🛒 Module Boutique":
         st.subheader("🛒 Suivi des Achats Boutique")
         st.write("Ce module liste uniquement les transactions liées à votre campagne HelloAsso 'Boutique'. Cochez la case une fois l'article remis à l'élève.")
@@ -1009,14 +1062,14 @@ else:
                     if valeurs_reelles:
                         colonnes_supp_boutique.append(c)
                         
-            colonnes_a_afficher = ["Nom", "Prénom", "Formule"] + colonnes_supp_boutique + ["Montant Payé", "Article Donné 🎁"]
+            colonnes_a_afficher = ["Article Donné 🎁", "Nom", "Prénom", "Formule"] + colonnes_supp_boutique + ["Montant Payé"]
             
             col_config = {
+                "Article Donné 🎁": st.column_config.CheckboxColumn("Article Donné 🎁"),
                 "Nom": st.column_config.Column(disabled=True),
                 "Prénom": st.column_config.Column(disabled=True),
                 "Formule": st.column_config.Column("Article Commandé", disabled=True),
-                "Montant Payé": st.column_config.Column(disabled=True),
-                "Article Donné 🎁": st.column_config.CheckboxColumn("Article Donné 🎁")
+                "Montant Payé": st.column_config.Column(disabled=True)
             }
             for c in colonnes_supp_boutique:
                 col_config[c] = st.column_config.Column(disabled=True)
@@ -1029,23 +1082,24 @@ else:
             )
             
             if st.button("💾 Enregistrer les remises boutique", use_container_width=True):
-                changement_b = False
-                for idx_b in edited_boutique.index:
-                    if idx_b not in df_display_boutique.index: continue
-                    old_val = df_display_boutique.loc[idx_b, "Article Donné 🎁"]
-                    new_val = edited_boutique.loc[idx_b, "Article Donné 🎁"]
+                with st.spinner("Sauvegarde de la boutique en cours..."):
+                    changement_b = False
+                    for idx_b in edited_boutique.index:
+                        if idx_b not in df_display_boutique.index: continue
+                        old_val = df_display_boutique.loc[idx_b, "Article Donné 🎁"]
+                        new_val = edited_boutique.loc[idx_b, "Article Donné 🎁"]
+                        
+                        if is_different(old_val, new_val):
+                            changement_b = True
+                            id_doss = nettoyer_id_dossier(df_display_boutique.loc[idx_b, "ID_Dossier"])
+                            st.session_state['db']['boutique_donnees'][id_doss] = bool(new_val)
                     
-                    if is_different(old_val, new_val):
-                        changement_b = True
-                        id_doss = nettoyer_id_dossier(df_display_boutique.loc[idx_b, "ID_Dossier"])
-                        st.session_state['db']['boutique_donnees'][id_doss] = bool(new_val)
-                
-                if changement_b:
-                    sauvegarder_base_cloud(st.session_state['db'])
-                    st.success("✅ État de la boutique enregistré avec succès !")
-                    st.rerun()
-                else:
-                    st.info("Aucun changement détecté.")
+                    if changement_b:
+                        sauvegarder_base_cloud(st.session_state['db'])
+                        st.success("✅ État de la boutique enregistré avec succès !")
+                        st.rerun()
+                    else:
+                        st.info("Aucun changement détecté.")
 
     elif module_choisi == "♟️ Module Entraîneur":
         st.subheader("♟️ Espace Entraîneur")
