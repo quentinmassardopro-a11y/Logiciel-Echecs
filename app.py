@@ -225,27 +225,32 @@ def affectations_automatiques(row):
         else: creneaux.append("Jeudi - Don Bosco (École)")
         
     if "club" in camp or "adhésion" in camp or "adhesion" in camp:
-        if "cassis" in ville_choisie: creneaux.extend(["Lundi - Club Cassis", "Mercredi - Ceyreste / Cassis", "Jeudi - Cassis / La Ciotat", "Vendredi - Cassis"])
-        if "marseille" in ville_choisie: creneaux.append("Mardi - Ceyreste / Marseille")
-        if "ceyreste" in ville_choisie: creneaux.extend(["Mardi - Ceyreste / Marseille", "Mercredi - Ceyreste / Cassis"])
-        if "ciotat" in ville_choisie: creneaux.extend(["Lundi - La Ciotat (École)", "Jeudi - Cassis / La Ciotat"])
+        if "cassis" in ville_choisie: creneaux.extend(["Lundi - Club Cassis", "Mercredi - Cassis", "Jeudi - Cassis", "Vendredi - Cassis"])
+        if "marseille" in ville_choisie: creneaux.append("Mardi - Marseille")
+        if "ceyreste" in ville_choisie: creneaux.extend(["Mardi - Ceyreste", "Mercredi - Ceyreste"])
+        if "ciotat" in ville_choisie: creneaux.extend(["Lundi - La Ciotat", "Jeudi - La Ciotat"])
         if "carnoux" in ville_choisie: creneaux.append("Lundi - Carnoux")
             
     if not creneaux:
         if "lundi" in form:
             if "trinit" in camp: creneaux.append("Lundi - Sainte-Trinité (CP)")
-            else: creneaux.append("Lundi - La Ciotat (École)")
+            elif "ciotat" in form: creneaux.append("Lundi - La Ciotat")
+            else: creneaux.append("Lundi - Club Cassis")
         elif "mardi" in form:
             if "trinit" in camp: creneaux.append("Mardi - Sainte-Trinité (CE1)")
             elif "augustin" in camp: creneaux.append("Mardi - Saint-Augustin (CP-CE1)")
-            else: creneaux.append("Mardi - Ceyreste / Marseille")
-        elif "mercredi" in form: creneaux.append("Mercredi - Ceyreste / Cassis")
+            elif "marseille" in form: creneaux.append("Mardi - Marseille")
+            else: creneaux.append("Mardi - Ceyreste")
+        elif "mercredi" in form:
+            if "ceyreste" in form: creneaux.append("Mercredi - Ceyreste")
+            else: creneaux.append("Mercredi - Cassis")
         elif "jeudi" in form:
             if "trinit" in camp: creneaux.append("Jeudi - Sainte-Trinité (Collège)")
             elif "bosco" in camp: 
                 if "coll" in form: creneaux.append("Jeudi - Don Bosco (Collège)")
                 else: creneaux.append("Jeudi - Don Bosco (École)")
-            else: creneaux.append("Jeudi - Cassis / La Ciotat")
+            elif "ciotat" in form: creneaux.append("Jeudi - La Ciotat")
+            else: creneaux.append("Jeudi - Cassis")
         elif "vendredi" in form:
             if "augustin" in camp: creneaux.append("Vendredi - Saint-Augustin (CE2-CM2)")
             elif "trinit" in camp: creneaux.append("Vendredi - Sainte-Trinité (CE2-CM2)")
@@ -260,7 +265,7 @@ def get_helloasso_token(client_id, client_secret):
         return r.json().get("access_token") if r.status_code == 200 else None
     except: return None
 
-# --- NOUVEAU FETCH BLINDÉ ANTI-CRASH ---
+# --- FETCH HELLOASSO CORRIGÉ (ANTI-BOUCLE INFINIE) ---
 def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
     url_base = f"https://api.helloasso.com/v5/organizations/echecs-cassis/forms/{form_type}/{form_slug}/items"
     rows = []
@@ -280,7 +285,7 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
             if not items: break # Stoppe la boucle infinie si la page est vide
             
             for item in items:
-                try: # Protège la boucle globale si une seule transaction est corrompue
+                try: 
                     if item.get("type") == "Donation": continue
                     nom_tarif = str(item.get("name", "")).strip()
                     if "don " in nom_tarif.lower() or nom_tarif.lower() == "don": continue
@@ -297,7 +302,6 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
                     type_formule = "Club" if "club" in nom_campagne.lower() else "École"
                     if "boutique" in nom_campagne.lower(): type_formule = "Boutique"
                     
-                    # Extraction robuste (empêche le bug NoneType)
                     last_name = user.get("lastName") or payer.get("lastName") or "Inconnu"
                     first_name = user.get("firstName") or payer.get("firstName") or "Inconnu"
                     nom_propre = str(last_name).replace("*", "").strip().upper()
@@ -311,7 +315,6 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
                     montant_paye = item.get('amount', 0)
                     item_id = item.get("id")
                     
-                    # Si aucun ID d'article, on crée un ID unique renforcé avec random pour éviter d'écraser les achats multiples
                     if not item_id:
                         chaine_unique = f"{nom_propre}{prenom_propre}{nom_campagne}{montant_paye}{random.randint(1,999999)}".encode('utf-8')
                         empreinte_md5 = hashlib.md5(chaine_unique).hexdigest()[:10]
@@ -368,7 +371,7 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
                                 else: row["Sortie Seul"] = f"❓ {reponse}"
                     rows.append(row)
                 except Exception:
-                    continue # Ignore silently the broken item
+                    continue
                     
             next_token = data.get("pagination", {}).get("continuationToken")
             if not next_token or next_token == continuation_token: break
@@ -571,11 +574,12 @@ else:
     df = st.session_state['df_adherents']
     date_jour = datetime.now().strftime("%d/%m/%Y")
     
+    # --- MISE A JOUR DES CRENEAUX ISOLES ---
     structure_creneaux = {
-        "Lundi": ["Lundi - Sainte-Trinité (CP)", "Lundi - La Ciotat (École)", "Lundi - Carnoux", "Lundi - Club Cassis"],
-        "Mardi": ["Mardi - Sainte-Trinité (CE1)", "Mardi - Saint-Augustin (CP-CE1)", "Mardi - Ceyreste / Marseille"],
-        "Mercredi": ["Mercredi - Ceyreste / Cassis"],
-        "Jeudi": ["Jeudi - Sainte-Trinité (Collège)", "Jeudi - Don Bosco (École)", "Jeudi - Don Bosco (Collège)", "Jeudi - Cassis / La Ciotat"],
+        "Lundi": ["Lundi - Sainte-Trinité (CP)", "Lundi - La Ciotat", "Lundi - Carnoux", "Lundi - Club Cassis"],
+        "Mardi": ["Mardi - Sainte-Trinité (CE1)", "Mardi - Saint-Augustin (CP-CE1)", "Mardi - Ceyreste", "Mardi - Marseille"],
+        "Mercredi": ["Mercredi - Ceyreste", "Mercredi - Cassis"],
+        "Jeudi": ["Jeudi - Sainte-Trinité (Collège)", "Jeudi - Don Bosco (École)", "Jeudi - Don Bosco (Collège)", "Jeudi - Cassis", "Jeudi - La Ciotat"],
         "Vendredi": ["Vendredi - Saint-Augustin (CE2-CM2)", "Vendredi - Sainte-Trinité (CE2-CM2)", "Vendredi - Cassis"]
     }
 
@@ -633,9 +637,12 @@ else:
                 st.markdown("##### ✏️ Correction d'Identité")
                 with st.expander("Corriger une faute dans un Nom / Prénom"):
                     st.write("Sélectionnez la transaction précise de l'élève pour corriger son nom :")
+                    
+                    df_correction = df[df["Type"] != "Boutique"]
+                    
                     options_renommage = []
                     mapping_renommage = {}
-                    for idx, row in df.iterrows():
+                    for idx, row in df_correction.iterrows():
                         id_dos = row.get('ID_Dossier', 'Sans ID')
                         texte_ren = f"👤 {row['Nom']} {row['Prénom']} | 📋 {row.get('Campagne', '-')} (Dossier: {id_dos}) - Ligne {idx}"
                         options_renommage.append(texte_ren)
@@ -703,12 +710,15 @@ else:
                                 st.error("Les champs ne peuvent pas être vides.")
 
             st.markdown("---")
+            
+            df_sans_boutique = df[df["Type"] != "Boutique"].copy()
+
             st.markdown('<div class="recherche-rapide">', unsafe_allow_html=True)
             st.markdown("#### 🔍 Dossier Complet de l'Élève")
-            recherche_nom = st.selectbox("Taper un nom/prénom pour ouvrir le dossier complet :", options=[""] + sorted(df["Identité"].tolist()), label_visibility="collapsed")
+            recherche_nom = st.selectbox("Taper un nom/prénom pour ouvrir le dossier complet :", options=[""] + sorted(df_sans_boutique["Identité"].tolist()), label_visibility="collapsed")
             
             if recherche_nom:
-                contact = df[df["Identité"] == recherche_nom].iloc[0].copy()
+                contact = df_sans_boutique[df_sans_boutique["Identité"] == recherche_nom].iloc[0].copy()
                 
                 s_actuelle = st.session_state['db']['sorties_manuelles'].get(contact["Identité"], contact.get("Sortie Seul", "-"))
                 contact["Sortie Seul (Temps Réel)"] = s_actuelle
@@ -727,10 +737,10 @@ else:
             st.markdown('</div>', unsafe_allow_html=True)
 
             col_ad1, col_ad2 = st.columns(2)
-            with col_ad1: filtre_camp_admin = st.multiselect("Campagnes :", options=df["Campagne"].unique(), default=df["Campagne"].unique())
-            with col_ad2: filtre_type_admin = st.multiselect("Types :", options=df["Type"].unique(), default=df["Type"].unique())
+            with col_ad1: filtre_camp_admin = st.multiselect("Campagnes :", options=df_sans_boutique["Campagne"].unique(), default=df_sans_boutique["Campagne"].unique())
+            with col_ad2: filtre_type_admin = st.multiselect("Types :", options=df_sans_boutique["Type"].unique(), default=df_sans_boutique["Type"].unique())
                 
-            df_admin = df[(df["Campagne"].isin(filtre_camp_admin)) & (df["Type"].isin(filtre_type_admin))].copy()
+            df_admin = df_sans_boutique[(df_sans_boutique["Campagne"].isin(filtre_camp_admin)) & (df_sans_boutique["Type"].isin(filtre_type_admin))].copy()
             
             df_admin['Elo Crevette 🦐'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['elos_crevette'].get(x, 400))
             df_admin['Promo Validée ✅'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['validations_promo'].get(x, False))
@@ -826,7 +836,7 @@ else:
 
             st.markdown("---")
             with st.expander("🗑️ Zone de Danger : Suppressions"):
-                st.warning("Les élèves supprimés n'apparaîtront plus. Leur identifiant de paiement est mis sur Liste Noire.")
+                st.warning("Les transactions supprimées n'apparaîtront plus. L'identifiant de paiement est mis sur Liste Noire.")
                 
                 options_suppr = []
                 mapping_suppr = {}
