@@ -75,7 +75,6 @@ def charger_base_cloud():
             return json.loads("".join(vals))
         return initialiser_memoire_vierge()
     except Exception as e:
-        # ARRET D'URGENCE: Ne retourne pas une base vierge si l'API Google plante !
         st.error(f"Erreur de connexion à Google Sheets (DB). Données protégées. Erreur: {e}")
         return None 
 
@@ -111,7 +110,7 @@ def sauvegarder_adherents_cloud(df):
         sh = client.open("Base_Calanques_DB")
         ws = get_or_create_worksheet(sh, "Adherents")
         data = [df.columns.values.tolist()] + df.fillna("").astype(str).values.tolist()
-        ws.clear() # On ne clear QUE si la préparation des données a réussi
+        ws.clear() 
         try: ws.update(values=data, range_name="A1")
         except TypeError: ws.update("A1", data)
     except Exception as e:
@@ -159,41 +158,51 @@ def generer_vcard(contact):
     vcard += "END:VCARD"
     return vcard.encode('utf-8')
 
-# --- INITIALISATION SÉCURISÉE DES DONNÉES ---
+# --- INITIALISATION SÉCURISÉE & CORRECTIF RÉTROACTIF DU TYPE "CLUB" ---
 if 'db' not in st.session_state: 
     with st.spinner("Connexion sécurisée au Cloud Google..."):
         db_loaded = charger_base_cloud()
-        if db_loaded is None: st.stop() # Bloque l'appli si Google Sheets est inaccessible
+        if db_loaded is None: st.stop() 
         st.session_state['db'] = db_loaded
 
 if 'df_adherents' not in st.session_state:
     with st.spinner("Récupération de la base adhérents..."):
         df_loaded = charger_adherents_cloud()
-        if df_loaded is None: st.stop() # Bloque l'appli si Google Sheets est inaccessible
+        if df_loaded is None: st.stop() 
         
         if not df_loaded.empty: 
             len_avant = len(df_loaded)
             
-            # Nettoyage automatique au démarrage
+            # Formatage automatique des numéros
             if 'N° Portable' in df_loaded.columns:
                 df_loaded['N° Portable'] = df_loaded['N° Portable'].apply(format_phone)
             if "N° Portable 2 (en cas d'urgence)" in df_loaded.columns:
                 df_loaded["N° Portable 2 (en cas d'urgence)"] = df_loaded["N° Portable 2 (en cas d'urgence)"].apply(format_phone)
 
+            # Dédoublonnage
             if 'ID_Dossier' in df_loaded.columns:
                 df_loaded['ID_Dossier'] = df_loaded['ID_Dossier'].apply(nettoyer_id_dossier)
                 mask_valid_id = df_loaded['ID_Dossier'] != ""
                 df_valid = df_loaded[mask_valid_id].drop_duplicates(subset=['ID_Dossier'], keep='last')
                 df_invalid = df_loaded[~mask_valid_id]
                 df_loaded = pd.concat([df_valid, df_invalid]).reset_index(drop=True)
+
+            # 🛠️ CORRECTIF RÉTROACTIF : Repasse les faux écoliers en "Club"
+            def corriger_type_retroactif(row):
+                camp = str(row.get("Campagne", "")).lower()
+                form = str(row.get("Formule", "")).lower()
+                if "boutique" in camp: return "Boutique"
+                if "club" in camp or "club" in form: return "Club"
+                return "École"
+            
+            if "Type" in df_loaded.columns:
+                df_loaded["Type"] = df_loaded.apply(corriger_type_retroactif, axis=1)
                 
             st.session_state['df_adherents'] = df_loaded
-            if len(df_loaded) < len_avant or True:
-                sauvegarder_adherents_cloud(df_loaded)
+            sauvegarder_adherents_cloud(df_loaded)
         else:
             st.session_state['df_adherents'] = pd.DataFrame()
 
-# Assurance absolue que les dictionnaires clés existent
 default_mem = initialiser_memoire_vierge()
 for cle, val_defaut in default_mem.items():
     if cle not in st.session_state['db']:
@@ -318,9 +327,8 @@ def get_helloasso_token(client_id, client_secret):
         return r.json().get("access_token") if r.status_code == 200 else None
     except: return None
 
-# --- SOUS-USINE D'EXTRACTION HELLOASSO (Code refactorisé pour plus de rapidité) ---
+# --- USINE D'EXTRACTION HELLOASSO ---
 def formater_donnees_helloasso(item, nom_campagne):
-    """Transforme la transaction brute HelloAsso en un dictionnaire propre pour le tableau."""
     if item.get("type") == "Donation": return None
     nom_tarif = str(item.get("name", "")).strip()
     if "don " in nom_tarif.lower() or nom_tarif.lower() == "don": return None
@@ -333,9 +341,6 @@ def formater_donnees_helloasso(item, nom_campagne):
     code_promo = discount.get("code", "") if isinstance(discount, dict) else ""
     if not code_promo and "amountDiscount" in item: code_promo = "Oui (Réduit)"
     
-    type_formule = "Club" if "club" in nom_campagne.lower() or "club" in nom_tarif.lower() else "École"
-    if "boutique" in nom_campagne.lower(): type_formule = "Boutique"
-    
     last_name = user.get("lastName") or payer.get("lastName") or "Inconnu"
     first_name = user.get("firstName") or payer.get("firstName") or "Inconnu"
     nom_propre = str(last_name).replace("*", "").strip().upper()
@@ -345,7 +350,6 @@ def formater_donnees_helloasso(item, nom_campagne):
     item_id = item.get("id")
     
     if not item_id:
-        # Hachage sécurisé MD5 (Insensible au redémarrage serveur)
         chaine_unique = f"{nom_propre}{prenom_propre}{nom_campagne}{montant_paye}{random.randint(1,999999)}".encode('utf-8')
         item_id = f"HA_{hashlib.md5(chaine_unique).hexdigest()[:10]}"
     
@@ -354,7 +358,7 @@ def formater_donnees_helloasso(item, nom_campagne):
         "Campagne": nom_campagne, "Nom": nom_propre, "Prénom": prenom_propre, 
         "Identité": f"{prenom_propre} {nom_propre}",
         "Montant Payé": f"{montant_paye / 100} €", "Code Promo": code_promo, "Allergies / Médical": "-",
-        "Formule": nom_tarif, "Type": type_formule, "Licence_FFE": "Non croisé", 
+        "Formule": nom_tarif, "Licence_FFE": "Non croisé", 
         "Nom payeur": str(payer.get("lastName", "")).replace("*", "").strip(),
         "Prénom payeur": str(payer.get("firstName", "")).replace("*", "").strip(), 
         "Email payeur": str(user.get("email") or payer.get("email") or ""), 
@@ -368,13 +372,17 @@ def formater_donnees_helloasso(item, nom_campagne):
         "Sortie Seul": "-"
     }
     
-    # Intégration des questions personnalisées HelloAsso
     for field in item.get("customFields", []):
         n_champ = str(field.get("name", "")).strip() 
         rep = str(field.get("answer", "")).strip()
         n_low = n_champ.lower()
         
         row[n_champ] = rep
+        
+        if "formule" in n_low or "choix" in n_low or "cours" in n_low or "créneau" in n_low or "creneau" in n_low:
+            if rep.lower() not in row["Formule"].lower() and rep:
+                row["Formule"] = f"{row['Formule']} | {rep}"
+                
         if "promo" in n_low: row["Code Promo"] = rep
         elif any(m in n_low for m in ["allergie", "médical", "sante", "santé"]):
             row["Allergies / Médical"] = rep if row["Allergies / Médical"] == "-" else f"{row['Allergies / Médical']} | {rep}"
@@ -390,14 +398,24 @@ def formater_donnees_helloasso(item, nom_campagne):
         elif "naissance" in n_low and len(rep) > 2: row["Date de naissance"] = rep
         elif "email" in n_low or "courriel" in n_low: row["EMail"] = rep
         elif "quitter" in n_low and "seul" in n_low:
-            if type_formule == "École": row["Sortie Seul"] = "N/A (École)"
-            else:
-                r_low = rep.lower()
-                if "oui" in r_low or r_low == "true": row["Sortie Seul"] = "✅ OUI"
-                elif "non" in r_low or r_low == "false": row["Sortie Seul"] = "❌ NON"
-                elif rep == "": row["Sortie Seul"] = "-"
-                else: row["Sortie Seul"] = f"❓ {rep}"
-                
+            r_low = rep.lower()
+            if "oui" in r_low or r_low == "true": row["Sortie Seul"] = "✅ OUI"
+            elif "non" in r_low or r_low == "false": row["Sortie Seul"] = "❌ NON"
+            elif rep == "": row["Sortie Seul"] = "-"
+            else: row["Sortie Seul"] = f"❓ {rep}"
+
+    # CLASSIFICATION FINALE DU TYPE (Corrige le bug de la formule club)
+    camp_low = nom_campagne.lower()
+    form_low = str(row.get("Formule", "")).lower()
+    
+    if "boutique" in camp_low:
+        row["Type"] = "Boutique"
+    elif "club" in camp_low or "club" in form_low:
+        row["Type"] = "Club"
+    else:
+        row["Type"] = "École"
+        if row["Sortie Seul"] == "-": row["Sortie Seul"] = "N/A (École)"
+            
     return row
 
 def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
@@ -659,7 +677,9 @@ else:
                                     "ID_Dossier": id_unique,
                                     "Campagne": nv_campagne, "Nom": nv_nom, "Prénom": nv_prenom, "Identité": nv_identite,
                                     "Montant Payé": "0 € (Manuel)", "Code Promo": "", "Allergies / Médical": "-",
-                                    "Formule": nv_formule, "Type": "Club" if "Club" in nv_campagne else "École", "Licence_FFE": "Non croisé",
+                                    "Formule": nv_formule, 
+                                    "Type": "Club" if "club" in nv_campagne.lower() or "club" in nv_formule.lower() else "École", 
+                                    "Licence_FFE": "Non croisé",
                                     "Nom payeur": nv_nom, "Prénom payeur": nv_prenom, "Email payeur": nv_mail, "N° Portable": nv_tel,
                                     "N° Portable 2 (en cas d'urgence)": "", "EMail": nv_mail, "Adresse": "", "Ville": "", 
                                     "Nom et prénom du responsable légal": "", "Classe": "", "Date de naissance": "", 
@@ -684,7 +704,7 @@ else:
             with c_tools2:
                 st.markdown("##### ✏️ Correction d'Identité")
                 with st.expander("Corriger une faute dans un Nom / Prénom"):
-                    st.write("Sélectionnez la transaction de l'élève pour corriger son nom :")
+                    st.write("Sélectionnez la transaction précise de l'élève pour corriger son nom :")
                     
                     df_correction = df[df["Type"] != "Boutique"]
                     
