@@ -26,7 +26,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- VERROUILLAGE PAR MOT DE PASSE ---
+# --- VERROUILLAGE PAR MOT DE PASSE (VALIDATION AVEC ENTRÉE) ---
 if "authentifie" not in st.session_state: st.session_state["authentifie"] = False
 if not st.session_state["authentifie"]:
     col1, col2, col3 = st.columns([1, 2, 1])
@@ -260,7 +260,7 @@ def get_helloasso_token(client_id, client_secret):
         return r.json().get("access_token") if r.status_code == 200 else None
     except: return None
 
-# --- FETCH HELLOASSO CORRIGÉ (ANTI-BOUCLE INFINIE) ---
+# --- NOUVEAU FETCH BLINDÉ ANTI-CRASH ---
 def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
     url_base = f"https://api.helloasso.com/v5/organizations/echecs-cassis/forms/{form_type}/{form_slug}/items"
     rows = []
@@ -272,102 +272,106 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
             params["continuationToken"] = continuation_token
             
         try:
-            # Sécurité 1: Ajout d'un timeout de 15s
             r = requests.get(url_base, headers={"Authorization": f"Bearer {token}"}, params=params, timeout=15)
             if r.status_code != 200: break
             
             data = r.json()
             items = data.get("data", [])
-            
-            # Sécurité 2: Si la page est vide, on arrête immédiatement
-            if not items:
-                break
+            if not items: break # Stoppe la boucle infinie si la page est vide
             
             for item in items:
-                if item.get("type") == "Donation": continue
-                nom_tarif = str(item.get("name", "")).strip()
-                if "don " in nom_tarif.lower() or nom_tarif.lower() == "don": continue
+                try: # Protège la boucle globale si une seule transaction est corrompue
+                    if item.get("type") == "Donation": continue
+                    nom_tarif = str(item.get("name", "")).strip()
+                    if "don " in nom_tarif.lower() or nom_tarif.lower() == "don": continue
+                        
+                    order = item.get("order") or {}
+                    user = item.get("user") or {}
+                    payer = item.get("payer") or order.get("payer") or {}
                     
-                user, payer = item.get("user", {}), item.get("payer", {})
-                
-                discount = item.get("discount")
-                if discount and isinstance(discount, dict): code_promo_utilise = discount.get("code", "")
-                else: code_promo_utilise = ""
-                if not code_promo_utilise and "amountDiscount" in item: code_promo_utilise = "Oui (Montant Réduit)"
-                
-                type_formule = "Club" if "club" in nom_campagne.lower() else "École"
-                if "boutique" in nom_campagne.lower(): type_formule = "Boutique"
-                
-                nom_propre = user.get("lastName", payer.get("lastName", "Inconnu")).replace("*", "").strip().upper()
-                prenom_propre = user.get("firstName", payer.get("firstName", "Inconnu")).replace("*", "").strip().title()
-                
-                email_def = user.get("email", payer.get("email", ""))
-                adresse_def = user.get("address", payer.get("address", ""))
-                ville_def = user.get("city", payer.get("city", ""))
-                naissance_def = user.get("birthDate", user.get("dateOfBirth", payer.get("dateOfBirth", "")))
-                
-                montant_paye = item.get('amount', 0)
-                item_id = item.get("id")
-                
-                if not item_id:
-                    chaine_unique = f"{nom_propre}{prenom_propre}{nom_campagne}{montant_paye}".encode('utf-8')
-                    empreinte_md5 = hashlib.md5(chaine_unique).hexdigest()[:10]
-                    item_id = f"HA_{empreinte_md5}"
-                
-                row = {
-                    "ID_Dossier": str(item_id), 
-                    "Campagne": nom_campagne, "Nom": nom_propre, "Prénom": prenom_propre, "Identité": f"{prenom_propre} {nom_propre}",
-                    "Montant Payé": f"{montant_paye / 100} €", "Code Promo": code_promo_utilise, "Allergies / Médical": "-",
-                    "Formule": nom_tarif, "Type": type_formule, "Licence_FFE": "Non croisé", "Nom payeur": payer.get("lastName", "").replace("*", "").strip(),
-                    "Prénom payeur": payer.get("firstName", "").replace("*", "").strip(), "Email payeur": email_def, "N° Portable": "",
-                    "N° Portable 2 (en cas d'urgence)": "", "EMail": email_def, "Adresse": adresse_def, "Ville": ville_def, "Nom et prénom du responsable légal": "",
-                    "Classe": "", "Date de naissance": naissance_def, "Taille du t-shirt": "", "Dans quel ville sera votre créneaux principale": "",
-                    "J'autorise le club à diffuser des photos de moi ou mon enfant en lien avec notre activité sur notre site et sur les réseaux sociaux (Facebook ; Instagram, Twitter):": "",
-                    "J’autorise le club à utiliser des images de moi ou mon enfant pour des objets publicitaires (prospectus de présentation du club, oriflamme, kakemono) :": "",
-                    "J’accepte de recevoir les informations sur l’actualité du club (soirée blitz, organisation de stages pendant les vacances…) ainsi que les annonces des prochains tournois par mail": "",
-                    "Sortie Seul": "-"
-                }
-                if row["Date de naissance"] and len(str(row["Date de naissance"])) >= 10: row["Date de naissance"] = str(row["Date de naissance"])[:10]
-                
-                for field in item.get("customFields", []):
-                    nom_champ = str(field.get("name", "")).strip() 
-                    reponse = str(field.get("answer", "")).strip()
-                    nom_lower = nom_champ.lower()
+                    discount = item.get("discount")
+                    code_promo_utilise = ""
+                    if discount and isinstance(discount, dict): code_promo_utilise = discount.get("code", "")
+                    if not code_promo_utilise and "amountDiscount" in item: code_promo_utilise = "Oui (Montant Réduit)"
                     
-                    row[nom_champ] = reponse
-                    if "promo" in nom_lower: row["Code Promo"] = reponse
-                    if any(mot in nom_lower for mot in ["allergie", "médical", "sante", "santé"]):
-                        if row["Allergies / Médical"] == "-": row["Allergies / Médical"] = reponse
-                        else: row["Allergies / Médical"] += f" | {reponse}"
-                    if "classe" in nom_lower or "niveau" in nom_lower: row["Classe"] = reponse
-                    if "portable 2" in nom_lower or "urgence" in nom_lower: row["N° Portable 2 (en cas d'urgence)"] = reponse
-                    elif "portable" in nom_lower or "téléphone" in nom_lower or "telephone" in nom_lower or "tel" in nom_lower: 
-                        if not row["N° Portable"]: row["N° Portable"] = reponse
-                    if "responsable" in nom_lower or "légal" in nom_lower: row["Nom et prénom du responsable légal"] = reponse
-                    if "t-shirt" in nom_lower: row["Taille du t-shirt"] = reponse
-                    if "créneaux" in nom_lower and "principale" in nom_lower: row["Dans quel ville sera votre créneaux principale"] = reponse
-                    if "diffuser" in nom_lower and "photos" in nom_lower: row["J'autorise le club à diffuser des photos de moi ou mon enfant en lien avec notre activité sur notre site et sur les réseaux sociaux (Facebook ; Instagram, Twitter):"] = reponse
-                    if "publicitaires" in nom_lower or "prospectus" in nom_lower: row["J’autorise le club à utiliser des images de moi ou mon enfant pour des objets publicitaires (prospectus de présentation du club, oriflamme, kakemono) :"] = reponse
-                    if "actualité" in nom_lower or "blitz" in nom_lower: row["J’accepte de recevoir les informations sur l’actualité du club (soirée blitz, organisation de stages pendant les vacances…) ainsi que les annonces des prochains tournois par mail"] = reponse
-                    if "adresse" in nom_lower and len(reponse) > 2: row["Adresse"] = reponse
-                    if "ville" in nom_lower and "créneaux" not in nom_lower and len(reponse) > 1: row["Ville"] = reponse
-                    if "naissance" in nom_lower and len(reponse) > 2: row["Date de naissance"] = reponse
-                    if "email" in nom_lower or "courriel" in nom_lower: row["EMail"] = reponse
-                    if "quitter" in nom_lower and "seul" in nom_lower:
-                        if type_formule == "École": row["Sortie Seul"] = "N/A (École)"
-                        else:
-                            if "oui" in reponse.lower() or reponse.lower() == "true": row["Sortie Seul"] = "✅ OUI"
-                            elif "non" in reponse.lower() or reponse.lower() == "false": row["Sortie Seul"] = "❌ NON"
-                            elif reponse == "": row["Sortie Seul"] = "-"
-                            else: row["Sortie Seul"] = f"❓ {reponse}"
-            rows.append(row)
-            
+                    type_formule = "Club" if "club" in nom_campagne.lower() else "École"
+                    if "boutique" in nom_campagne.lower(): type_formule = "Boutique"
+                    
+                    # Extraction robuste (empêche le bug NoneType)
+                    last_name = user.get("lastName") or payer.get("lastName") or "Inconnu"
+                    first_name = user.get("firstName") or payer.get("firstName") or "Inconnu"
+                    nom_propre = str(last_name).replace("*", "").strip().upper()
+                    prenom_propre = str(first_name).replace("*", "").strip().title()
+                    
+                    email_def = str(user.get("email") or payer.get("email") or "")
+                    adresse_def = str(user.get("address") or payer.get("address") or "")
+                    ville_def = str(user.get("city") or payer.get("city") or "")
+                    naissance_def = str(user.get("birthDate") or user.get("dateOfBirth") or payer.get("dateOfBirth") or "")
+                    
+                    montant_paye = item.get('amount', 0)
+                    item_id = item.get("id")
+                    
+                    # Si aucun ID d'article, on crée un ID unique renforcé avec random pour éviter d'écraser les achats multiples
+                    if not item_id:
+                        chaine_unique = f"{nom_propre}{prenom_propre}{nom_campagne}{montant_paye}{random.randint(1,999999)}".encode('utf-8')
+                        empreinte_md5 = hashlib.md5(chaine_unique).hexdigest()[:10]
+                        item_id = f"HA_{empreinte_md5}"
+                    
+                    nom_payeur = str(payer.get("lastName") or "").replace("*", "").strip()
+                    prenom_payeur = str(payer.get("firstName") or "").replace("*", "").strip()
+
+                    row = {
+                        "ID_Dossier": str(item_id), 
+                        "Campagne": nom_campagne, "Nom": nom_propre, "Prénom": prenom_propre, "Identité": f"{prenom_propre} {nom_propre}",
+                        "Montant Payé": f"{montant_paye / 100} €", "Code Promo": code_promo_utilise, "Allergies / Médical": "-",
+                        "Formule": nom_tarif, "Type": type_formule, "Licence_FFE": "Non croisé", "Nom payeur": nom_payeur,
+                        "Prénom payeur": prenom_payeur, "Email payeur": email_def, "N° Portable": "",
+                        "N° Portable 2 (en cas d'urgence)": "", "EMail": email_def, "Adresse": adresse_def, "Ville": ville_def, "Nom et prénom du responsable légal": "",
+                        "Classe": "", "Date de naissance": naissance_def, "Taille du t-shirt": "", "Dans quel ville sera votre créneaux principale": "",
+                        "J'autorise le club à diffuser des photos de moi ou mon enfant en lien avec notre activité sur notre site et sur les réseaux sociaux (Facebook ; Instagram, Twitter):": "",
+                        "J’autorise le club à utiliser des images de moi ou mon enfant pour des objets publicitaires (prospectus de présentation du club, oriflamme, kakemono) :": "",
+                        "J’accepte de recevoir les informations sur l’actualité du club (soirée blitz, organisation de stages pendant les vacances…) ainsi que les annonces des prochains tournois par mail": "",
+                        "Sortie Seul": "-"
+                    }
+                    if row["Date de naissance"] and len(str(row["Date de naissance"])) >= 10: row["Date de naissance"] = str(row["Date de naissance"])[:10]
+                    
+                    for field in item.get("customFields", []):
+                        nom_champ = str(field.get("name") or "").strip() 
+                        reponse = str(field.get("answer") or "").strip()
+                        nom_lower = nom_champ.lower()
+                        
+                        row[nom_champ] = reponse
+                        if "promo" in nom_lower: row["Code Promo"] = reponse
+                        if any(mot in nom_lower for mot in ["allergie", "médical", "sante", "santé"]):
+                            if row["Allergies / Médical"] == "-": row["Allergies / Médical"] = reponse
+                            else: row["Allergies / Médical"] += f" | {reponse}"
+                        if "classe" in nom_lower or "niveau" in nom_lower: row["Classe"] = reponse
+                        if "portable 2" in nom_lower or "urgence" in nom_lower: row["N° Portable 2 (en cas d'urgence)"] = reponse
+                        elif "portable" in nom_lower or "téléphone" in nom_lower or "telephone" in nom_lower or "tel" in nom_lower: 
+                            if not row["N° Portable"]: row["N° Portable"] = reponse
+                        if "responsable" in nom_lower or "légal" in nom_lower: row["Nom et prénom du responsable légal"] = reponse
+                        if "t-shirt" in nom_lower: row["Taille du t-shirt"] = reponse
+                        if "créneaux" in nom_lower and "principale" in nom_lower: row["Dans quel ville sera votre créneaux principale"] = reponse
+                        if "diffuser" in nom_lower and "photos" in nom_lower: row["J'autorise le club à diffuser des photos de moi ou mon enfant en lien avec notre activité sur notre site et sur les réseaux sociaux (Facebook ; Instagram, Twitter):"] = reponse
+                        if "publicitaires" in nom_lower or "prospectus" in nom_lower: row["J’autorise le club à utiliser des images de moi ou mon enfant pour des objets publicitaires (prospectus de présentation du club, oriflamme, kakemono) :"] = reponse
+                        if "actualité" in nom_lower or "blitz" in nom_lower: row["J’accepte de recevoir les informations sur l’actualité du club (soirée blitz, organisation de stages pendant les vacances…) ainsi que les annonces des prochains tournois par mail"] = reponse
+                        if "adresse" in nom_lower and len(reponse) > 2: row["Adresse"] = reponse
+                        if "ville" in nom_lower and "créneaux" not in nom_lower and len(reponse) > 1: row["Ville"] = reponse
+                        if "naissance" in nom_lower and len(reponse) > 2: row["Date de naissance"] = reponse
+                        if "email" in nom_lower or "courriel" in nom_lower: row["EMail"] = reponse
+                        if "quitter" in nom_lower and "seul" in nom_lower:
+                            if type_formule == "École": row["Sortie Seul"] = "N/A (École)"
+                            else:
+                                if "oui" in reponse.lower() or reponse.lower() == "true": row["Sortie Seul"] = "✅ OUI"
+                                elif "non" in reponse.lower() or reponse.lower() == "false": row["Sortie Seul"] = "❌ NON"
+                                elif reponse == "": row["Sortie Seul"] = "-"
+                                else: row["Sortie Seul"] = f"❓ {reponse}"
+                    rows.append(row)
+                except Exception:
+                    continue # Ignore silently the broken item
+                    
             next_token = data.get("pagination", {}).get("continuationToken")
-            
-            # Sécurité 3: Si le token ne change pas, on est bloqué, on force l'arrêt
-            if not next_token or next_token == continuation_token:
-                break
-            
+            if not next_token or next_token == continuation_token: break
             continuation_token = next_token
             
         except Exception: break
