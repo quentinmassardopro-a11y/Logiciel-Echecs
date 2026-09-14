@@ -115,14 +115,12 @@ def sauvegarder_adherents_cloud(df):
                 except Exception: pass
     except Exception: pass
 
-# --- FONCTIONS DE SÉCURITÉ ---
 def is_different(val1, val2):
     v1 = str(val1).strip().lower() if pd.notna(val1) and str(val1) != "nan" else ""
     v2 = str(val2).strip().lower() if pd.notna(val2) and str(val2) != "nan" else ""
     return v1 != v2
 
 def nettoyer_id_dossier(val):
-    """Élimine le .0 que Google Sheets rajoute aux numéros de facture."""
     val_str = str(val).strip()
     if val_str.endswith('.0'):
         return val_str[:-2]
@@ -275,7 +273,6 @@ def get_helloasso_token(client_id, client_secret):
         return r.json().get("access_token") if r.status_code == 200 else None
     except: return None
 
-# --- FETCH HELLOASSO CORRIGÉ ---
 def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
     url_base = f"https://api.helloasso.com/v5/organizations/echecs-cassis/forms/{form_type}/{form_slug}/items"
     rows = []
@@ -336,7 +333,7 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
                     prenom_payeur = str(payer.get("firstName") or "").replace("*", "").strip()
 
                     row = {
-                        "ID_Dossier": item_id, 
+                        "ID_Dossier": str(item_id), 
                         "Campagne": nom_campagne, "Nom": nom_propre, "Prénom": prenom_propre, "Identité": f"{prenom_propre} {nom_propre}",
                         "Montant Payé": f"{montant_paye / 100} €", "Code Promo": code_promo_utilise, "Allergies / Médical": "-",
                         "Formule": nom_tarif, "Type": type_formule, "Licence_FFE": "Non croisé", "Nom payeur": nom_payeur,
@@ -350,6 +347,7 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
                     }
                     if row["Date de naissance"] and len(str(row["Date de naissance"])) >= 10: row["Date de naissance"] = str(row["Date de naissance"])[:10]
                     
+                    # C'EST ICI QUE LES CHAMPS DYNAMIQUES DE LA BOUTIQUE SONT AJOUTÉS
                     for field in item.get("customFields", []):
                         nom_champ = str(field.get("name") or "").strip() 
                         reponse = str(field.get("answer") or "").strip()
@@ -523,7 +521,7 @@ if st.sidebar.button("⬇️ Lancer la Synchronisation HelloAsso"):
                     ids_supprimes = [str(x) for x in st.session_state['db'].get('dossiers_supprimes', [])]
                     
                     def est_valide(r):
-                        id_dos = nettoyer_id_dossier(r.get('ID_Dossier', ''))
+                        id_dos = str(r.get('ID_Dossier', ''))
                         if id_dos and id_dos != 'nan' and id_dos in ids_supprimes: return False
                         if not df_local.empty:
                             if 'ID_Dossier' in df_local.columns and id_dos in df_local['ID_Dossier'].dropna().astype(str).values: return False
@@ -984,6 +982,7 @@ else:
                     with st.expander(f"📁 Présences du {date_appel}"):
                         for groupe, infos in data_groupes.items(): st.write(f"**{groupe}** (par {infos.get('entraineur', 'Inconnu')}) : {len(infos.get('presents', []))} présents")
 
+    # --- NOUVEAU MODULE BOUTIQUE DYNAMIQUE ---
     elif module_choisi == "🛒 Module Boutique":
         st.subheader("🛒 Suivi des Achats Boutique")
         st.write("Ce module liste uniquement les transactions liées à votre campagne HelloAsso 'Boutique'. Cochez la case une fois l'article remis à l'élève.")
@@ -999,21 +998,34 @@ else:
             df_boutique["_orig_index"] = df_boutique.index
             df_display_boutique = df_boutique.set_index("_orig_index")
             
-            colonnes_boutique = ["Nom", "Prénom", "Formule", "Taille du t-shirt", "Montant Payé", "Campagne", "Article Donné 🎁", "ID_Dossier"]
-            colonnes_a_afficher = [c for c in colonnes_boutique if c in df_display_boutique.columns and c != "ID_Dossier"]
+            colonnes_de_base = ["Nom", "Prénom", "Formule", "Montant Payé", "Article Donné 🎁"]
+            colonnes_a_exclure = ["ID_Dossier", "ID_Dossier_Clean", "Campagne", "Identité", "Type", "Licence_FFE", "Nom payeur", "Prénom payeur", "Email payeur", "N° Portable", "N° Portable 2 (en cas d'urgence)", "EMail", "Adresse", "Ville", "Nom et prénom du responsable légal", "Classe", "Date de naissance", "Dans quel ville sera votre créneaux principale", "Sortie Seul", "Allergies / Médical", "Code Promo", "_orig_index"]
+            colonnes_a_exclure.extend([c for c in df_display_boutique.columns if "autorise" in c.lower() or "accepte" in c.lower()])
             
+            colonnes_supp_boutique = []
+            for c in df_display_boutique.columns:
+                if c not in colonnes_de_base and c not in colonnes_a_exclure:
+                    valeurs_reelles = [str(v).strip() for v in df_display_boutique[c].dropna() if str(v).strip() not in ["", "nan", "None", "-"]]
+                    if valeurs_reelles:
+                        colonnes_supp_boutique.append(c)
+                        
+            colonnes_a_afficher = ["Nom", "Prénom", "Formule"] + colonnes_supp_boutique + ["Montant Payé", "Article Donné 🎁"]
+            
+            col_config = {
+                "Nom": st.column_config.Column(disabled=True),
+                "Prénom": st.column_config.Column(disabled=True),
+                "Formule": st.column_config.Column("Article Commandé", disabled=True),
+                "Montant Payé": st.column_config.Column(disabled=True),
+                "Article Donné 🎁": st.column_config.CheckboxColumn("Article Donné 🎁")
+            }
+            for c in colonnes_supp_boutique:
+                col_config[c] = st.column_config.Column(disabled=True)
+                
             st.info("Cochez la case 'Article Donné 🎁' pour valider la remise en main propre, puis enregistrez.")
             edited_boutique = st.data_editor(
                 df_display_boutique[colonnes_a_afficher],
                 use_container_width=True,
-                column_config={
-                    "Nom": st.column_config.Column(disabled=True),
-                    "Prénom": st.column_config.Column(disabled=True),
-                    "Formule": st.column_config.Column("Article Commandé", disabled=True),
-                    "Montant Payé": st.column_config.Column(disabled=True),
-                    "Taille du t-shirt": st.column_config.Column(disabled=True),
-                    "Article Donné 🎁": st.column_config.CheckboxColumn("Article Donné 🎁")
-                }
+                column_config=col_config
             )
             
             if st.button("💾 Enregistrer les remises boutique", use_container_width=True):
