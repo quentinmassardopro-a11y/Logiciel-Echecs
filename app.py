@@ -26,7 +26,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- VERROUILLAGE PAR MOT DE PASSE ---
+# --- VERROUILLAGE PAR MOT DE PASSE (VALIDATION AVEC ENTRÉE) ---
 if "authentifie" not in st.session_state: st.session_state["authentifie"] = False
 if not st.session_state["authentifie"]:
     col1, col2, col3 = st.columns([1, 2, 1])
@@ -34,12 +34,13 @@ if not st.session_state["authentifie"]:
         try: st.image("logo.png", width=150)
         except: pass
         st.markdown("**🔒 Accès Restreint - Académie d'Échecs des Calanques**")
-        mdp = st.text_input("Veuillez saisir le mot de passe :", type="password")
-        if st.button("Se connecter"):
-            if mdp == "cassisechecs":
-                st.session_state["authentifie"] = True
-                st.rerun()
-            else: st.error("Mot de passe incorrect.")
+        with st.form("form_connexion"):
+            mdp = st.text_input("Veuillez saisir le mot de passe :", type="password")
+            if st.form_submit_button("Se connecter"):
+                if mdp == "cassisechecs":
+                    st.session_state["authentifie"] = True
+                    st.rerun()
+                else: st.error("Mot de passe incorrect.")
     st.stop()
 
 # --- CONNEXION GOOGLE SHEETS CLOUD ---
@@ -59,7 +60,9 @@ def initialiser_memoire_vierge():
         "affectations_creneaux": {}, "cartes_membres": {},
         "validations_promo": {}, "sorties_manuelles": {},
         "eleves_deja_affectes": [], "identites_helloasso_connues": [],
-        "dossiers_supprimes": []
+        "dossiers_supprimes": [],
+        "tshirts_donnes": {},     
+        "boutique_donnees": {}    
     }
 
 def charger_base_cloud():
@@ -112,7 +115,6 @@ def sauvegarder_adherents_cloud(df):
                 except Exception: pass
     except Exception: pass
 
-# --- FONCTION DE COMPARAISON FIABLE ---
 def is_different(val1, val2):
     v1 = str(val1).strip().lower() if pd.notna(val1) and str(val1) != "nan" else ""
     v2 = str(val2).strip().lower() if pd.notna(val2) and str(val2) != "nan" else ""
@@ -139,7 +141,6 @@ if 'df_adherents' not in st.session_state:
             if len(df_loaded) < len_avant:
                 sauvegarder_adherents_cloud(df_loaded)
 
-# --- BOUCLIER ANTI-KEYERROR ABSOLU ---
 default_mem = initialiser_memoire_vierge()
 for cle, val_defaut in default_mem.items():
     if cle not in st.session_state['db']:
@@ -151,7 +152,7 @@ with col1:
     except: st.write("♟️ **ACC**")
 with col2:
     st.title("Académie d'Échecs des Calanques")
-    st.markdown("**Plateforme Globale : Administration, Écoles & Entraînements**")
+    st.markdown("**Plateforme Globale : Administration, Écoles, Boutique & Entraînements**")
 
 # --- FONCTIONS UTILITAIRES ---
 def calculer_nouveau_elo(r_a, r_b, score_a, k=40):
@@ -289,6 +290,8 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
                 if not code_promo_utilise and "amountDiscount" in item: code_promo_utilise = "Oui (Montant Réduit)"
                 
                 type_formule = "Club" if "club" in nom_campagne.lower() else "École"
+                if "boutique" in nom_campagne.lower(): type_formule = "Boutique"
+                
                 nom_propre = user.get("lastName", payer.get("lastName", "Inconnu")).replace("*", "").strip().upper()
                 prenom_propre = user.get("firstName", payer.get("firstName", "Inconnu")).replace("*", "").strip().title()
                 
@@ -300,7 +303,6 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
                 montant_paye = item.get('amount', 0)
                 item_id = item.get("id")
                 
-                # --- CORRECTION DE LA BOMBE A RETARDEMENT DU HASH ---
                 if not item_id:
                     chaine_unique = f"{nom_propre}{prenom_propre}{nom_campagne}{montant_paye}".encode('utf-8')
                     empreinte_md5 = hashlib.md5(chaine_unique).hexdigest()[:10]
@@ -352,8 +354,7 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
                             elif "non" in reponse.lower() or reponse.lower() == "false": row["Sortie Seul"] = "❌ NON"
                             elif reponse == "": row["Sortie Seul"] = "-"
                             else: row["Sortie Seul"] = f"❓ {reponse}"
-                rows.append(row)
-                
+            rows.append(row)
             continuation_token = data.get("pagination", {}).get("continuationToken")
             if not continuation_token: break
             
@@ -397,7 +398,7 @@ def analyser_fichier_ffe(fichier):
 
 # --- BARRE LATÉRALE ---
 st.sidebar.header("🔑 Espace de Travail")
-module_choisi = st.sidebar.radio("", ["🛠️ Module Administration", "♟️ Module Entraîneur"])
+module_choisi = st.sidebar.radio("", ["🛠️ Module Administration", "♟️ Module Entraîneur", "🛒 Module Boutique"])
 
 st.sidebar.markdown("---")
 st.sidebar.header("☁️ CLOUD & TEMPS RÉEL")
@@ -476,8 +477,10 @@ if st.sidebar.button("⬇️ Lancer la Synchronisation HelloAsso"):
                     ("Adhésions Club", "Membership", "cotisations-et-adhesion-club-d-echecs-2026-2027"),
                     ("Sainte Trinité", "Event", "club-d-echecs-sainte-trinitie"),
                     ("Saint Augustin", "Event", "club-d-echecs-saint-augustin"),
-                    ("Don Bosco", "Event", "club-d-echecs-don-bosco")
+                    ("Don Bosco", "Event", "club-d-echecs-don-bosco"),
+                    ("Boutique", "Shop", "objet-club")
                 ]
+                
                 all_data = []
                 for nom, type_camp, slug in campagnes:
                     all_data.extend(fetch_campaign_items(token, type_camp, slug, nom))
@@ -602,6 +605,7 @@ else:
                                 st.session_state['db']['elos_crevette'][nv_identite] = 400
                                 st.session_state['db']['validations_promo'][nv_identite] = False
                                 st.session_state['db']['sorties_manuelles'][nv_identite] = "-"
+                                st.session_state['db']['tshirts_donnes'][nv_identite] = False
                                 sauvegarder_adherents_cloud(st.session_state['df_adherents'])
                                 sauvegarder_base_cloud(st.session_state['db'])
                                 st.success(f"✅ {nv_identite} a été ajouté avec succès !")
@@ -645,6 +649,8 @@ else:
                                     st.session_state['db']['validations_promo'][nv_identite] = st.session_state['db']['validations_promo'].get(identite_cible, False)
                                 if nv_identite not in st.session_state['db']['sorties_manuelles']:
                                     st.session_state['db']['sorties_manuelles'][nv_identite] = st.session_state['db']['sorties_manuelles'].get(identite_cible, "-")
+                                if nv_identite not in st.session_state['db']['tshirts_donnes']:
+                                    st.session_state['db']['tshirts_donnes'][nv_identite] = st.session_state['db']['tshirts_donnes'].get(identite_cible, False)
                                     
                                 row_updated = st.session_state['df_adherents'].loc[idx_cible]
                                 creneaux_autos = affectations_automatiques(row_updated)
@@ -669,6 +675,7 @@ else:
                                     st.session_state['db']['elos_crevette'].pop(identite_cible, None)
                                     st.session_state['db']['validations_promo'].pop(identite_cible, None)
                                     st.session_state['db']['sorties_manuelles'].pop(identite_cible, None)
+                                    st.session_state['db']['tshirts_donnes'].pop(identite_cible, None)
 
                                 sauvegarder_base_cloud(st.session_state['db'])
                                 sauvegarder_adherents_cloud(st.session_state['df_adherents'])
@@ -691,6 +698,7 @@ else:
                 contact["Sortie Seul (Temps Réel)"] = s_actuelle
                 contact["Elo Crevette 🦐"] = st.session_state['db']['elos_crevette'].get(contact["Identité"], 400)
                 contact["Promo Validée ✅"] = "Oui" if st.session_state['db']['validations_promo'].get(contact["Identité"], False) else "Non"
+                contact["T-shirt Offert Donné 👕"] = "Oui" if st.session_state['db']['tshirts_donnes'].get(contact["Identité"], False) else "Non"
                 
                 st.markdown("---")
                 c_info1, c_info2 = st.columns(2)
@@ -711,6 +719,7 @@ else:
             df_admin['Elo Crevette 🦐'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['elos_crevette'].get(x, 400))
             df_admin['Promo Validée ✅'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['validations_promo'].get(x, False))
             df_admin['Sortie Seul'] = df_admin.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Identité'], r['Sortie Seul']), axis=1)
+            df_admin['T-shirt donné 👕'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['tshirts_donnes'].get(x, False))
             
             df_admin["_orig_index"] = df_admin.index 
             
@@ -721,13 +730,13 @@ else:
             df_admin.insert(0, "👤 Élève (Fige)", index_names)
             df_display = df_admin.set_index("_orig_index")
             
-            colonnes_a_cacher = ["Identité", "Nom payeur", "Prénom payeur", "Email payeur", "ID_Dossier"]
+            colonnes_a_cacher = ["Identité", "Nom payeur", "Prénom payeur", "Email payeur", "ID_Dossier", "_orig_index"]
             colonnes_possibles = [c for c in df_display.columns if c not in colonnes_a_cacher]
             
-            ordre_prefere = ["👤 Élève (Fige)", "Nom", "Prénom", "Licence_FFE", "Type", "Elo_FFE", "Elo Crevette 🦐", "Formule", "Campagne", "Sortie Seul", "Promo Validée ✅", "N° Portable", "EMail"]
+            ordre_prefere = ["👤 Élève (Fige)", "Nom", "Prénom", "Licence_FFE", "Type", "Elo_FFE", "Elo Crevette 🦐", "T-shirt donné 👕", "Formule", "Campagne", "Sortie Seul", "Promo Validée ✅", "N° Portable", "EMail"]
             colonnes_possibles = sorted(colonnes_possibles, key=lambda x: ordre_prefere.index(x) if x in ordre_prefere else 999)
 
-            colonnes_par_defaut = ["👤 Élève (Fige)", "Licence_FFE", "Type", "Elo_FFE", "Elo Crevette 🦐", "Formule", "Campagne"]
+            colonnes_par_defaut = ["👤 Élève (Fige)", "Licence_FFE", "Type", "Elo_FFE", "Elo Crevette 🦐", "T-shirt donné 👕", "Formule", "Campagne"]
             colonnes_par_defaut = [c for c in colonnes_par_defaut if c in colonnes_possibles]
             
             st.markdown("##### ⚙️ Affichage sur mesure")
@@ -747,6 +756,7 @@ else:
                 column_config={
                     "👤 Élève (Fige)": st.column_config.Column("👤 Élève (Bloqué pour la sécurité)", disabled=True),
                     "Promo Validée ✅": st.column_config.CheckboxColumn("Promo Validée ✅"),
+                    "T-shirt donné 👕": st.column_config.CheckboxColumn("T-shirt donné 👕"),
                     "Sortie Seul": st.column_config.SelectboxColumn("Sortie Seul", options=["✅ OUI", "❌ NON", "N/A (École)", "-"])
                 }
             )
@@ -777,12 +787,12 @@ else:
                             
                             if col == "Promo Validée ✅": st.session_state['db']['validations_promo'][identite_actuelle] = new_val
                             elif col == "Sortie Seul": st.session_state['db']['sorties_manuelles'][identite_actuelle] = new_val
+                            elif col == "T-shirt donné 👕": st.session_state['db']['tshirts_donnes'][identite_actuelle] = new_val
                             elif col == "Elo Crevette 🦐": 
                                 try: st.session_state['db']['elos_crevette'][identite_actuelle] = int(float(new_val))
                                 except ValueError: st.session_state['db']['elos_crevette'][identite_actuelle] = 400
                             else: st.session_state['df_adherents'].at[idx_main, col] = new_val
                                 
-                        # --- LA CORRECTION DES CRÉNEAUX FANTÔMES ---
                         if any(c in changed_cols for c in ["Formule", "Campagne", "Dans quel ville sera votre créneaux principale", "Classe"]):
                             row_updated = st.session_state['df_adherents'].loc[idx_main]
                             nouveaux_creneaux = affectations_automatiques(row_updated)
@@ -798,7 +808,6 @@ else:
                     st.success("✅ Modifications enregistrées et ancrées dans le Cloud !")
                     st.rerun()
 
-            # --- OUTIL DE SUPPRESSION (ZONE DE DANGER) ---
             st.markdown("---")
             with st.expander("🗑️ Zone de Danger : Suppressions"):
                 st.warning("Les élèves supprimés n'apparaîtront plus. Leur identifiant de paiement est mis sur Liste Noire.")
@@ -873,7 +882,7 @@ else:
             
         with tab_ecoles:
             st.markdown("### 🏫 Pilotage des Établissements Scolaires")
-            ecoles_dispos = [c for c in df["Campagne"].unique() if "club" not in c.lower() and "adhésion" not in c.lower() and "adhesion" not in c.lower()]
+            ecoles_dispos = [c for c in df["Campagne"].unique() if "club" not in c.lower() and "adhésion" not in c.lower() and "adhesion" not in c.lower() and "boutique" not in c.lower()]
             if ecoles_dispos:
                 ecole_choisie = st.selectbox("Sélectionnez l'établissement :", ecoles_dispos)
                 df_ec_full = df[df["Campagne"] == ecole_choisie].copy()
@@ -937,6 +946,56 @@ else:
                 for date_appel, data_groupes in sorted(st.session_state['db']['historique_appels'].items(), reverse=True):
                     with st.expander(f"📁 Présences du {date_appel}"):
                         for groupe, infos in data_groupes.items(): st.write(f"**{groupe}** (par {infos.get('entraineur', 'Inconnu')}) : {len(infos.get('presents', []))} présents")
+
+    elif module_choisi == "🛒 Module Boutique":
+        st.subheader("🛒 Suivi des Achats Boutique")
+        st.write("Ce module liste uniquement les transactions liées à votre campagne HelloAsso 'Boutique'. Cochez la case une fois l'article remis à l'élève.")
+        
+        df_boutique = df[df['Campagne'].str.contains("boutique", case=False, na=False)].copy()
+        
+        if df_boutique.empty:
+            st.info("Aucun achat boutique détecté pour le moment. (Vérifiez le nom de la campagne dans le code si vous venez de la créer !)")
+        else:
+            df_boutique['Article Donné 🎁'] = df_boutique['ID_Dossier'].apply(lambda x: st.session_state['db']['boutique_donnees'].get(str(x), False))
+            
+            df_boutique["_orig_index"] = df_boutique.index
+            df_display_boutique = df_boutique.set_index("_orig_index")
+            
+            colonnes_boutique = ["Nom", "Prénom", "Formule", "Taille du t-shirt", "Montant Payé", "Campagne", "Article Donné 🎁", "ID_Dossier"]
+            colonnes_a_afficher = [c for c in colonnes_boutique if c in df_display_boutique.columns and c != "ID_Dossier"]
+            
+            st.info("Cochez la case 'Article Donné 🎁' pour valider la remise en main propre.")
+            edited_boutique = st.data_editor(
+                df_display_boutique[colonnes_a_afficher],
+                use_container_width=True,
+                column_config={
+                    "Nom": st.column_config.Column(disabled=True),
+                    "Prénom": st.column_config.Column(disabled=True),
+                    "Formule": st.column_config.Column("Article Commandé", disabled=True),
+                    "Montant Payé": st.column_config.Column(disabled=True),
+                    "Taille du t-shirt": st.column_config.Column(disabled=True),
+                    "Article Donné 🎁": st.column_config.CheckboxColumn("Article Donné 🎁")
+                }
+            )
+            
+            if st.button("💾 Enregistrer les remises boutique", use_container_width=True):
+                changement_b = False
+                for idx_b in edited_boutique.index:
+                    if idx_b not in df_display_boutique.index: continue
+                    old_val = df_display_boutique.loc[idx_b, "Article Donné 🎁"]
+                    new_val = edited_boutique.loc[idx_b, "Article Donné 🎁"]
+                    
+                    if old_val != new_val:
+                        changement_b = True
+                        id_doss = str(df_display_boutique.loc[idx_b, "ID_Dossier"])
+                        st.session_state['db']['boutique_donnees'][id_doss] = new_val
+                
+                if changement_b:
+                    sauvegarder_base_cloud(st.session_state['db'])
+                    st.success("✅ État de la boutique enregistré avec succès !")
+                    st.rerun()
+                else:
+                    st.info("Aucun changement détecté.")
 
     elif module_choisi == "♟️ Module Entraîneur":
         st.subheader("♟️ Espace Entraîneur")
