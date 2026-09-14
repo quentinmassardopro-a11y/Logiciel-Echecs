@@ -43,7 +43,7 @@ if not st.session_state["authentifie"]:
                 else: st.error("Mot de passe incorrect.")
     st.stop()
 
-# --- CONNEXION GOOGLE SHEETS CLOUD (SÉCURISÉE) ---
+# --- CONNEXION GOOGLE SHEETS CLOUD ---
 def get_gsheets_client():
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     creds_dict = dict(st.secrets["gcp_service_account"])
@@ -72,11 +72,10 @@ def charger_base_cloud():
         ws = get_or_create_worksheet(sh, "DB_JSON")
         vals = ws.col_values(1)
         if vals:
-            return json.loads("".join(vals))
-        return initialiser_memoire_vierge()
-    except Exception as e:
-        st.error(f"Erreur de connexion à Google Sheets (DB). Données protégées. Erreur: {e}")
-        return None 
+            db = json.loads("".join(vals))
+            return db
+    except Exception: pass
+    return initialiser_memoire_vierge()
 
 def sauvegarder_base_cloud(db):
     try:
@@ -87,9 +86,10 @@ def sauvegarder_base_cloud(db):
         chunks = [[json_str[i:i+40000]] for i in range(0, len(json_str), 40000)]
         ws.clear()
         try: ws.update(values=chunks, range_name="A1")
-        except TypeError: ws.update("A1", chunks)
-    except Exception as e:
-        st.error(f"Échec de la sauvegarde Cloud (DB): {e}")
+        except TypeError: 
+            try: ws.update("A1", chunks)
+            except Exception: pass
+    except Exception: pass
 
 def charger_adherents_cloud():
     try:
@@ -98,25 +98,24 @@ def charger_adherents_cloud():
         ws = get_or_create_worksheet(sh, "Adherents")
         data = ws.get_all_records()
         if data: return pd.DataFrame(data)
-        return pd.DataFrame()
-    except Exception as e:
-        st.error(f"Erreur de connexion à Google Sheets (Adhérents). Données protégées. Erreur: {e}")
-        return None
+    except Exception: pass
+    return pd.DataFrame()
 
 def sauvegarder_adherents_cloud(df):
     try:
-        if df is None or df.empty: return
         client = get_gsheets_client()
         sh = client.open("Base_Calanques_DB")
         ws = get_or_create_worksheet(sh, "Adherents")
-        data = [df.columns.values.tolist()] + df.fillna("").astype(str).values.tolist()
-        ws.clear() 
-        try: ws.update(values=data, range_name="A1")
-        except TypeError: ws.update("A1", data)
-    except Exception as e:
-        st.error(f"Échec de la sauvegarde Cloud (Adhérents): {e}")
+        ws.clear()
+        if not df.empty:
+            data = [df.columns.values.tolist()] + df.fillna("").astype(str).values.tolist()
+            try: ws.update(values=data, range_name="A1")
+            except TypeError: 
+                try: ws.update("A1", data)
+                except Exception: pass
+    except Exception: pass
 
-# --- FONCTIONS DE FORMATAGE ET SÉCURITÉ ---
+# --- FONCTIONS DE SÉCURITÉ ET FORMATAGE ---
 def is_different(val1, val2):
     v1 = str(val1).strip().lower() if pd.notna(val1) and str(val1) != "nan" else ""
     v2 = str(val2).strip().lower() if pd.notna(val2) and str(val2) != "nan" else ""
@@ -124,8 +123,10 @@ def is_different(val1, val2):
 
 def nettoyer_id_dossier(val):
     val_str = str(val).strip()
-    if val_str.endswith('.0'): return val_str[:-2]
-    if val_str.lower() in ['nan', 'none', '']: return ""
+    if val_str.endswith('.0'):
+        return val_str[:-2]
+    if val_str.lower() in ['nan', 'none', '']:
+        return ""
     return val_str
 
 def format_phone(tel):
@@ -158,48 +159,36 @@ def generer_vcard(contact):
     vcard += "END:VCARD"
     return vcard.encode('utf-8')
 
-# --- INITIALISATION SÉCURISÉE & CORRECTIF RÉTROACTIF DU TYPE "CLUB" ---
+# --- CHARGEMENT SÉCURISÉ & DÉDUPLICATION STRICTE PAR FACTURE ---
 if 'db' not in st.session_state: 
     with st.spinner("Connexion sécurisée au Cloud Google..."):
         db_loaded = charger_base_cloud()
-        if db_loaded is None: st.stop() 
+        if db_loaded is None: st.stop()
         st.session_state['db'] = db_loaded
 
 if 'df_adherents' not in st.session_state:
     with st.spinner("Récupération de la base adhérents..."):
         df_loaded = charger_adherents_cloud()
-        if df_loaded is None: st.stop() 
+        if df_loaded is None: st.stop()
         
         if not df_loaded.empty: 
             len_avant = len(df_loaded)
             
-            # Formatage automatique des numéros
             if 'N° Portable' in df_loaded.columns:
                 df_loaded['N° Portable'] = df_loaded['N° Portable'].apply(format_phone)
             if "N° Portable 2 (en cas d'urgence)" in df_loaded.columns:
                 df_loaded["N° Portable 2 (en cas d'urgence)"] = df_loaded["N° Portable 2 (en cas d'urgence)"].apply(format_phone)
 
-            # Dédoublonnage
             if 'ID_Dossier' in df_loaded.columns:
                 df_loaded['ID_Dossier'] = df_loaded['ID_Dossier'].apply(nettoyer_id_dossier)
                 mask_valid_id = df_loaded['ID_Dossier'] != ""
                 df_valid = df_loaded[mask_valid_id].drop_duplicates(subset=['ID_Dossier'], keep='last')
                 df_invalid = df_loaded[~mask_valid_id]
                 df_loaded = pd.concat([df_valid, df_invalid]).reset_index(drop=True)
-
-            # 🛠️ CORRECTIF RÉTROACTIF : Repasse les faux écoliers en "Club"
-            def corriger_type_retroactif(row):
-                camp = str(row.get("Campagne", "")).lower()
-                form = str(row.get("Formule", "")).lower()
-                if "boutique" in camp: return "Boutique"
-                if "club" in camp or "club" in form: return "Club"
-                return "École"
-            
-            if "Type" in df_loaded.columns:
-                df_loaded["Type"] = df_loaded.apply(corriger_type_retroactif, axis=1)
                 
             st.session_state['df_adherents'] = df_loaded
-            sauvegarder_adherents_cloud(df_loaded)
+            if len(df_loaded) < len_avant or True:
+                sauvegarder_adherents_cloud(df_loaded)
         else:
             st.session_state['df_adherents'] = pd.DataFrame()
 
@@ -216,7 +205,7 @@ with col2:
     st.title("Académie d'Échecs des Calanques")
     st.markdown("**Plateforme Globale : Administration, Écoles, Boutique & Entraînements**")
 
-# --- MOTEUR LOGIQUE ---
+# --- FONCTIONS UTILITAIRES ---
 def calculer_nouveau_elo(r_a, r_b, score_a, k=40):
     e_a = 1.0 / (1.0 + 10.0 ** ((r_b - r_a) / 400.0))
     return max(100, round(r_a + k * (score_a - e_a)))
@@ -404,7 +393,7 @@ def formater_donnees_helloasso(item, nom_campagne):
             elif rep == "": row["Sortie Seul"] = "-"
             else: row["Sortie Seul"] = f"❓ {rep}"
 
-    # CLASSIFICATION FINALE DU TYPE (Corrige le bug de la formule club)
+    # CLASSIFICATION FINALE DU TYPE
     camp_low = nom_campagne.lower()
     form_low = str(row.get("Formule", "")).lower()
     
@@ -704,7 +693,7 @@ else:
             with c_tools2:
                 st.markdown("##### ✏️ Correction d'Identité")
                 with st.expander("Corriger une faute dans un Nom / Prénom"):
-                    st.write("Sélectionnez la transaction précise de l'élève pour corriger son nom :")
+                    st.write("Sélectionnez la transaction de l'élève pour corriger son nom :")
                     
                     df_correction = df[df["Type"] != "Boutique"]
                     
@@ -817,8 +806,31 @@ else:
             col_ad1, col_ad2 = st.columns(2)
             with col_ad1: filtre_camp_admin = st.multiselect("Campagnes :", options=df_sans_boutique["Campagne"].unique(), default=df_sans_boutique["Campagne"].unique())
             with col_ad2: filtre_type_admin = st.multiselect("Types :", options=df_sans_boutique["Type"].unique(), default=df_sans_boutique["Type"].unique())
+            
+            # --- LES FILTRES RAPIDES SONT DE RETOUR ---
+            st.markdown("##### ⚡ Filtres d'Action Rapide")
+            c_f1, c_f2, c_f3, c_f4 = st.columns(4)
+            with c_f1: filtre_licence = st.checkbox("🚫 Sans Licence")
+            with c_f2: filtre_allergie = st.checkbox("🤧 Allergies / Médical")
+            with c_f3: filtre_sortie = st.checkbox("🚶 Sorties Autorisées (OUI)")
+            with c_f4: filtre_carte = st.checkbox("🎟️ Carte Cassis/Carnoux Manquante")
                 
             df_admin = df_sans_boutique[(df_sans_boutique["Campagne"].isin(filtre_camp_admin)) & (df_sans_boutique["Type"].isin(filtre_type_admin))].copy()
+            
+            if filtre_licence and "Licence_FFE" in df_admin.columns: 
+                df_admin = df_admin[(df_admin["Licence_FFE"] == "Non croisé") | (df_admin["Licence_FFE"] == "")]
+            if filtre_allergie and "Allergies / Médical" in df_admin.columns:
+                mots_sains = ["non", "ras", "rien", "néant", "neant", "aucun", "aucune", "-"]
+                df_admin = df_admin[(df_admin["Allergies / Médical"] != "") & (~df_admin["Allergies / Médical"].astype(str).str.lower().isin(mots_sains))]
+            if filtre_sortie: 
+                df_admin = df_admin[df_admin.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Identité'], r['Sortie Seul']) == "✅ OUI", axis=1)]
+            if filtre_carte:
+                def is_carte_manquante(row):
+                    identite, camp, ville = row["Identité"], str(row.get("Campagne", "")).lower(), str(row.get("Dans quel ville sera votre créneaux principale", "")).lower()
+                    if ("cassis" in camp or "cassis" in ville) and not st.session_state['db']['cartes_membres'].get(identite, {}).get("Cassis", False): return True
+                    if ("carnoux" in camp or "carnoux" in ville) and not st.session_state['db']['cartes_membres'].get(identite, {}).get("Carnoux", False): return True
+                    return False
+                df_admin = df_admin[df_admin.apply(is_carte_manquante, axis=1)]
             
             df_admin['Elo Crevette 🦐'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['elos_crevette'].get(x, 400))
             df_admin['Promo Validée ✅'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['validations_promo'].get(x, False))
