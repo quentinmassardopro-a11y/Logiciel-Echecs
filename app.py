@@ -115,10 +115,20 @@ def sauvegarder_adherents_cloud(df):
                 except Exception: pass
     except Exception: pass
 
+# --- FONCTIONS DE SÉCURITÉ ---
 def is_different(val1, val2):
     v1 = str(val1).strip().lower() if pd.notna(val1) and str(val1) != "nan" else ""
     v2 = str(val2).strip().lower() if pd.notna(val2) and str(val2) != "nan" else ""
     return v1 != v2
+
+def nettoyer_id_dossier(val):
+    """Élimine le .0 que Google Sheets rajoute aux numéros de facture."""
+    val_str = str(val).strip()
+    if val_str.endswith('.0'):
+        return val_str[:-2]
+    if val_str.lower() in ['nan', 'none', '']:
+        return ""
+    return val_str
 
 # --- CHARGEMENT SÉCURISÉ & DÉDUPLICATION STRICTE PAR FACTURE ---
 if 'db' not in st.session_state: 
@@ -131,8 +141,8 @@ if 'df_adherents' not in st.session_state:
         if not df_loaded.empty: 
             len_avant = len(df_loaded)
             if 'ID_Dossier' in df_loaded.columns:
-                df_loaded['ID_Dossier'] = df_loaded['ID_Dossier'].replace('', float('nan'))
-                mask_valid_id = df_loaded['ID_Dossier'].notna() & (df_loaded['ID_Dossier'].astype(str) != 'nan') & (df_loaded['ID_Dossier'].astype(str).str.strip() != '')
+                df_loaded['ID_Dossier'] = df_loaded['ID_Dossier'].apply(nettoyer_id_dossier)
+                mask_valid_id = df_loaded['ID_Dossier'] != ""
                 df_valid = df_loaded[mask_valid_id].drop_duplicates(subset=['ID_Dossier'], keep='last')
                 df_invalid = df_loaded[~mask_valid_id]
                 df_loaded = pd.concat([df_valid, df_invalid]).reset_index(drop=True)
@@ -265,7 +275,7 @@ def get_helloasso_token(client_id, client_secret):
         return r.json().get("access_token") if r.status_code == 200 else None
     except: return None
 
-# --- FETCH HELLOASSO CORRIGÉ (ANTI-BOUCLE INFINIE) ---
+# --- FETCH HELLOASSO CORRIGÉ ---
 def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
     url_base = f"https://api.helloasso.com/v5/organizations/echecs-cassis/forms/{form_type}/{form_slug}/items"
     rows = []
@@ -282,7 +292,7 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
             
             data = r.json()
             items = data.get("data", [])
-            if not items: break # Stoppe la boucle infinie si la page est vide
+            if not items: break 
             
             for item in items:
                 try: 
@@ -320,11 +330,13 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
                         empreinte_md5 = hashlib.md5(chaine_unique).hexdigest()[:10]
                         item_id = f"HA_{empreinte_md5}"
                     
+                    item_id = nettoyer_id_dossier(item_id)
+                    
                     nom_payeur = str(payer.get("lastName") or "").replace("*", "").strip()
                     prenom_payeur = str(payer.get("firstName") or "").replace("*", "").strip()
 
                     row = {
-                        "ID_Dossier": str(item_id), 
+                        "ID_Dossier": item_id, 
                         "Campagne": nom_campagne, "Nom": nom_propre, "Prénom": prenom_propre, "Identité": f"{prenom_propre} {nom_propre}",
                         "Montant Payé": f"{montant_paye / 100} €", "Code Promo": code_promo_utilise, "Allergies / Médical": "-",
                         "Formule": nom_tarif, "Type": type_formule, "Licence_FFE": "Non croisé", "Nom payeur": nom_payeur,
@@ -511,7 +523,7 @@ if st.sidebar.button("⬇️ Lancer la Synchronisation HelloAsso"):
                     ids_supprimes = [str(x) for x in st.session_state['db'].get('dossiers_supprimes', [])]
                     
                     def est_valide(r):
-                        id_dos = str(r.get('ID_Dossier', ''))
+                        id_dos = nettoyer_id_dossier(r.get('ID_Dossier', ''))
                         if id_dos and id_dos != 'nan' and id_dos in ids_supprimes: return False
                         if not df_local.empty:
                             if 'ID_Dossier' in df_local.columns and id_dos in df_local['ID_Dossier'].dropna().astype(str).values: return False
@@ -574,7 +586,6 @@ else:
     df = st.session_state['df_adherents']
     date_jour = datetime.now().strftime("%d/%m/%Y")
     
-    # --- MISE A JOUR DES CRENEAUX ISOLES ---
     structure_creneaux = {
         "Lundi": ["Lundi - Sainte-Trinité (CP)", "Lundi - La Ciotat", "Lundi - Carnoux", "Lundi - Club Cassis"],
         "Mardi": ["Mardi - Sainte-Trinité (CE1)", "Mardi - Saint-Augustin (CP-CE1)", "Mardi - Ceyreste", "Mardi - Marseille"],
@@ -811,9 +822,9 @@ else:
                             new_val = row_new[col]
                             if pd.isna(new_val): new_val = ""
                             
-                            if col == "Promo Validée ✅": st.session_state['db']['validations_promo'][identite_actuelle] = new_val
+                            if col == "Promo Validée ✅": st.session_state['db']['validations_promo'][identite_actuelle] = bool(new_val)
                             elif col == "Sortie Seul": st.session_state['db']['sorties_manuelles'][identite_actuelle] = new_val
-                            elif col == "T-shirt donné 👕": st.session_state['db']['tshirts_donnes'][identite_actuelle] = new_val
+                            elif col == "T-shirt donné 👕": st.session_state['db']['tshirts_donnes'][identite_actuelle] = bool(new_val)
                             elif col == "Elo Crevette 🦐": 
                                 try: st.session_state['db']['elos_crevette'][identite_actuelle] = int(float(new_val))
                                 except ValueError: st.session_state['db']['elos_crevette'][identite_actuelle] = 400
@@ -841,7 +852,7 @@ else:
                 options_suppr = []
                 mapping_suppr = {}
                 for idx, row in df.iterrows():
-                    id_dos = row.get('ID_Dossier', 'Sans ID')
+                    id_dos = nettoyer_id_dossier(row.get('ID_Dossier', 'Sans ID'))
                     texte = f"👤 {row['Nom']} {row['Prénom']} | 📋 {row.get('Campagne', '-')} | 💰 {row.get('Montant Payé', '-')} (Dossier: {id_dos})"
                     options_suppr.append(texte)
                     mapping_suppr[texte] = idx
@@ -851,7 +862,7 @@ else:
                     idx_to_delete = mapping_suppr[eleve_a_supprimer]
                     row_to_delete = df.loc[idx_to_delete]
                     
-                    id_doss = row_to_delete.get('ID_Dossier')
+                    id_doss = nettoyer_id_dossier(row_to_delete.get('ID_Dossier'))
                     if id_doss and str(id_doss) != "nan":
                         if str(id_doss) not in st.session_state['db']['dossiers_supprimes']: 
                             st.session_state['db']['dossiers_supprimes'].append(str(id_doss))
@@ -982,7 +993,8 @@ else:
         if df_boutique.empty:
             st.info("Aucun achat boutique détecté pour le moment. (Vérifiez le nom de la campagne dans le code si vous venez de la créer !)")
         else:
-            df_boutique['Article Donné 🎁'] = df_boutique['ID_Dossier'].apply(lambda x: st.session_state['db']['boutique_donnees'].get(str(x), False))
+            df_boutique['ID_Dossier_Clean'] = df_boutique['ID_Dossier'].apply(nettoyer_id_dossier)
+            df_boutique['Article Donné 🎁'] = df_boutique['ID_Dossier_Clean'].apply(lambda x: st.session_state['db']['boutique_donnees'].get(x, False))
             
             df_boutique["_orig_index"] = df_boutique.index
             df_display_boutique = df_boutique.set_index("_orig_index")
@@ -990,7 +1002,7 @@ else:
             colonnes_boutique = ["Nom", "Prénom", "Formule", "Taille du t-shirt", "Montant Payé", "Campagne", "Article Donné 🎁", "ID_Dossier"]
             colonnes_a_afficher = [c for c in colonnes_boutique if c in df_display_boutique.columns and c != "ID_Dossier"]
             
-            st.info("Cochez la case 'Article Donné 🎁' pour valider la remise en main propre.")
+            st.info("Cochez la case 'Article Donné 🎁' pour valider la remise en main propre, puis enregistrez.")
             edited_boutique = st.data_editor(
                 df_display_boutique[colonnes_a_afficher],
                 use_container_width=True,
@@ -1011,10 +1023,10 @@ else:
                     old_val = df_display_boutique.loc[idx_b, "Article Donné 🎁"]
                     new_val = edited_boutique.loc[idx_b, "Article Donné 🎁"]
                     
-                    if old_val != new_val:
+                    if is_different(old_val, new_val):
                         changement_b = True
-                        id_doss = str(df_display_boutique.loc[idx_b, "ID_Dossier"])
-                        st.session_state['db']['boutique_donnees'][id_doss] = new_val
+                        id_doss = nettoyer_id_dossier(df_display_boutique.loc[idx_b, "ID_Dossier"])
+                        st.session_state['db']['boutique_donnees'][id_doss] = bool(new_val)
                 
                 if changement_b:
                     sauvegarder_base_cloud(st.session_state['db'])
