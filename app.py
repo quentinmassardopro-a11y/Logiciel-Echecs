@@ -7,6 +7,7 @@ import json
 import os
 import io
 import hashlib
+import re
 from datetime import datetime
 import gspread
 from google.oauth2.service_account import Credentials
@@ -23,6 +24,7 @@ st.markdown("""
     button[data-baseweb="tab"][aria-selected="true"] { border-bottom-color: #FF8C00 !important; }
     .recherche-rapide { background-color: #f4f6f9; padding: 15px; border-radius: 10px; margin-bottom: 20px; border-left: 6px solid #FF8C00; }
     div[data-baseweb="select"] { border: 2px solid #FF8C00 !important; border-radius: 6px !important; }
+    .match-card { background-color: #ffffff; padding: 10px; border-radius: 8px; border-left: 4px solid #005b96; margin-bottom: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
     </style>
 """, unsafe_allow_html=True)
 
@@ -63,7 +65,7 @@ def initialiser_memoire_vierge():
         "dossiers_supprimes": [],
         "tshirts_donnes": {},     
         "boutique_donnees": {},
-        "equipes_interclubs": {} # NOUVELLE ARCHITECTURE INTERCLUBS
+        "interclubs_compos": {} # Structure pour sauvegarder les compos FFE
     }
 
 def charger_base_cloud():
@@ -153,6 +155,90 @@ def generer_vcard(contact):
     vcard += "END:VCARD"
     return vcard.encode('utf-8')
 
+# --- MOTEUR DE SCRAPING FFE ---
+@st.cache_data(ttl=3600)
+def fetch_ffe_club_data(club_ref="2705"):
+    headers = {"User-Agent": "Mozilla/5.0"}
+    joueurs_a = []
+    equipes = []
+    
+    # 1. Aspirer les Joueurs (Filtre Licence A)
+    try:
+        url_j = f"https://www.echecs.asso.fr/ListeJoueurs.aspx?Action=JOUEURCLUBREF&JrTri=Elo&ClubRef={club_ref}"
+        r_j = requests.get(url_j, headers=headers, timeout=15)
+        # Parse manually via regex to be immune to missing Pandas parsers
+        lignes = re.findall(r'<tr[^>]*>(.*?)</tr>', r_j.text, re.IGNORECASE | re.DOTALL)
+        for ligne in lignes:
+            cols = re.findall(r'<td[^>]*>(.*?)</td>', ligne, re.IGNORECASE | re.DOTALL)
+            if len(cols) >= 8:
+                nom_prenom = re.sub(r'<[^>]+>', '', cols[1]).replace("&nbsp;", " ").strip()
+                elo_str = re.sub(r'<[^>]+>', '', cols[5]).replace("F", "").replace("N", "").strip()
+                licence = re.sub(r'<[^>]+>', '', cols[7]).strip().upper()
+                
+                if licence == "A" and nom_prenom and nom_prenom != "Nom Prénom":
+                    try: elo = int(elo_str)
+                    except: elo = 1000
+                    joueurs_a.append({"Nom": nom_prenom, "Elo": elo})
+    except Exception as e:
+        st.warning("⚠️ Impossible de télécharger les joueurs depuis la FFE.")
+
+    # 2. Aspirer les Équipes du Club
+    try:
+        url_eq = f"https://www.echecs.asso.fr/ListeEquipes.aspx?ClubRef={club_ref}"
+        r_eq = requests.get(url_eq, headers=headers, timeout=15)
+        matches = re.findall(r'<tr[^>]*>.*?<td[^>]*><a href="(Equipe\.aspx\?EquipeRef=\d+)"[^>]*>(.*?)</a></td>.*?<td[^>]*>(.*?)</td>', r_eq.text, re.IGNORECASE | re.DOTALL)
+        for ref_url, nom_eq, div in matches:
+            nom_eq = re.sub(r'<[^>]+>', '', nom_eq).strip()
+            div = re.sub(r'<[^>]+>', '', div).strip()
+            
+            cat = "Jeunes" if "jeune" in nom_eq.lower() or "jeune" in div.lower() or " j " in nom_eq.lower() else "Adultes"
+            
+            equipes.append({
+                "Nom": nom_eq,
+                "Division": div,
+                "Lien": f"https://www.echecs.asso.fr/{ref_url}",
+                "Categorie": cat
+            })
+    except Exception as e:
+        st.warning("⚠️ Impossible de télécharger les équipes depuis la FFE.")
+
+    # Trier par Elo décroissant pour le confort
+    joueurs_a = sorted(joueurs_a, key=lambda x: x["Elo"], reverse=True)
+    return joueurs_a, equipes
+
+@st.cache_data(ttl=3600)
+def fetch_ffe_team_calendar(team_url):
+    headers = {"User-Agent": "Mozilla/5.0"}
+    rondes = []
+    try:
+        r = requests.get(team_url, headers=headers, timeout=15)
+        # Parse calendar safely
+        lignes = re.findall(r'<tr[^>]*>(.*?)</tr>', r.text, re.IGNORECASE | re.DOTALL)
+        for ligne in lignes:
+            cols = re.findall(r'<td[^>]*>(.*?)</td>', ligne, re.IGNORECASE | re.DOTALL)
+            if len(cols) >= 5:
+                date = re.sub(r'<[^>]+>', '', cols[0]).strip()
+                eq1 = re.sub(r'<[^>]+>', '', cols[1]).strip()
+                score = re.sub(r'<[^>]+>', '', cols[2]).strip()
+                eq2 = re.sub(r'<[^>]+>', '', cols[3]).strip()
+                ronde = re.sub(r'<[^>]+>', '', cols[4]).strip()
+                
+                if "Ronde" in ronde:
+                    if "cassis" in eq1.lower():
+                        adv, lieu = eq2, "Domicile"
+                    else:
+                        adv, lieu = eq1, "Extérieur"
+                        
+                    rondes.append({
+                        "Ronde": ronde,
+                        "Date": date,
+                        "Adversaire": adv,
+                        "Lieu": lieu,
+                        "Score": score
+                    })
+    except: pass
+    return rondes
+
 # --- CHARGEMENT ---
 if 'db' not in st.session_state: 
     with st.spinner("Connexion sécurisée au Cloud Google..."):
@@ -204,56 +290,10 @@ with col2:
     st.title("Académie d'Échecs des Calanques")
     st.markdown("**Plateforme Globale : Administration, Écoles, Boutique & Entraînements**")
 
-# --- FONCTIONS UTILITAIRES ---
-def calculer_nouveau_elo(r_a, r_b, score_a, k=40):
-    e_a = 1.0 / (1.0 + 10.0 ** ((r_b - r_a) / 400.0))
-    return max(100, round(r_a + k * (score_a - e_a)))
-
+# --- MOTEUR LOGIQUE ---
 def normaliser_nom(nom):
     if pd.isna(nom): return ""
     return ''.join(c for c in unicodedata.normalize('NFD', str(nom).lower().strip().replace("*", "")) if unicodedata.category(c) != 'Mn')
-
-def estimer_sexe(prenom):
-    if not prenom: return "M"
-    p = normaliser_nom(str(prenom).split("-")[0].split()[0])
-    hommes_exceptions = ["baptiste", "alexandre", "pierre", "guillaume", "antoine", "maxime", "stephane", "rene", "jules", "charles", "georges", "luc", "emile", "philippe", "cyrille", "auguste", "aime", "gilles", "patrice", "eugene", "serge", "hippolyte", "nicolas", "theophile", "timothee", "jerome", "gregoire", "etienne", "matteo", "mathis", "louis", "sacha", "noa", "luca", "andrea", "ange", "aristide", "arsene", "barthelemy", "baudouin", "come", "ulysse", "gaspard", "theodore", "zacharie", "claude", "dominique"]
-    femmes_exceptions = ["manon", "carmen", "iris", "margaux", "margot", "maud", "astrid", "sarah", "esther", "fleur", "marion", "lison", "ninon", "suzon", "lou", "alison", "myriam", "sharon", "eden", "ines", "anais", "agnes", "charlotte", "marianne"]
-    if p in hommes_exceptions: return "M"
-    if p in femmes_exceptions: return "F"
-    if p.endswith(('a', 'e', 'ine', 'elle', 'ette', 'ie', 'ia')): return "F"
-    if p.endswith(('i', 'y')): return "M" if p in ["anthony", "jeremy", "willy", "jimmy", "gregory", "remi", "henri", "dmitri", "ali", "mehdi", "valery", "thierry", "charley", "guy", "yuri", "tony", "johny", "jonny", "dany", "sami", "fadi"] else "F"
-    return "M"
-
-def generer_appariements_suisses(joueurs_scores, elos_dict, historique_rencontres):
-    joueurs_tries = sorted(joueurs_scores.keys(), key=lambda j: (joueurs_scores[j], elos_dict.get(j, 400), random.random()), reverse=True)
-    appariements, non_apparies, exempt = [], list(joueurs_tries), None
-    if len(non_apparies) % 2 != 0: exempt = non_apparies.pop()
-    while len(non_apparies) > 1:
-        j1 = non_apparies.pop(0)
-        j2_trouve = None
-        for idx, j2 in enumerate(non_apparies):
-            pair = (min(j1, j2), max(j1, j2))
-            if pair not in historique_rencontres:
-                j2_trouve = non_apparies.pop(idx)
-                historique_rencontres.add(pair)
-                appariements.append((j1, j2_trouve))
-                break
-        if not j2_trouve and non_apparies:
-            j2_trouve = non_apparies.pop(0)
-            historique_rencontres.add((min(j1, j2_trouve), max(j1, j2_trouve)))
-            appariements.append((j1, j2_trouve))
-    return appariements, exempt, historique_rencontres
-
-def get_elo_actif(identite, df_adherents, db):
-    try:
-        row = df_adherents[df_adherents["Identité"] == identite].iloc[0]
-        elo_ffe = int(float(row.get("Elo_FFE", 0)))
-        licence = str(row.get("Licence_FFE", "Non croisé"))
-        elos_virtuels_ffe = [799, 899, 999, 1099, 1199, 1299, 1399, 1499]
-        if licence != "Non croisé" and elo_ffe > 0 and elo_ffe not in elos_virtuels_ffe: 
-            return elo_ffe, "⚡ FFE/FIDE"
-    except: pass
-    return db['elos_crevette'].get(identite, 400), "🦐 Crevette"
 
 def affectations_automatiques(row):
     creneaux = []
@@ -432,37 +472,12 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
         
     return rows
 
-def analyser_fichier_ffe(fichier):
-    try:
-        if not isinstance(fichier, str):
-            with open("base_ffe_locale_tmp.csv", "wb") as f: f.write(fichier.getbuffer())
-            fichier_a_lire = "base_ffe_locale_tmp.csv"
-        else: fichier_a_lire = fichier
-            
-        try: df_ffe = pd.read_csv(fichier_a_lire, sep=None, engine='python', encoding='utf-8')
-        except UnicodeDecodeError: df_ffe = pd.read_csv(fichier_a_lire, sep=None, engine='python', encoding='latin1')
-            
-        col_nom = next((c for c in df_ffe.columns if "nom" in str(c).lower() and "prenom" not in str(c).lower() and "prénom" not in str(c).lower()), None)
-        col_prenom = next((c for c in df_ffe.columns if "prenom" in str(c).lower() or "prénom" in str(c).lower()), None)
-        col_elo = next((c for c in df_ffe.columns if "rapide" in str(c).lower()), None)
-        if not col_elo: col_elo = next((c for c in df_ffe.columns if "elo" in str(c).lower()), None)
-        col_licence = next((c for c in df_ffe.columns if any(m in str(c).lower() for m in ["n° ffe", "licence", "code", "ref", "identifiant"])), None)
-        col_dna = next((c for c in df_ffe.columns if any(m in str(c).lower() for m in ["dna", "né", "naissance"])), None)
-
-        if col_nom and col_prenom:
-            df_ffe['Nom_Norm'] = df_ffe[col_nom].astype(str).apply(normaliser_nom)
-            df_ffe['Prenom_Norm'] = df_ffe[col_prenom].astype(str).apply(normaliser_nom)
-            if col_dna: df_ffe['Annee_FFE'] = df_ffe[col_dna].astype(str).str.extract(r'(\d{4})')[0].fillna("")
-            else: df_ffe['Annee_FFE'] = ""
-            df_ffe['Cle_Forte'] = df_ffe['Nom_Norm'].astype(str) + df_ffe['Prenom_Norm'].astype(str) + df_ffe['Annee_FFE'].astype(str)
-            df_ffe['Cle_Souple'] = df_ffe['Nom_Norm'].astype(str) + df_ffe['Prenom_Norm'].astype(str)
-            df_ffe['Elo_FFE'] = df_ffe[col_elo] if col_elo else 0
-            df_ffe['Licence_FFE'] = df_ffe[col_licence].astype(str) if col_licence else "Non croisé"
-            return df_ffe[['Cle_Forte', 'Cle_Souple', 'Elo_FFE', 'Licence_FFE']]
-    except Exception as e: 
-        st.sidebar.error(f"Erreur d'analyse FFE: {e}")
-        return pd.DataFrame()
-    return pd.DataFrame()
+def estimer_sexe(prenom):
+    if not prenom: return "M"
+    p = normaliser_nom(str(prenom).split("-")[0].split()[0])
+    femmes = ["manon", "carmen", "iris", "margaux", "margot", "maud", "astrid", "sarah", "esther", "fleur", "marion", "lison", "ninon", "suzon", "lou", "alison", "myriam", "sharon", "eden", "ines", "anais", "agnes", "charlotte", "marianne"]
+    if p in femmes or p.endswith(('a', 'e', 'ine', 'elle', 'ette', 'ie', 'ia')): return "F"
+    return "M"
 
 # --- BARRE LATÉRALE ---
 st.sidebar.header("🔑 Espace de Travail")
@@ -484,61 +499,13 @@ if st.sidebar.button("🔄 Rafraîchir les données (Cloud)"):
         st.rerun()
 
 st.sidebar.markdown("---")
-st.sidebar.header("1️⃣ Base FFE (Licences)")
-fichier_ffe = st.sidebar.file_uploader("Fichier FFE (Glissez votre CSV ici)", type=['csv', 'xls', 'xlsx'])
-if fichier_ffe:
-    df_ffe = analyser_fichier_ffe(fichier_ffe)
-    if not df_ffe.empty:
-        st.session_state['df_ffe'] = df_ffe
-        st.sidebar.success("Fichier FFE chargé en mémoire !")
-
-if 'df_ffe' in st.session_state: 
-    st.sidebar.info("✅ FFE en mémoire.")
-    
-    if st.sidebar.button("🔄 Recroiser les Licences FFE"):
-        if 'df_adherents' in st.session_state and not st.session_state['df_adherents'].empty:
-            with st.spinner("Recherche des correspondances dans la base FFE..."):
-                df_base = st.session_state['df_adherents'].copy()
-                
-                df_base['Nom_Norm'] = df_base['Nom'].astype(str).apply(normaliser_nom)
-                df_base['Prenom_Norm'] = df_base['Prénom'].astype(str).apply(normaliser_nom)
-                df_base['Annee_HA'] = df_base['Date de naissance'].astype(str).str.extract(r'(\d{4})')[0].fillna("")
-                
-                df_base['Cle_Forte'] = df_base['Nom_Norm'].astype(str) + df_base['Prenom_Norm'].astype(str) + df_base['Annee_HA'].astype(str)
-                df_base['Cle_Souple'] = df_base['Nom_Norm'].astype(str) + df_base['Prenom_Norm'].astype(str)
-                
-                df_ffe_strict = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Forte'])
-                df_ffe_souple = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Souple'])
-                
-                df_base = df_base.drop(columns=['Elo_FFE', 'Licence_FFE'], errors='ignore')
-                df_base = pd.merge(df_base, df_ffe_strict[['Cle_Forte', 'Elo_FFE', 'Licence_FFE']], on='Cle_Forte', how='left')
-                
-                manquants = df_base['Licence_FFE'].isna() | (df_base['Licence_FFE'] == "Non croisé")
-                if manquants.any():
-                    df_base_m = df_base[manquants].drop(columns=['Elo_FFE', 'Licence_FFE'], errors='ignore')
-                    df_base_m = pd.merge(df_base_m, df_ffe_souple[['Cle_Souple', 'Elo_FFE', 'Licence_FFE']], on='Cle_Souple', how='left')
-                    df_base.loc[manquants, 'Elo_FFE'] = df_base_m['Elo_FFE'].values
-                    df_base.loc[manquants, 'Licence_FFE'] = df_base_m['Licence_FFE'].values
-
-                df_base['Elo_FFE'] = df_base['Elo_FFE'].fillna(0).astype(int)
-                df_base['Licence_FFE'] = df_base['Licence_FFE'].fillna("Non croisé")
-                df_base = df_base.drop(columns=['Cle_Forte', 'Cle_Souple', 'Nom_Norm', 'Prenom_Norm', 'Annee_HA'])
-                
-                st.session_state['df_adherents'] = df_base
-                sauvegarder_adherents_cloud(df_base)
-                st.sidebar.success("✅ Licences et Elos recroisés avec succès !")
-                st.rerun()
-        else:
-            st.sidebar.warning("Aucun adhérent dans la base.")
-
-st.sidebar.markdown("---")
-st.sidebar.header("2️⃣ HelloAsso (Nouveaux Inscrits)")
+st.sidebar.header("1️⃣ Synchronisation (Nouveaux Inscrits)")
 saved_id = st.secrets["helloasso"]["client_id"] if "helloasso" in st.secrets else ""
 saved_secret = st.secrets["helloasso"]["client_secret"] if "helloasso" in st.secrets else ""
 client_id = st.sidebar.text_input("Client ID", value=saved_id, type="password")
 client_secret = st.sidebar.text_input("Client Secret", value=saved_secret, type="password")
 
-if st.sidebar.button("⬇️ Lancer la Synchronisation HelloAsso"):
+if st.sidebar.button("⬇️ Aspirer HelloAsso"):
     if client_id and client_secret:
         with st.spinner("Recherche de nouveaux inscrits HelloAsso..."):
             token = get_helloasso_token(client_id, client_secret)
@@ -550,7 +517,6 @@ if st.sidebar.button("⬇️ Lancer la Synchronisation HelloAsso"):
                     ("Don Bosco", "Event", "club-d-echecs-don-bosco"),
                     ("Boutique", "Shop", "objet-club")
                 ]
-                
                 all_data = []
                 for nom, type_camp, slug in campagnes:
                     all_data.extend(fetch_campaign_items(token, type_camp, slug, nom))
@@ -571,33 +537,10 @@ if st.sidebar.button("⬇️ Lancer la Synchronisation HelloAsso"):
                     nouveaux = df_new_fetch[df_new_fetch.apply(est_valide, axis=1)].copy()
 
                     if not nouveaux.empty:
-                        if 'df_ffe' in st.session_state and not st.session_state['df_ffe'].empty:
-                            nouveaux['Nom_Norm'] = nouveaux['Nom'].astype(str).apply(normaliser_nom)
-                            nouveaux['Prenom_Norm'] = nouveaux['Prénom'].astype(str).apply(normaliser_nom)
-                            nouveaux['Annee_HA'] = nouveaux['Date de naissance'].astype(str).str.extract(r'(\d{4})')[0].fillna("")
-                            
-                            nouveaux['Cle_Forte'] = nouveaux['Nom_Norm'].astype(str) + nouveaux['Prenom_Norm'].astype(str) + nouveaux['Annee_HA'].astype(str)
-                            nouveaux['Cle_Souple'] = nouveaux['Nom_Norm'].astype(str) + nouveaux['Prenom_Norm'].astype(str)
-                            
-                            df_ffe_strict = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Forte'])
-                            df_ffe_souple = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Souple'])
-                            
-                            nouveaux = nouveaux.drop(columns=['Elo_FFE', 'Licence_FFE'], errors='ignore')
-                            nouveaux = pd.merge(nouveaux, df_ffe_strict[['Cle_Forte', 'Elo_FFE', 'Licence_FFE']], on='Cle_Forte', how='left')
-                            
-                            manquants = nouveaux['Licence_FFE'].isna()
-                            if manquants.any():
-                                df_base_m = nouveaux[manquants].drop(columns=['Elo_FFE', 'Licence_FFE'])
-                                df_base_m = pd.merge(df_base_m, df_ffe_souple[['Cle_Souple', 'Elo_FFE', 'Licence_FFE']], on='Cle_Souple', how='left')
-                                nouveaux.loc[manquants, 'Elo_FFE'] = df_base_m['Elo_FFE'].values
-                                nouveaux.loc[manquants, 'Licence_FFE'] = df_base_m['Licence_FFE'].values
-
-                            nouveaux['Elo_FFE'] = nouveaux['Elo_FFE'].fillna(0).astype(int)
-                            nouveaux['Licence_FFE'] = nouveaux['Licence_FFE'].fillna("Non croisé")
-                            nouveaux = nouveaux.drop(columns=['Cle_Forte', 'Cle_Souple', 'Nom_Norm', 'Prenom_Norm', 'Annee_HA'])
-                        else:
-                            nouveaux['Elo_FFE'] = 0
-                            nouveaux['Licence_FFE'] = "Non croisé"
+                        nouveaux['Nom_Norm'] = nouveaux['Nom'].astype(str).apply(normaliser_nom)
+                        nouveaux['Prenom_Norm'] = nouveaux['Prénom'].astype(str).apply(normaliser_nom)
+                        nouveaux['Elo_FFE'] = 0
+                        nouveaux['Licence_FFE'] = "Non croisé"
 
                         for _, row in nouveaux.iterrows():
                             identite = row['Identité']
@@ -620,7 +563,7 @@ if st.sidebar.button("⬇️ Lancer la Synchronisation HelloAsso"):
             else: st.sidebar.error("Erreur API HelloAsso.")
 
 if 'df_adherents' not in st.session_state or st.session_state['df_adherents'].empty:
-    st.info("👋 **Bienvenue !** Cliquez sur **Lancer la Synchronisation HelloAsso** pour importer vos premiers élèves.")
+    st.info("👋 **Bienvenue !** Cliquez sur **Aspirer HelloAsso** pour importer vos premiers élèves.")
 else:
     df = st.session_state['df_adherents']
     date_jour = datetime.now().strftime("%d/%m/%Y")
@@ -661,7 +604,9 @@ else:
                                     "ID_Dossier": id_unique,
                                     "Campagne": nv_campagne, "Nom": nv_nom, "Prénom": nv_prenom, "Identité": nv_identite,
                                     "Montant Payé": "0 € (Manuel)", "Code Promo": "", "Allergies / Médical": "-",
-                                    "Formule": nv_formule, "Type": "Club" if "Club" in nv_campagne else "École", "Licence_FFE": "Non croisé",
+                                    "Formule": nv_formule, 
+                                    "Type": "Club" if "club" in nv_campagne.lower() or "club" in nv_formule.lower() else "École", 
+                                    "Licence_FFE": "Non croisé",
                                     "Nom payeur": nv_nom, "Prénom payeur": nv_prenom, "Email payeur": nv_mail, "N° Portable": nv_tel,
                                     "N° Portable 2 (en cas d'urgence)": "", "EMail": nv_mail, "Adresse": "", "Ville": "", 
                                     "Nom et prénom du responsable légal": "", "Classe": "", "Date de naissance": "", 
@@ -687,9 +632,7 @@ else:
                 st.markdown("##### ✏️ Correction d'Identité")
                 with st.expander("Corriger une faute dans un Nom / Prénom"):
                     st.write("Sélectionnez la transaction de l'élève pour corriger son nom :")
-                    
                     df_correction = df[df["Type"] != "Boutique"]
-                    
                     options_renommage = []
                     mapping_renommage = {}
                     for idx, row in df_correction.iterrows():
@@ -699,7 +642,6 @@ else:
                         mapping_renommage[texte_ren] = idx
                         
                     eleve_a_renommer = st.selectbox("Élève à corriger :", [""] + sorted(options_renommage))
-                    
                     if eleve_a_renommer:
                         idx_cible = mapping_renommage[eleve_a_renommer]
                         row_cible = df.loc[idx_cible]
@@ -716,35 +658,25 @@ else:
                                 st.session_state['df_adherents'].at[idx_cible, 'Prénom'] = nv_prenom
                                 st.session_state['df_adherents'].at[idx_cible, 'Identité'] = nv_identite
                                 
-                                if nv_identite not in st.session_state['db']['elos_crevette']:
-                                    st.session_state['db']['elos_crevette'][nv_identite] = st.session_state['db']['elos_crevette'].get(identite_cible, 400)
-                                if nv_identite not in st.session_state['db']['validations_promo']:
-                                    st.session_state['db']['validations_promo'][nv_identite] = st.session_state['db']['validations_promo'].get(identite_cible, False)
-                                if nv_identite not in st.session_state['db']['sorties_manuelles']:
-                                    st.session_state['db']['sorties_manuelles'][nv_identite] = st.session_state['db']['sorties_manuelles'].get(identite_cible, "-")
-                                if nv_identite not in st.session_state['db']['tshirts_donnes']:
-                                    st.session_state['db']['tshirts_donnes'][nv_identite] = st.session_state['db']['tshirts_donnes'].get(identite_cible, False)
+                                if nv_identite not in st.session_state['db']['elos_crevette']: st.session_state['db']['elos_crevette'][nv_identite] = st.session_state['db']['elos_crevette'].get(identite_cible, 400)
+                                if nv_identite not in st.session_state['db']['validations_promo']: st.session_state['db']['validations_promo'][nv_identite] = st.session_state['db']['validations_promo'].get(identite_cible, False)
+                                if nv_identite not in st.session_state['db']['sorties_manuelles']: st.session_state['db']['sorties_manuelles'][nv_identite] = st.session_state['db']['sorties_manuelles'].get(identite_cible, "-")
+                                if nv_identite not in st.session_state['db']['tshirts_donnes']: st.session_state['db']['tshirts_donnes'][nv_identite] = st.session_state['db']['tshirts_donnes'].get(identite_cible, False)
                                     
                                 row_updated = st.session_state['df_adherents'].loc[idx_cible]
                                 creneaux_autos = affectations_automatiques(row_updated)
                                 
                                 for c_auto in creneaux_autos:
-                                    if c_auto not in st.session_state['db']['affectations_creneaux']:
-                                        st.session_state['db']['affectations_creneaux'][c_auto] = []
-                                    if nv_identite not in st.session_state['db']['affectations_creneaux'][c_auto]:
-                                        st.session_state['db']['affectations_creneaux'][c_auto].append(nv_identite)
+                                    if c_auto not in st.session_state['db']['affectations_creneaux']: st.session_state['db']['affectations_creneaux'][c_auto] = []
+                                    if nv_identite not in st.session_state['db']['affectations_creneaux'][c_auto]: st.session_state['db']['affectations_creneaux'][c_auto].append(nv_identite)
                                         
-                                if nv_identite not in st.session_state['db'].get('eleves_deja_affectes', []):
-                                    st.session_state['db']['eleves_deja_affectes'].append(nv_identite)
-                                if nv_identite not in st.session_state['db'].get('identites_helloasso_connues', []):
-                                    st.session_state['db']['identites_helloasso_connues'].append(nv_identite)
+                                if nv_identite not in st.session_state['db'].get('eleves_deja_affectes', []): st.session_state['db']['eleves_deja_affectes'].append(nv_identite)
+                                if nv_identite not in st.session_state['db'].get('identites_helloasso_connues', []): st.session_state['db']['identites_helloasso_connues'].append(nv_identite)
                                     
                                 if identite_cible not in st.session_state['df_adherents']['Identité'].values:
                                     for c in st.session_state['db']['affectations_creneaux']:
-                                        if identite_cible in st.session_state['db']['affectations_creneaux'][c]:
-                                            st.session_state['db']['affectations_creneaux'][c].remove(identite_cible)
-                                    if identite_cible in st.session_state['db'].get('eleves_deja_affectes', []):
-                                        st.session_state['db']['eleves_deja_affectes'].remove(identite_cible)
+                                        if identite_cible in st.session_state['db']['affectations_creneaux'][c]: st.session_state['db']['affectations_creneaux'][c].remove(identite_cible)
+                                    if identite_cible in st.session_state['db'].get('eleves_deja_affectes', []): st.session_state['db']['eleves_deja_affectes'].remove(identite_cible)
                                     st.session_state['db']['elos_crevette'].pop(identite_cible, None)
                                     st.session_state['db']['validations_promo'].pop(identite_cible, None)
                                     st.session_state['db']['sorties_manuelles'].pop(identite_cible, None)
@@ -754,13 +686,10 @@ else:
                                 sauvegarder_adherents_cloud(st.session_state['df_adherents'])
                                 st.success(f"✅ L'élève s'appelle maintenant {nv_identite} !")
                                 st.rerun()
-                            elif nv_identite == identite_cible:
-                                st.info("Le nom est identique, aucune modification n'a été faite.")
-                            else:
-                                st.error("Les champs ne peuvent pas être vides.")
+                            elif nv_identite == identite_cible: st.info("Le nom est identique, aucune modification n'a été faite.")
+                            else: st.error("Les champs ne peuvent pas être vides.")
 
             st.markdown("---")
-            
             df_sans_boutique = df[df["Type"] != "Boutique"].copy()
 
             st.markdown('<div class="recherche-rapide">', unsafe_allow_html=True)
@@ -800,7 +729,6 @@ else:
             with col_ad1: filtre_camp_admin = st.multiselect("Campagnes :", options=df_sans_boutique["Campagne"].unique(), default=df_sans_boutique["Campagne"].unique())
             with col_ad2: filtre_type_admin = st.multiselect("Types :", options=df_sans_boutique["Type"].unique(), default=df_sans_boutique["Type"].unique())
             
-            # --- LES FILTRES RAPIDES SONT DE RETOUR ---
             st.markdown("##### ⚡ Filtres d'Action Rapide")
             c_f1, c_f2, c_f3, c_f4 = st.columns(4)
             with c_f1: filtre_licence = st.checkbox("🚫 Sans Licence")
@@ -959,41 +887,6 @@ else:
                     st.success("✅ Transaction supprimée et mise sur Liste Noire avec succès !")
                     st.rerun()
 
-            st.markdown("---")
-            st.markdown("#### 📥 Exports & Licences FFE")
-            col_ex1, col_ex2, col_ex3 = st.columns(3)
-            
-            nom_fich_admin = f"Administration_Club_{date_jour.replace('/', '-')}"
-            csv_data_admin = df_display[colonnes_finales].to_csv(index=True).encode('utf-8')
-            col_ex1.download_button("📄 Export Tableau (CSV)", data=csv_data_admin, file_name=f"{nom_fich_admin}.csv", mime="text/csv")
-            
-            try:
-                buffer_admin = io.BytesIO()
-                with pd.ExcelWriter(buffer_admin, engine='xlsxwriter') as writer: df_display[colonnes_finales].to_excel(writer, index=True, sheet_name='Base')
-                col_ex2.download_button("📊 Export Tableau (Excel)", data=buffer_admin.getvalue(), file_name=f"{nom_fich_admin}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-            except:
-                try:
-                    buffer_admin = io.BytesIO()
-                    with pd.ExcelWriter(buffer_admin, engine='openpyxl') as writer: df_display[colonnes_finales].to_excel(writer, index=True, sheet_name='Base')
-                    col_ex2.download_button("📊 Export Tableau (Excel)", data=buffer_admin.getvalue(), file_name=f"{nom_fich_admin}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-                except: pass
-
-            df_ffe_export = pd.DataFrame()
-            df_ffe_export['FFE Identifiant'] = ""
-            df_ffe_export['Nom'], df_ffe_export['Prénom'] = df_admin['Nom'], df_admin['Prénom']
-            df_ffe_export['Date de Naissance (AAAA-MM-JJ)'] = df_admin['Date de naissance']
-            df_ffe_export['Sexe (M ou F)'] = df_admin['Prénom'].apply(estimer_sexe)
-            df_ffe_export['Email'] = df_admin['EMail']
-            df_ffe_export['Pays (ISO 3, FRA pour France)'] = "FRA"
-            
-            col_qs = 'e confirme avoir renseigné le questionnaire de santé "Sport" (mineurs) https://www.echecs.asso.fr/Actus/14098/questionnaire_mineur.pdf'
-            if col_qs in df_admin.columns: df_ffe_export['Attestation Médicale (Oui/Non)'] = df_admin[col_qs].apply(lambda x: "Oui" if str(x).lower() in ['true', 'oui', 'yes', 'vrai', 'on', '1'] else "Non")
-            else: df_ffe_export['Attestation Médicale (Oui/Non)'] = "Non"
-            df_ffe_export['Licence (A ou B)'] = "B" 
-            
-            csv_ffe = df_ffe_export.to_csv(index=False, sep=";").encode('utf-8-sig')
-            col_ex3.download_button("♟️ Fichier Prise de Licence FFE", data=csv_ffe, file_name=f"import_ffe_{date_jour.replace('/', '-')}.csv", mime="text/csv")
-            
         with tab_ecoles:
             st.markdown("### 🏫 Pilotage des Établissements Scolaires")
             ecoles_dispos = [c for c in df["Campagne"].unique() if "club" not in c.lower() and "adhésion" not in c.lower() and "adhesion" not in c.lower() and "boutique" not in c.lower()]
@@ -1127,8 +1020,8 @@ else:
                         st.info("Aucun changement détecté.")
 
     elif module_choisi == "🏆 Module Interclubs":
-        st.subheader("🏆 Gestion des Équipes & Interclubs")
-        st.info("Ce module gère les bassins de joueurs par équipe, leurs compositions lors des rondes, et vérifie les règles de la FFE (Écarts Elo et Brûlage).")
+        st.subheader("🏆 Gestion des Équipes & Interclubs (Synchronisé FFE)")
+        st.info("Ce module est directement branché sur la Fédération Française des Échecs. Il aspire vos équipes et le calendrier officiel de votre club[cite: 1, 2].")
         
         pdf_ready = True
         try:
@@ -1139,160 +1032,211 @@ else:
             pdf_ready = False
             st.warning("⚠️ L'imprimante PDF FFE est désactivée. Pour l'activer, ajoutez `PyPDF2` et `reportlab` à votre serveur.")
             
+        # 1. BOUTON DE SYNCHRONISATION FFE
+        if st.button("🔄 Aspirer les Équipes et Joueurs FFE (Licences A)"):
+            with st.spinner("Connexion à echecs.asso.fr en cours..."):
+                ffe_joueurs, ffe_equipes = fetch_ffe_club_data("2705")
+                st.session_state['db']['ffe_joueurs'] = ffe_joueurs
+                
+                # Update teams without erasing existing compositions
+                for eq in ffe_equipes:
+                    cat = eq["Categorie"]
+                    nom = eq["Nom"]
+                    if nom not in st.session_state['db']['equipes_interclubs']:
+                        st.session_state['db']['equipes_interclubs'][nom] = {
+                            "Categorie": cat,
+                            "Division": eq["Division"],
+                            "Lien": eq["Lien"],
+                            "roster": [],
+                            "compo": {f"Ronde {i}": ["" for _ in range(8 if cat == "Adultes" else 4)] for i in range(1, 12)}
+                        }
+                    else:
+                        st.session_state['db']['equipes_interclubs'][nom]["Lien"] = eq["Lien"]
+                
+                sauvegarder_base_cloud(st.session_state['db'])
+                st.success(f"✅ FFE Synchronisée ! {len(ffe_equipes)} équipes trouvées et {len(ffe_joueurs)} joueurs avec Licence A importés.")
+                st.rerun()
+
+        # Construction du pool de joueurs sélectionnables (FFE Licence A prioritaire)
+        joueurs_ffe = st.session_state['db'].get('ffe_joueurs', [])
+        liste_totale_joueurs = [j["Nom"] for j in joueurs_ffe]
+        
+        # Fallback si l'API FFE est vide, on prend la base locale
+        if not liste_totale_joueurs:
+            liste_totale_joueurs = sorted(df["Identité"].unique().tolist())
+            st.warning("⚠️ Utilisation des joueurs de la base locale (Pensez à synchroniser la FFE).")
+
         tab_adultes, tab_jeunes, tab_brulage = st.tabs(["🏅 Interclubs Adultes", "👦👧 Interclubs Jeunes", "🔥 Suivi & Brûlage"])
         
-        liste_totale_joueurs = sorted(df["Identité"].unique().tolist())
-        
-        def afficher_gestion_equipes(categorie, nb_echiquiers_defaut):
-            if categorie not in st.session_state['db']['equipes_interclubs']: st.session_state['db']['equipes_interclubs'][categorie] = {}
+        def afficher_gestion_equipes(categorie):
+            equipes = {k: v for k, v in st.session_state['db'].get('equipes_interclubs', {}).items() if v.get("Categorie") == categorie}
             
-            with st.expander(f"➕ Créer une nouvelle équipe {categorie}", expanded=False):
-                c1, c2 = st.columns([3, 1])
-                nv_equipe = c1.text_input("Nom de l'équipe (ex: Cassis 1 - N4)", key=f"nv_eq_{categorie}")
-                nb_b = c2.number_input("Nb d'échiquiers", min_value=2, max_value=16, value=nb_echiquiers_defaut, key=f"nb_b_{categorie}")
-                if st.button("Valider la création", key=f"btn_add_{categorie}") and nv_equipe:
-                    if nv_equipe not in st.session_state['db']['equipes_interclubs'][categorie]:
-                        st.session_state['db']['equipes_interclubs'][categorie][nv_equipe] = {
-                            "roster": [], 
-                            "compo": {f"Ronde {i}": ["" for _ in range(nb_b)] for i in range(1, 12)}
-                        }
-                        sauvegarder_base_cloud(st.session_state['db'])
-                        st.rerun()
-            
-            st.markdown("---")
-            
-            equipes = st.session_state['db']['equipes_interclubs'][categorie]
             if not equipes:
-                st.info(f"Aucune équipe {categorie} n'a été créée pour le moment.")
+                st.info(f"Aucune équipe {categorie} n'a été importée de la FFE.")
                 return
                 
             for nom_equipe, data in equipes.items():
-                st.markdown(f"#### 🛡️ Équipe : {nom_equipe}")
-                
-                # --- GESTION DU BASSIN DE JOUEURS (ROSTER) ---
-                joueurs_roster = data.get("roster", [])
-                nouveau_roster = st.multiselect(
-                    f"👥 Bassin de joueurs pour l'équipe {nom_equipe} :", 
-                    options=liste_totale_joueurs, 
-                    default=[j for j in joueurs_roster if j in liste_totale_joueurs],
-                    key=f"rost_{nom_equipe}"
-                )
-                if st.button(f"💾 Sauvegarder la liste des joueurs", key=f"sv_rost_{nom_equipe}"):
-                    st.session_state['db']['equipes_interclubs'][categorie][nom_equipe]["roster"] = nouveau_roster
-                    sauvegarder_base_cloud(st.session_state['db'])
-                    st.success("Bassin de joueurs mis à jour !")
-                    st.rerun()
-                
-                # --- COMPOSITIONS DES RONDES ---
-                if nouveau_roster:
-                    st.markdown("**Saisie des compositions pour les rondes**")
-                    rondes_a_afficher = [f"Ronde {i}" for i in range(1, 8)]
-                    df_compo = pd.DataFrame({r: data["compo"][r] for r in rondes_a_afficher}, index=[f"Échiquier {i+1}" for i in range(len(data["compo"]["Ronde 1"]))])
+                with st.container():
+                    st.markdown(f"""<div class="match-card">
+                                <h4>🛡️ {nom_equipe} <span style='font-size:14px; color:gray;'>({data.get('Division', '')})</span></h4>
+                                </div>""", unsafe_allow_html=True)
                     
-                    # Le menu déroulant ne propose QUE les joueurs du roster !
-                    col_config = {r: st.column_config.SelectboxColumn(options=[""] + nouveau_roster) for r in rondes_a_afficher}
-                    
-                    edited_compo = st.data_editor(df_compo, use_container_width=True, column_config=col_config, key=f"grid_{nom_equipe}")
-                    
-                    if st.button(f"💾 Sauvegarder les rondes de {nom_equipe}", key=f"save_r_{nom_equipe}"):
-                        for r in rondes_a_afficher:
-                            st.session_state['db']['equipes_interclubs'][categorie][nom_equipe]["compo"][r] = edited_compo[r].fillna("").tolist()
+                    # --- BASSIN DE JOUEURS ---
+                    joueurs_roster = data.get("roster", [])
+                    nouveau_roster = st.multiselect(
+                        f"👥 Bassin de joueurs pour {nom_equipe} :", 
+                        options=liste_totale_joueurs, 
+                        default=[j for j in joueurs_roster if j in liste_totale_joueurs],
+                        key=f"rost_{nom_equipe}"
+                    )
+                    if st.button(f"💾 Sauvegarder le bassin de {nom_equipe}", key=f"sv_rost_{nom_equipe}"):
+                        st.session_state['db']['equipes_interclubs'][nom_equipe]["roster"] = nouveau_roster
                         sauvegarder_base_cloud(st.session_state['db'])
-                        st.success("Compositions enregistrées !")
+                        st.success("Bassin mis à jour !")
                         st.rerun()
                     
-                    # --- MOTEUR DE RÈGLES FFE (ALERTE 100 POINTS) ---
-                    erreurs_trouvees = False
-                    for r in rondes_a_afficher:
-                        joueurs_r = edited_compo[r].fillna("").tolist()
-                        for i in range(len(joueurs_r) - 1):
-                            for j in range(i+1, len(joueurs_r)):
-                                j1, j2 = joueurs_r[i], joueurs_r[j]
-                                if j1 and j2:
-                                    elo1 = get_elo_actif(j1, df, st.session_state['db'])[0]
-                                    elo2 = get_elo_actif(j2, df, st.session_state['db'])[0]
-                                    if elo1 < elo2 - 100:
-                                        st.error(f"🚨 **Règle FFE violée ({r})** : **{j1}** (Éch. {i+1}, {elo1} Elo) est devant **{j2}** (Éch. {j+1}, {elo2} Elo). L'écart de {elo2 - elo1} pts est strictement interdit (>100).")
-                                        erreurs_trouvees = True
-                                        
-                    if not erreurs_trouvees and any("".join(edited_compo[r].fillna("").tolist()) != "" for r in rondes_a_afficher):
-                        st.success("✅ Ordre des Elos respecté pour toutes les rondes (Pas d'écart > 100).")
+                    if nouveau_roster:
+                        # --- CALENDRIER DYNAMIQUE FFE ---
+                        if st.button(f"📅 Charger/Actualiser le Calendrier FFE", key=f"cal_{nom_equipe}"):
+                            with st.spinner("Aspiration du calendrier..."):
+                                rondes_ffe = fetch_ffe_team_calendar(data["Lien"])
+                                st.session_state['db']['equipes_interclubs'][nom_equipe]["calendrier"] = rondes_ffe
+                                sauvegarder_base_cloud(st.session_state['db'])
                         
-                    # --- GÉNÉRATION DU PDF FFE ---
-                    if pdf_ready:
-                        with st.expander("📄 Imprimer la Feuille de Match FFE"):
-                            c_p1, c_p2, c_p3 = st.columns(3)
-                            r_choisie = c_p1.selectbox("Sélectionnez la ronde", rondes_a_afficher, key=f"sel_r_{nom_equipe}")
-                            date_match = c_p2.text_input("Date du match", key=f"date_{nom_equipe}")
-                            lieu_match = c_p3.text_input("Lieu de rencontre", key=f"lieu_{nom_equipe}")
-                            
-                            pdf_vierge = st.file_uploader("Fichier PDF vierge fourni par la FFE", type=['pdf'], key=f"up_{nom_equipe}")
-                            if pdf_vierge and st.button("🖨️ Générer la feuille complétée", key=f"gen_{nom_equipe}"):
-                                try:
-                                    import PyPDF2
-                                    from reportlab.pdfgen import canvas
-                                    from reportlab.lib.pagesizes import A4
-                                    
-                                    packet = io.BytesIO()
-                                    c = canvas.Canvas(packet, pagesize=A4)
-                                    
-                                    # Coordonnées (Peuvent varier selon les PDF ligue, réglées sur standard 8 tables)
-                                    c.drawString(80, 770, str(date_match))
-                                    c.drawString(250, 770, str(lieu_match))
-                                    c.drawString(450, 770, str(r_choisie))
-                                    c.drawString(80, 750, str(nom_equipe))
-                                    
-                                    y_start = 615
-                                    y_step = 28
-                                    compo = st.session_state['db']['equipes_interclubs'][categorie][nom_equipe]["compo"][r_choisie]
-                                    for idx, joueur in enumerate(compo):
-                                        if joueur:
-                                            c.drawString(70, y_start - (idx * y_step), str(joueur))
-                                            row_joueur = df[df['Identité'] == joueur]
-                                            if not row_joueur.empty:
-                                                code_ffe = str(row_joueur.iloc[0].get('Licence_FFE', ''))
-                                                if code_ffe != "Non croisé":
-                                                    c.drawString(240, y_start - (idx * y_step), code_ffe)
-                                            elo = get_elo_actif(joueur, df, st.session_state['db'])[0]
-                                            c.drawString(300, y_start - (idx * y_step), str(elo))
-                                    
-                                    c.save()
-                                    packet.seek(0)
-                                    
-                                    new_pdf = PyPDF2.PdfReader(packet)
-                                    existing_pdf = PyPDF2.PdfReader(pdf_vierge)
-                                    output = PyPDF2.PdfWriter()
-                                    
-                                    page = existing_pdf.pages[0]
-                                    page.merge_page(new_pdf.pages[0])
-                                    output.add_page(page)
-                                    
-                                    output_stream = io.BytesIO()
-                                    output.write(output_stream)
-                                    
-                                    st.download_button("⬇️ Télécharger le PDF rempli", data=output_stream.getvalue(), file_name=f"Match_{nom_equipe}_{r_choisie}.pdf", mime="application/pdf", key=f"dl_{nom_equipe}")
-                                except Exception as e:
-                                    st.error(f"Impossible de dessiner sur le PDF : {e}")
-                else:
-                    st.warning("👈 Ajoutez des joueurs dans le bassin ci-dessus pour pouvoir remplir les rondes.")
-                st.markdown("---")
+                        cal = data.get("calendrier", [])
+                        if cal:
+                            with st.expander(f"Historique & Calendrier de {nom_equipe}"):
+                                df_cal = pd.DataFrame(cal)
+                                st.dataframe(df_cal, use_container_width=True)
+                                
+                        # --- COMPOSITIONS ---
+                        st.markdown("**Saisie des compositions pour les rondes**")
+                        
+                        rondes_a_afficher = []
+                        if cal:
+                            rondes_a_afficher = [r["Ronde"] for r in cal]
+                        if not rondes_a_afficher:
+                            rondes_a_afficher = [f"Ronde {i}" for i in range(1, 8)]
 
-        with tab_adultes: afficher_gestion_equipes("Adultes", 8)
-        with tab_jeunes: afficher_gestion_equipes("Jeunes", 4)
+                        # Assurer que les colonnes existent dans la BD
+                        for r in rondes_a_afficher:
+                            if r not in data["compo"]:
+                                data["compo"][r] = ["" for _ in range(len(data["compo"].get("Ronde 1", [""]*8)))]
+                        
+                        df_compo = pd.DataFrame({r: data["compo"][r] for r in rondes_a_afficher}, index=[f"Échiquier {i+1}" for i in range(len(data["compo"][rondes_a_afficher[0]]))])
+                        
+                        col_config = {r: st.column_config.SelectboxColumn(options=[""] + nouveau_roster) for r in rondes_a_afficher}
+                        edited_compo = st.data_editor(df_compo, use_container_width=True, column_config=col_config, key=f"grid_{nom_equipe}")
+                        
+                        if st.button(f"💾 Sauvegarder les compositions de {nom_equipe}", key=f"save_r_{nom_equipe}"):
+                            for r in rondes_a_afficher:
+                                st.session_state['db']['equipes_interclubs'][nom_equipe]["compo"][r] = edited_compo[r].fillna("").tolist()
+                            sauvegarder_base_cloud(st.session_state['db'])
+                            st.success("Compositions enregistrées !")
+                            st.rerun()
+                        
+                        # --- MOTEUR RÈGLE DES 100 POINTS ---
+                        erreurs_trouvees = False
+                        # Helper for Elo
+                        def get_joueur_elo_ffe(nom_j):
+                            for j in joueurs_ffe:
+                                if j["Nom"] == nom_j: return j["Elo"]
+                            return get_elo_actif(nom_j, df, st.session_state['db'])[0]
+
+                        for r in rondes_a_afficher:
+                            joueurs_r = edited_compo[r].fillna("").tolist()
+                            for i in range(len(joueurs_r) - 1):
+                                for j in range(i+1, len(joueurs_r)):
+                                    j1, j2 = joueurs_r[i], joueurs_r[j]
+                                    if j1 and j2:
+                                        elo1 = get_joueur_elo_ffe(j1)
+                                        elo2 = get_joueur_elo_ffe(j2)
+                                        if elo1 < elo2 - 100:
+                                            st.error(f"🚨 **Règle FFE violée ({r})** : **{j1}** (Éch. {i+1}, {elo1} Elo) est placé au-dessus de **{j2}** (Éch. {j+1}, {elo2} Elo). Écart : {elo2 - elo1} pts (Limite 100 pts).")
+                                            erreurs_trouvees = True
+                                            
+                        if not erreurs_trouvees and any("".join(edited_compo[r].fillna("").tolist()) != "" for r in rondes_a_afficher):
+                            st.success("✅ Ordre des Elos respecté pour toutes les rondes.")
+                            
+                        # --- GÉNÉRATION PDF ---
+                        if pdf_ready:
+                            with st.expander("📄 Imprimer la Feuille de Match FFE"):
+                                c_p1, c_p2, c_p3 = st.columns(3)
+                                r_choisie = c_p1.selectbox("Sélectionnez la ronde", rondes_a_afficher, key=f"sel_r_{nom_equipe}")
+                                
+                                def_date, def_lieu = "", ""
+                                if cal:
+                                    for match in cal:
+                                        if match["Ronde"] == r_choisie:
+                                            def_date, def_lieu = match["Date"], match["Lieu"]
+                                            break
+                                
+                                date_match = c_p2.text_input("Date du match", value=def_date, key=f"date_{nom_equipe}")
+                                lieu_match = c_p3.text_input("Lieu de rencontre", value=def_lieu, key=f"lieu_{nom_equipe}")
+                                
+                                pdf_vierge = st.file_uploader("Fichier PDF vierge fourni par la FFE", type=['pdf'], key=f"up_{nom_equipe}")
+                                if pdf_vierge and st.button("🖨️ Générer la feuille complétée", key=f"gen_{nom_equipe}"):
+                                    try:
+                                        import PyPDF2
+                                        from reportlab.pdfgen import canvas
+                                        from reportlab.lib.pagesizes import A4
+                                        
+                                        packet = io.BytesIO()
+                                        c = canvas.Canvas(packet, pagesize=A4)
+                                        
+                                        # Ajustements FFE standards
+                                        c.drawString(80, 770, str(date_match))
+                                        c.drawString(250, 770, str(lieu_match))
+                                        c.drawString(450, 770, str(r_choisie))
+                                        c.drawString(80, 750, str(nom_equipe))
+                                        
+                                        y_start = 615
+                                        y_step = 28
+                                        compo = st.session_state['db']['equipes_interclubs'][nom_equipe]["compo"][r_choisie]
+                                        for idx, joueur in enumerate(compo):
+                                            if joueur:
+                                                c.drawString(70, y_start - (idx * y_step), str(joueur))
+                                                row_joueur = df[df['Identité'] == joueur]
+                                                if not row_joueur.empty:
+                                                    code_ffe = str(row_joueur.iloc[0].get('Licence_FFE', ''))
+                                                    if code_ffe != "Non croisé":
+                                                        c.drawString(240, y_start - (idx * y_step), code_ffe)
+                                                c.drawString(300, y_start - (idx * y_step), str(get_joueur_elo_ffe(joueur)))
+                                        
+                                        c.save()
+                                        packet.seek(0)
+                                        
+                                        new_pdf = PyPDF2.PdfReader(packet)
+                                        existing_pdf = PyPDF2.PdfReader(pdf_vierge)
+                                        output = PyPDF2.PdfWriter()
+                                        
+                                        page = existing_pdf.pages[0]
+                                        page.merge_page(new_pdf.pages[0])
+                                        output.add_page(page)
+                                        
+                                        output_stream = io.BytesIO()
+                                        output.write(output_stream)
+                                        
+                                        st.download_button("⬇️ Télécharger le PDF rempli", data=output_stream.getvalue(), file_name=f"Match_{nom_equipe}_{r_choisie}.pdf", mime="application/pdf", key=f"dl_{nom_equipe}")
+                                    except Exception as e:
+                                        st.error(f"Impossible de dessiner sur le PDF : {e}")
+                    st.markdown("---")
+
+        with tab_adultes: afficher_gestion_equipes("Adultes")
+        with tab_jeunes: afficher_gestion_equipes("Jeunes")
             
         with tab_brulage:
             st.markdown("### 🔥 Suivi des Brûlages FFE")
-            st.info("Un joueur ayant participé à 4 matchs dans une équipe est considéré comme **BRÛLÉ**. Il lui est strictement interdit de redescendre jouer dans une division inférieure[cite: 1, 2].")
+            st.info("Un joueur ayant participé à 4 matchs dans une équipe ou division est considéré comme **BRÛLÉ**. Il lui est strictement interdit de redescendre[cite: 1, 2].")
             
             joueurs_stats = {}
-            for cat, equipes in st.session_state['db'].get('equipes_interclubs', {}).items():
-                for nom_eq, data in equipes.items():
-                    for r_nom, compo in data.get("compo", {}).items():
-                        for j in compo:
-                            if j:
-                                if j not in joueurs_stats: joueurs_stats[j] = {}
-                                if nom_eq not in joueurs_stats[j]: joueurs_stats[j][nom_eq] = 0
-                                joueurs_stats[j][nom_eq] += 1
+            for nom_eq, data in st.session_state['db'].get('equipes_interclubs', {}).items():
+                for r_nom, compo in data.get("compo", {}).items():
+                    for j in compo:
+                        if j:
+                            if j not in joueurs_stats: joueurs_stats[j] = {}
+                            if nom_eq not in joueurs_stats[j]: joueurs_stats[j][nom_eq] = 0
+                            joueurs_stats[j][nom_eq] += 1
                                 
             data_brulage = []
             for j, stats in joueurs_stats.items():
