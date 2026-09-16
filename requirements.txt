@@ -7,3 +7,4 @@ openpyxl
 xlsxwriter
 PyPDF2
 reportlab
+lxml
