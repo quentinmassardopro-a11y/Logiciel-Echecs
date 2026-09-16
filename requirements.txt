@@ -8,3 +8,5 @@ xlsxwriter
 PyPDF2
 reportlab
 lxml
+html5lib
+beautifulsoup4
