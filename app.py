@@ -119,7 +119,6 @@ def sauvegarder_adherents_cloud(df):
     except Exception as e:
         st.error(f"Échec de la sauvegarde Cloud (Adhérents): {e}")
 
-# --- FONCTIONS UTILITAIRES ET LOGIQUES ---
 def is_different(val1, val2):
     v1 = str(val1).strip().lower() if pd.notna(val1) and str(val1) != "nan" else ""
     v2 = str(val2).strip().lower() if pd.notna(val2) and str(val2) != "nan" else ""
@@ -204,69 +203,6 @@ def generer_appariements_suisses(joueurs_scores, elos_dict, historique_rencontre
     return appariements, exempt, historique_rencontres
 
 # --- MOTEUR DE SCRAPING FFE ---
-@st.cache_data(ttl=3600)
-def fetch_ffe_club_data(club_ref="2705"):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-    }
-    joueurs_a = []
-    equipes = []
-    
-    try:
-        url_j = f"https://www.echecs.asso.fr/ListeJoueurs.aspx?Action=JOUEURCLUBREF&JrTri=Elo&ClubRef={club_ref}"
-        r_j = requests.get(url_j, headers=headers, timeout=15)
-        r_j.encoding = 'utf-8'
-        lignes = re.findall(r'<tr[^>]*>(.*?)</tr>', r_j.text, re.IGNORECASE | re.DOTALL)
-        for ligne in lignes:
-            cols = re.findall(r'<td[^>]*>(.*?)</td>', ligne, re.IGNORECASE | re.DOTALL)
-            if len(cols) >= 6:
-                nom_prenom = re.sub(r'<[^>]+>', '', cols[1]).replace("&nbsp;", " ").strip()
-                if not nom_prenom or nom_prenom.lower() == "nom prénom": continue
-                
-                elo_val = 1000
-                licence = "B"
-                for c in cols:
-                    c_txt = re.sub(r'<[^>]+>', '', c).replace("&nbsp;", "").strip()
-                    if c_txt in ["A", "B"]: licence = c_txt
-                    else:
-                        match_elo = re.search(r'^(\d{3,4})[FN]?$', c_txt)
-                        if match_elo: elo_val = int(match_elo.group(1))
-                            
-                if licence == "A":
-                    joueurs_a.append({"Nom": nom_prenom, "Elo": elo_val})
-    except Exception: pass
-
-    try:
-        url_eq = f"https://www.echecs.asso.fr/ListeEquipes.aspx?ClubRef={club_ref}"
-        r_eq = requests.get(url_eq, headers=headers, timeout=15)
-        r_eq.encoding = 'utf-8'
-        lignes_eq = re.findall(r'<tr[^>]*>(.*?)</tr>', r_eq.text, re.IGNORECASE | re.DOTALL)
-        
-        for l in lignes_eq:
-            if "EquipeRef=" in l:
-                cols = re.findall(r'<td[^>]*>(.*?)</td>', l, re.IGNORECASE | re.DOTALL)
-                if len(cols) >= 2:
-                    lien_m = re.search(r'href=["\']?([^"\'>]*EquipeRef=\d+[^"\'>]*)["\']?', cols[0], re.IGNORECASE)
-                    lien_brut = lien_m.group(1).replace("&amp;", "&") if lien_m else ""
-                    
-                    nom_eq = re.sub(r'<[^>]+>', '', cols[0]).replace("&nbsp;", " ").strip()
-                    div = re.sub(r'<[^>]+>', '', cols[1]).replace("&nbsp;", " ").strip()
-                    
-                    if nom_eq and lien_brut:
-                        cat = "Jeunes" if "jeune" in nom_eq.lower() or "jeune" in div.lower() or " j " in nom_eq.lower() else "Adultes"
-                        equipes.append({
-                            "Nom": nom_eq,
-                            "Division": div,
-                            "Lien": lien_brut,
-                            "Categorie": cat
-                        })
-    except Exception: pass
-
-    joueurs_uniques = {j["Nom"]: j for j in joueurs_a}.values()
-    joueurs_finaux = sorted(list(joueurs_uniques), key=lambda x: x["Elo"], reverse=True)
-    return joueurs_finaux, equipes
-
 @st.cache_data(ttl=3600)
 def fetch_ffe_team_calendar(team_url):
     if not team_url: return []
@@ -556,8 +492,7 @@ for cle, val_defaut in default_mem.items():
     if cle not in st.session_state['db']:
         st.session_state['db'][cle] = val_defaut
 
-# --- MOTEUR DE NAVIGATION GLOBAL ---
-# Il faut que "df" existe tout de suite pour l'utiliser en global
+# --- ROUTAGE ET INTERFACE ---
 df = st.session_state['df_adherents']
 date_jour = datetime.now().strftime("%d/%m/%Y")
 
@@ -654,7 +589,6 @@ if st.sidebar.button("⬇️ Lancer la Synchronisation HelloAsso"):
                     ("Don Bosco", "Event", "club-d-echecs-don-bosco"),
                     ("Boutique", "Shop", "objet-club")
                 ]
-                
                 all_data = []
                 for nom, type_camp, slug in campagnes:
                     all_data.extend(fetch_campaign_items(token, type_camp, slug, nom))
@@ -723,8 +657,7 @@ if st.sidebar.button("⬇️ Lancer la Synchronisation HelloAsso"):
                 else: st.sidebar.warning("Aucune donnée trouvée sur HelloAsso.")
             else: st.sidebar.error("Erreur API HelloAsso.")
 
-
-# --- DÉBUT DES MODULES ---
+# --- NAVIGATION DES MODULES ---
 if df.empty:
     st.info("👋 **Bienvenue !** Cliquez sur **Lancer la Synchronisation HelloAsso** pour importer vos premiers élèves.")
 else:
@@ -1205,7 +1138,8 @@ else:
                         st.rerun()
                     else:
                         st.info("Aucun changement détecté.")
-elif module_choisi == "🏆 Module Interclubs":
+
+    elif module_choisi == "🏆 Module Interclubs":
         st.subheader("🏆 Gestion des Équipes & Interclubs")
         st.info("Interface Capitaine : Saisissez vos compositions, vérifiez les règles FFE et générez vos feuilles de match.")
         
@@ -1224,7 +1158,7 @@ elif module_choisi == "🏆 Module Interclubs":
         except ImportError:
             pdf_ready = False
             
-        # 1. RÉCUPÉRATION DES JOUEURS (LICENCE A)
+        # 1. RÉCUPÉRATION DES JOUEURS (LICENCE A) DEPUIS LA BASE LOCALE
         df_licence_a = pd.DataFrame()
         if 'Licence_FFE' in df.columns:
             df_licence_a = df[df['Licence_FFE'] == 'A']
@@ -1239,7 +1173,7 @@ elif module_choisi == "🏆 Module Interclubs":
         tab_adultes, tab_jeunes, tab_brulage = st.tabs(["🏅 Interclubs Adultes", "👦👧 Interclubs Jeunes", "🔥 Suivi & Brûlage"])
         
         def afficher_gestion_equipes(categorie):
-            # Formulaire de création
+            # Formulaire de création manuelle pour contourner le blocage FFE
             with st.expander(f"➕ Créer une nouvelle équipe {categorie}", expanded=False):
                 with st.form(f"form_{categorie}"):
                     c1, c2, c3 = st.columns([2, 1, 2])
@@ -1285,7 +1219,7 @@ elif module_choisi == "🏆 Module Interclubs":
                 lien_equipe = eq_data.get('Lien', '')
                 url_equipe = lien_equipe if lien_equipe.startswith('http') else f"https://www.echecs.asso.fr/{lien_equipe}" if lien_equipe else ""
                 
-                # --- CALENDRIER ET CLASSEMENT ---
+                # --- CALENDRIER ET CLASSEMENT (Tentative asynchrone) ---
                 df_classement = pd.DataFrame()
                 df_calendrier = pd.DataFrame()
                 
@@ -1511,3 +1445,175 @@ elif module_choisi == "🏆 Module Interclubs":
                 st.dataframe(df_brulage, use_container_width=True)
             else:
                 st.info("Aucun match n'a été saisi pour le moment.")
+
+    elif module_choisi == "♟️ Module Entraîneur":
+        st.subheader("♟️ Espace Entraîneur")
+        tab_appel, tab_tournoi, tab_classement, tab_affectations = st.tabs(["📋 Faire l'Appel", "⚔️ Tournoi & Elo", "🏆 Classement", "⚙️ Affecter Élèves"])
+
+        with tab_affectations:
+            st.markdown("### ⚙️ Création Manuelle des listes de Créneaux")
+            c_jour, c_lieu = st.columns(2)
+            with c_jour: jour_aff = st.selectbox("Jour :", options=list(structure_creneaux.keys()), key="jour_aff")
+            with c_lieu: lieu_aff = st.selectbox("Créneau :", options=structure_creneaux[jour_aff], key="lieu_aff")
+            
+            if lieu_aff not in st.session_state['db']['affectations_creneaux']: st.session_state['db']['affectations_creneaux'][lieu_aff] = []
+            options_eleves = sorted(df["Identité"].tolist())
+            eleves_sauvegardes = st.session_state['db']['affectations_creneaux'][lieu_aff]
+            eleves_valides = [e for e in eleves_sauvegardes if e in options_eleves]
+            nouveaux_eleves = st.multiselect(f"Élèves assignés à {lieu_aff} :", options=options_eleves, default=eleves_valides)
+            
+            if st.button("💾 Sauvegarder cette liste"):
+                st.session_state['db']['affectations_creneaux'][lieu_aff] = nouveaux_eleves
+                sauvegarder_base_cloud(st.session_state['db'])
+                st.success(f"Liste de {lieu_aff} mise à jour dans le Cloud !")
+
+        with tab_appel:
+            st.markdown(f"### 📋 Appel du jour : **{date_jour}**")
+            entraineur_appel = st.selectbox("Entraîneur responsable :", ["Quentin Massardo", "Alexandre Merenciano"])
+            c_jour_ap, c_lieu_ap = st.columns(2)
+            with c_jour_ap: jour_appel = st.selectbox("Sélectionner le Jour :", options=list(structure_creneaux.keys()), key="jour_ap")
+            with c_lieu_ap: lieu_appel = st.selectbox("Créneau :", options=structure_creneaux[jour_appel], key="lieu_ap")
+            
+            liste_identites = st.session_state['db']['affectations_creneaux'].get(lieu_appel, [])
+            if not liste_identites: st.info("Aucun élève assigné à ce créneau.")
+            else:
+                df_groupe = df[df["Identité"].isin(liste_identites)].drop_duplicates(subset=["ID_Dossier"])
+                total_appel = len(df_groupe)
+                st.markdown("---")
+                presences = {}
+                for idx, row in df_groupe.iterrows():
+                    c1, c2 = st.columns([4, 1])
+                    sortie_act = st.session_state['db']['sorties_manuelles'].get(row['Identité'], row.get('Sortie Seul', '-'))
+                    
+                    nom_aff = row['Nom'] + " " + row['Prénom']
+                    if len(df_groupe[df_groupe['Identité'] == row['Identité']]) > 1:
+                        nom_aff += f" ({idx})"
+                        
+                    c1.write(f"👤 **{nom_aff}** *(Sortie: {sortie_act})*")
+                    presences[idx] = c2.checkbox("Présent", value=True, key=f"pres_{idx}")
+
+                presents_count = sum(presences.values())
+                absents_count = total_appel - presents_count
+                
+                st.markdown("---")
+                c_m1, c_m2, c_m3 = st.columns(3)
+                c_m1.metric("👥 Total Liste", total_appel)
+                c_m2.metric("✅ Présents", presents_count)
+                c_m3.metric("❌ Absents", absents_count)
+
+                if st.button(f"💾 Enregistrer l'appel pour {lieu_appel}"):
+                    liste_presents = [df_groupe.loc[idx_app, 'Identité'] for idx_app, est_present in presences.items() if est_present]
+                    if date_jour not in st.session_state['db']['historique_appels']: st.session_state['db']['historique_appels'][date_jour] = {}
+                    st.session_state['db']['historique_appels'][date_jour][lieu_appel] = {"entraineur": entraineur_appel, "presents": liste_presents}
+                    sauvegarder_base_cloud(st.session_state['db'])
+                    st.success("Appel enregistré dans le Cloud !")
+
+                st.markdown("---")
+                st.markdown("#### 📥 Exporter la liste d'appel")
+                col_ap1, col_ap2 = st.columns(2)
+                nom_fich_ap = f"Appel_{lieu_appel}".replace(" ", "_").replace("/", "-")
+                df_appel_export = df_groupe[["Nom", "Prénom", "N° Portable", "N° Portable 2 (en cas d'urgence)", "Campagne"]].copy()
+                df_appel_export['Sortie Seul'] = df_appel_export.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Nom']+" "+r['Prénom'], "-"), axis=1)
+                
+                col_ap1.download_button("📄 Exporter en CSV", data=df_appel_export.to_csv(index=False).encode('utf-8'), file_name=f"{nom_fich_ap}.csv", mime="text/csv")
+                try:
+                    buffer_ap = io.BytesIO()
+                    with pd.ExcelWriter(buffer_ap, engine='xlsxwriter') as writer: df_appel_export.to_excel(writer, index=False, sheet_name='Appel')
+                    col_ap2.download_button("📊 Exporter en Excel", data=buffer_ap.getvalue(), file_name=f"{nom_fich_ap}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                except: pass
+
+        with tab_tournoi:
+            st.markdown("### ⚔️ Tournoi Suisse & Elos")
+            creneaux_remplis = [k for k, v in st.session_state['db']['affectations_creneaux'].items() if len(v) > 0]
+            if not creneaux_remplis: st.info("Aucun créneau disponible.")
+            else:
+                creneau_tournoi = st.selectbox("Lancer le tournoi pour le créneau :", options=creneaux_remplis)
+                joueurs_inscrits = list(set(st.session_state['db']['affectations_creneaux'][creneau_tournoi]))
+                st.markdown("**Retirez les élèves absents :**")
+                joueurs_presents = st.multiselect("", options=joueurs_inscrits, default=joueurs_inscrits)
+                
+                elos_actifs, types_elos = {}, {}
+                for j in joueurs_presents:
+                    e_val, e_type = get_elo_actif(j, df, st.session_state['db'])
+                    elos_actifs[j], types_elos[j] = e_val, e_type
+
+                if 'scores_tournoi' not in st.session_state or st.session_state.get('tournoi_en_cours') != creneau_tournoi:
+                    st.session_state['scores_tournoi'] = {j: 0.0 for j in joueurs_presents}
+                    st.session_state['historique_rencontres'] = set()
+                    st.session_state['ronde_actuelle'] = 1
+                    st.session_state['appariements_ronde'] = []
+                    st.session_state['tournoi_en_cours'] = creneau_tournoi
+                for j in joueurs_presents:
+                    if j not in st.session_state['scores_tournoi']: st.session_state['scores_tournoi'][j] = 0.0
+
+                st.markdown("---")
+                col_t1, col_t2 = st.columns(2)
+                with col_t1: st.metric("Ronde actuelle", st.session_state['ronde_actuelle'])
+                with col_t2:
+                    if st.button("🔄 Réinitialiser le tournoi"):
+                        st.session_state['scores_tournoi'] = {}
+                        st.session_state['historique_rencontres'] = set()
+                        st.session_state['ronde_actuelle'] = 1
+                        st.session_state['appariements_ronde'] = []
+                        st.rerun()
+
+                st.markdown("---")
+                if st.button("🎲 Générer la Ronde"):
+                    scores_actifs = {j: st.session_state['scores_tournoi'][j] for j in joueurs_presents}
+                    pairs, exempt, st.session_state['historique_rencontres'] = generer_appariements_suisses(scores_actifs, elos_actifs, st.session_state['historique_rencontres'])
+                    st.session_state['appariements_ronde'], st.session_state['exempt_ronde'] = pairs, exempt
+
+                if st.session_state.get('appariements_ronde'):
+                    st.subheader(f"♟️ Matchs — Ronde {st.session_state['ronde_actuelle']}")
+                    resultats_saisis = []
+                    for i, (j1, j2) in enumerate(st.session_state['appariements_ronde'], 1):
+                        sym1, sym2 = "⚡" if "FIDE" in types_elos[j1] else "🦐", "⚡" if "FIDE" in types_elos[j2] else "🦐"
+                        c_ech, c_res = st.columns([3, 2])
+                        c_ech.markdown(f"**Échiquier {i} :** ⚪ **{j1}** ({elos_actifs[j1]} {sym1})  🆚  ⚫ **{j2}** ({elos_actifs[j2]} {sym2})")
+                        res = c_res.selectbox(f"Résultat", ["Sélectionner...", "1 - 0 (Blancs)", "0 - 1 (Noirs)", "0.5 - 0.5 (Nulle)"], key=f"res_{i}", label_visibility="collapsed")
+                        resultats_saisis.append((j1, j2, res))
+                        
+                    if st.session_state.get('exempt_ronde'): st.warning(f"👑 **Exempt (1 pt) :** {st.session_state['exempt_ronde']} ({elos_actifs[st.session_state['exempt_ronde']]} {types_elos[st.session_state['exempt_ronde']][:2]})")
+
+                    st.markdown("---")
+                    if st.button("💾 Valider les résultats"):
+                        if any(r[2] == "Sélectionner..." for r in resultats_saisis): st.error("⚠️ Saisissez tous les résultats.")
+                        else:
+                            for j1, j2, res in resultats_saisis:
+                                elo1, elo2 = elos_actifs[j1], elos_actifs[j2]
+                                if res == "1 - 0 (Blancs)":
+                                    st.session_state['scores_tournoi'][j1] += 1.0
+                                    new_e1, new_e2 = calculer_nouveau_elo(elo1, elo2, 1.0), calculer_nouveau_elo(elo2, elo1, 0.0)
+                                elif res == "0 - 1 (Noirs)":
+                                    st.session_state['scores_tournoi'][j2] += 1.0
+                                    new_e1, new_e2 = calculer_nouveau_elo(elo1, elo2, 0.0), calculer_nouveau_elo(elo2, elo1, 1.0)
+                                else:
+                                    st.session_state['scores_tournoi'][j1] += 0.5
+                                    st.session_state['scores_tournoi'][j2] += 0.5
+                                    new_e1, new_e2 = calculer_nouveau_elo(elo1, elo2, 0.5), calculer_nouveau_elo(elo2, elo1, 0.5)
+                                    
+                                if "Crevette" in types_elos[j1]: st.session_state['db']['elos_crevette'][j1] = new_e1
+                                if "Crevette" in types_elos[j2]: st.session_state['db']['elos_crevette'][j2] = new_e2
+
+                            if st.session_state.get('exempt_ronde'): st.session_state['scores_tournoi'][st.session_state['exempt_ronde']] += 1.0
+                            sauvegarder_base_cloud(st.session_state['db'])
+                            st.session_state['ronde_actuelle'] += 1
+                            st.session_state['appariements_ronde'] = []
+                            st.success("Résultats et Elos sauvegardés dans le Cloud !")
+                            st.rerun()
+                            
+        with tab_classement:
+            st.markdown("### 🏆 Classement Général (FIDE & Crevette)")
+            creneaux_remplis_classement = [k for k, v in st.session_state['db']['affectations_creneaux'].items() if len(v) > 0]
+            filtre_c = st.selectbox("Filtrer par liste / créneau :", ["Tous les élèves"] + sorted(creneaux_remplis_classement))
+            
+            joueurs_a_afficher = list(df["Identité"].unique()) if filtre_c == "Tous les élèves" else list(set(st.session_state['db']['affectations_creneaux'][filtre_c]))
+            
+            data_classement = [{"Élève": j, "Catégorie": get_elo_actif(j, df, st.session_state['db'])[1], "Elo ⚡🦐": get_elo_actif(j, df, st.session_state['db'])[0]} for j in joueurs_a_afficher]
+            
+            if data_classement:
+                df_classement = pd.DataFrame(data_classement).sort_values(by="Elo ⚡🦐", ascending=False).reset_index(drop=True)
+                df_classement.index += 1
+                max_elo = max(1000, df_classement["Elo ⚡🦐"].max())
+                st.dataframe(df_classement, use_container_width=True, column_config={"Elo ⚡🦐": st.column_config.ProgressColumn("Niveau de puissance", format="%d", min_value=100, max_value=int(max_elo))})
+            else: st.info("Aucun élève à afficher.")
