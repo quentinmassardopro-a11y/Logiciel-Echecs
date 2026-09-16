@@ -63,7 +63,7 @@ def initialiser_memoire_vierge():
         "dossiers_supprimes": [],
         "tshirts_donnes": {},     
         "boutique_donnees": {},
-        "interclubs": {"Adultes": {}, "Jeunes": {}}   # NOUVEAU MODULE
+        "equipes_interclubs": {} # NOUVELLE ARCHITECTURE INTERCLUBS
     }
 
 def charger_base_cloud():
@@ -72,8 +72,7 @@ def charger_base_cloud():
         sh = client.open("Base_Calanques_DB")
         ws = get_or_create_worksheet(sh, "DB_JSON")
         vals = ws.col_values(1)
-        if vals:
-            return json.loads("".join(vals))
+        if vals: return json.loads("".join(vals))
         return initialiser_memoire_vierge()
     except Exception as e:
         st.error(f"Erreur de connexion à Google Sheets (DB). Données protégées. Erreur: {e}")
@@ -801,6 +800,7 @@ else:
             with col_ad1: filtre_camp_admin = st.multiselect("Campagnes :", options=df_sans_boutique["Campagne"].unique(), default=df_sans_boutique["Campagne"].unique())
             with col_ad2: filtre_type_admin = st.multiselect("Types :", options=df_sans_boutique["Type"].unique(), default=df_sans_boutique["Type"].unique())
             
+            # --- LES FILTRES RAPIDES SONT DE RETOUR ---
             st.markdown("##### ⚡ Filtres d'Action Rapide")
             c_f1, c_f2, c_f3, c_f4 = st.columns(4)
             with c_f1: filtre_licence = st.checkbox("🚫 Sans Licence")
@@ -1128,7 +1128,7 @@ else:
 
     elif module_choisi == "🏆 Module Interclubs":
         st.subheader("🏆 Gestion des Équipes & Interclubs")
-        st.info("Ce module gère les compositions d'équipes et vérifie automatiquement les règles FFE (Écarts Elo et Brûlage).")
+        st.info("Ce module gère les bassins de joueurs par équipe, leurs compositions lors des rondes, et vérifie les règles de la FFE (Écarts Elo et Brûlage).")
         
         pdf_ready = True
         try:
@@ -1137,137 +1137,162 @@ else:
             from reportlab.lib.pagesizes import A4
         except ImportError:
             pdf_ready = False
-            st.warning("⚠️ Pour générer les PDF, vous devez installer `PyPDF2` et `reportlab` sur le serveur (via requirements.txt). Vous pouvez tout de même gérer vos équipes librement.")
+            st.warning("⚠️ L'imprimante PDF FFE est désactivée. Pour l'activer, ajoutez `PyPDF2` et `reportlab` à votre serveur.")
             
         tab_adultes, tab_jeunes, tab_brulage = st.tabs(["🏅 Interclubs Adultes", "👦👧 Interclubs Jeunes", "🔥 Suivi & Brûlage"])
         
-        liste_joueurs = sorted(df["Identité"].unique().tolist())
+        liste_totale_joueurs = sorted(df["Identité"].unique().tolist())
         
         def afficher_gestion_equipes(categorie, nb_echiquiers_defaut):
-            c1, c2 = st.columns([3, 1])
-            nv_equipe = c1.text_input(f"Nom de la nouvelle équipe ({categorie})", key=f"nv_eq_{categorie}")
-            if c2.button("➕ Ajouter l'équipe", key=f"btn_add_{categorie}") and nv_equipe:
-                if nv_equipe not in st.session_state['db']['interclubs'][categorie]:
-                    st.session_state['db']['interclubs'][categorie][nv_equipe] = {f"Ronde {i}": ["" for _ in range(nb_echiquiers_defaut)] for i in range(1, 8)}
-                    sauvegarder_base_cloud(st.session_state['db'])
-                    st.rerun()
+            if categorie not in st.session_state['db']['equipes_interclubs']: st.session_state['db']['equipes_interclubs'][categorie] = {}
+            
+            with st.expander(f"➕ Créer une nouvelle équipe {categorie}", expanded=False):
+                c1, c2 = st.columns([3, 1])
+                nv_equipe = c1.text_input("Nom de l'équipe (ex: Cassis 1 - N4)", key=f"nv_eq_{categorie}")
+                nb_b = c2.number_input("Nb d'échiquiers", min_value=2, max_value=16, value=nb_echiquiers_defaut, key=f"nb_b_{categorie}")
+                if st.button("Valider la création", key=f"btn_add_{categorie}") and nv_equipe:
+                    if nv_equipe not in st.session_state['db']['equipes_interclubs'][categorie]:
+                        st.session_state['db']['equipes_interclubs'][categorie][nv_equipe] = {
+                            "roster": [], 
+                            "compo": {f"Ronde {i}": ["" for _ in range(nb_b)] for i in range(1, 12)}
+                        }
+                        sauvegarder_base_cloud(st.session_state['db'])
+                        st.rerun()
             
             st.markdown("---")
             
-            equipes = st.session_state['db']['interclubs'].get(categorie, {})
+            equipes = st.session_state['db']['equipes_interclubs'][categorie]
             if not equipes:
-                st.info(f"Aucune équipe {categorie} créée.")
+                st.info(f"Aucune équipe {categorie} n'a été créée pour le moment.")
                 return
                 
             for nom_equipe, data in equipes.items():
                 st.markdown(f"#### 🛡️ Équipe : {nom_equipe}")
-                df_grid = pd.DataFrame(data, index=[f"Échiquier {i+1}" for i in range(len(data["Ronde 1"]))])
                 
-                col_config = {f"Ronde {i}": st.column_config.SelectboxColumn(options=[""] + liste_joueurs) for i in range(1, 8)}
-                
-                edited_grid = st.data_editor(df_grid, use_container_width=True, column_config=col_config, key=f"grid_{nom_equipe}")
-                
-                if st.button(f"💾 Sauvegarder la composition de {nom_equipe}", key=f"save_{nom_equipe}"):
-                    for col in edited_grid.columns:
-                        st.session_state['db']['interclubs'][categorie][nom_equipe][col] = edited_grid[col].fillna("").tolist()
+                # --- GESTION DU BASSIN DE JOUEURS (ROSTER) ---
+                joueurs_roster = data.get("roster", [])
+                nouveau_roster = st.multiselect(
+                    f"👥 Bassin de joueurs pour l'équipe {nom_equipe} :", 
+                    options=liste_totale_joueurs, 
+                    default=[j for j in joueurs_roster if j in liste_totale_joueurs],
+                    key=f"rost_{nom_equipe}"
+                )
+                if st.button(f"💾 Sauvegarder la liste des joueurs", key=f"sv_rost_{nom_equipe}"):
+                    st.session_state['db']['equipes_interclubs'][categorie][nom_equipe]["roster"] = nouveau_roster
                     sauvegarder_base_cloud(st.session_state['db'])
-                    st.success("Équipe sauvegardée !")
+                    st.success("Bassin de joueurs mis à jour !")
                     st.rerun()
                 
-                # VERIFICATION DES REGLES D'ELO
-                erreurs_trouvees = False
-                for col in edited_grid.columns:
-                    joueurs_ronde = edited_grid[col].fillna("").tolist()
-                    for i in range(len(joueurs_ronde) - 1):
-                        for j in range(i+1, len(joueurs_ronde)):
-                            j1 = joueurs_ronde[i]
-                            j2 = joueurs_ronde[j]
-                            if j1 and j2:
-                                elo1 = get_elo_actif(j1, df, st.session_state['db'])[0]
-                                elo2 = get_elo_actif(j2, df, st.session_state['db'])[0]
-                                if elo1 < elo2 - 100:
-                                    st.error(f"🚨 **{col}** : Inversion interdite ! **{j1}** (Échiquier {i+1}, {elo1} Elo) a plus de 100 points d'écart avec **{j2}** (Échiquier {j+1}, {elo2} Elo). Différence : {elo2 - elo1} pts.")
-                                    erreurs_trouvees = True
-                if not erreurs_trouvees:
-                    st.success("✅ Ordre des Elos respecté pour toutes les rondes.")
-                
-                # GENERATION PDF
-                if pdf_ready:
-                    with st.expander("📄 Remplir la Feuille de Match (PDF FFE)"):
-                        c_p1, c_p2, c_p3 = st.columns(3)
-                        r_choisie = c_p1.selectbox("Ronde", [f"Ronde {i}" for i in range(1, 8)], key=f"sel_r_{nom_equipe}")
-                        date_match = c_p2.text_input("Date", key=f"date_{nom_equipe}")
-                        lieu_match = c_p3.text_input("Lieu", key=f"lieu_{nom_equipe}")
+                # --- COMPOSITIONS DES RONDES ---
+                if nouveau_roster:
+                    st.markdown("**Saisie des compositions pour les rondes**")
+                    rondes_a_afficher = [f"Ronde {i}" for i in range(1, 8)]
+                    df_compo = pd.DataFrame({r: data["compo"][r] for r in rondes_a_afficher}, index=[f"Échiquier {i+1}" for i in range(len(data["compo"]["Ronde 1"]))])
+                    
+                    # Le menu déroulant ne propose QUE les joueurs du roster !
+                    col_config = {r: st.column_config.SelectboxColumn(options=[""] + nouveau_roster) for r in rondes_a_afficher}
+                    
+                    edited_compo = st.data_editor(df_compo, use_container_width=True, column_config=col_config, key=f"grid_{nom_equipe}")
+                    
+                    if st.button(f"💾 Sauvegarder les rondes de {nom_equipe}", key=f"save_r_{nom_equipe}"):
+                        for r in rondes_a_afficher:
+                            st.session_state['db']['equipes_interclubs'][categorie][nom_equipe]["compo"][r] = edited_compo[r].fillna("").tolist()
+                        sauvegarder_base_cloud(st.session_state['db'])
+                        st.success("Compositions enregistrées !")
+                        st.rerun()
+                    
+                    # --- MOTEUR DE RÈGLES FFE (ALERTE 100 POINTS) ---
+                    erreurs_trouvees = False
+                    for r in rondes_a_afficher:
+                        joueurs_r = edited_compo[r].fillna("").tolist()
+                        for i in range(len(joueurs_r) - 1):
+                            for j in range(i+1, len(joueurs_r)):
+                                j1, j2 = joueurs_r[i], joueurs_r[j]
+                                if j1 and j2:
+                                    elo1 = get_elo_actif(j1, df, st.session_state['db'])[0]
+                                    elo2 = get_elo_actif(j2, df, st.session_state['db'])[0]
+                                    if elo1 < elo2 - 100:
+                                        st.error(f"🚨 **Règle FFE violée ({r})** : **{j1}** (Éch. {i+1}, {elo1} Elo) est devant **{j2}** (Éch. {j+1}, {elo2} Elo). L'écart de {elo2 - elo1} pts est strictement interdit (>100).")
+                                        erreurs_trouvees = True
+                                        
+                    if not erreurs_trouvees and any("".join(edited_compo[r].fillna("").tolist()) != "" for r in rondes_a_afficher):
+                        st.success("✅ Ordre des Elos respecté pour toutes les rondes (Pas d'écart > 100).")
                         
-                        pdf_vierge = st.file_uploader("Importer le PDF FFE Vierge", type=['pdf'], key=f"up_{nom_equipe}")
-                        if pdf_vierge and st.button("🖨️ Générer la Feuille", key=f"gen_{nom_equipe}"):
-                            try:
-                                import PyPDF2
-                                from reportlab.pdfgen import canvas
-                                from reportlab.lib.pagesizes import A4
-                                import io
-                                
-                                packet = io.BytesIO()
-                                c = canvas.Canvas(packet, pagesize=A4)
-                                
-                                # Coordonnées FFE Approximatives (Ajustables)
-                                c.drawString(100, 770, str(date_match))
-                                c.drawString(250, 770, str(lieu_match))
-                                c.drawString(450, 770, str(r_choisie))
-                                c.drawString(100, 750, str(nom_equipe))
-                                
-                                y_start = 610
-                                y_step = 28
-                                compo = st.session_state['db']['interclubs'][categorie][nom_equipe][r_choisie]
-                                for idx, joueur in enumerate(compo):
-                                    if joueur:
-                                        c.drawString(70, y_start - (idx * y_step), str(joueur))
-                                        row_joueur = df[df['Identité'] == joueur]
-                                        if not row_joueur.empty:
-                                            code_ffe = str(row_joueur.iloc[0].get('Licence_FFE', ''))
-                                            if code_ffe != "Non croisé":
-                                                c.drawString(220, y_start - (idx * y_step), code_ffe)
-                                        elo = get_elo_actif(joueur, df, st.session_state['db'])[0]
-                                        c.drawString(280, y_start - (idx * y_step), str(elo))
-                                
-                                c.save()
-                                packet.seek(0)
-                                
-                                new_pdf = PyPDF2.PdfReader(packet)
-                                existing_pdf = PyPDF2.PdfReader(pdf_vierge)
-                                output = PyPDF2.PdfWriter()
-                                
-                                page = existing_pdf.pages[0]
-                                page.merge_page(new_pdf.pages[0])
-                                output.add_page(page)
-                                
-                                output_stream = io.BytesIO()
-                                output.write(output_stream)
-                                
-                                st.download_button("⬇️ Télécharger la feuille remplie", data=output_stream.getvalue(), file_name=f"Match_{nom_equipe}_{r_choisie}.pdf", mime="application/pdf", key=f"dl_{nom_equipe}")
-                            except Exception as e:
-                                st.error(f"Erreur de génération PDF: {e}")
+                    # --- GÉNÉRATION DU PDF FFE ---
+                    if pdf_ready:
+                        with st.expander("📄 Imprimer la Feuille de Match FFE"):
+                            c_p1, c_p2, c_p3 = st.columns(3)
+                            r_choisie = c_p1.selectbox("Sélectionnez la ronde", rondes_a_afficher, key=f"sel_r_{nom_equipe}")
+                            date_match = c_p2.text_input("Date du match", key=f"date_{nom_equipe}")
+                            lieu_match = c_p3.text_input("Lieu de rencontre", key=f"lieu_{nom_equipe}")
+                            
+                            pdf_vierge = st.file_uploader("Fichier PDF vierge fourni par la FFE", type=['pdf'], key=f"up_{nom_equipe}")
+                            if pdf_vierge and st.button("🖨️ Générer la feuille complétée", key=f"gen_{nom_equipe}"):
+                                try:
+                                    import PyPDF2
+                                    from reportlab.pdfgen import canvas
+                                    from reportlab.lib.pagesizes import A4
+                                    
+                                    packet = io.BytesIO()
+                                    c = canvas.Canvas(packet, pagesize=A4)
+                                    
+                                    # Coordonnées (Peuvent varier selon les PDF ligue, réglées sur standard 8 tables)
+                                    c.drawString(80, 770, str(date_match))
+                                    c.drawString(250, 770, str(lieu_match))
+                                    c.drawString(450, 770, str(r_choisie))
+                                    c.drawString(80, 750, str(nom_equipe))
+                                    
+                                    y_start = 615
+                                    y_step = 28
+                                    compo = st.session_state['db']['equipes_interclubs'][categorie][nom_equipe]["compo"][r_choisie]
+                                    for idx, joueur in enumerate(compo):
+                                        if joueur:
+                                            c.drawString(70, y_start - (idx * y_step), str(joueur))
+                                            row_joueur = df[df['Identité'] == joueur]
+                                            if not row_joueur.empty:
+                                                code_ffe = str(row_joueur.iloc[0].get('Licence_FFE', ''))
+                                                if code_ffe != "Non croisé":
+                                                    c.drawString(240, y_start - (idx * y_step), code_ffe)
+                                            elo = get_elo_actif(joueur, df, st.session_state['db'])[0]
+                                            c.drawString(300, y_start - (idx * y_step), str(elo))
+                                    
+                                    c.save()
+                                    packet.seek(0)
+                                    
+                                    new_pdf = PyPDF2.PdfReader(packet)
+                                    existing_pdf = PyPDF2.PdfReader(pdf_vierge)
+                                    output = PyPDF2.PdfWriter()
+                                    
+                                    page = existing_pdf.pages[0]
+                                    page.merge_page(new_pdf.pages[0])
+                                    output.add_page(page)
+                                    
+                                    output_stream = io.BytesIO()
+                                    output.write(output_stream)
+                                    
+                                    st.download_button("⬇️ Télécharger le PDF rempli", data=output_stream.getvalue(), file_name=f"Match_{nom_equipe}_{r_choisie}.pdf", mime="application/pdf", key=f"dl_{nom_equipe}")
+                                except Exception as e:
+                                    st.error(f"Impossible de dessiner sur le PDF : {e}")
+                else:
+                    st.warning("👈 Ajoutez des joueurs dans le bassin ci-dessus pour pouvoir remplir les rondes.")
                 st.markdown("---")
 
-        with tab_adultes:
-            afficher_gestion_equipes("Adultes", 8)
-            
-        with tab_jeunes:
-            afficher_gestion_equipes("Jeunes", 5)
+        with tab_adultes: afficher_gestion_equipes("Adultes", 8)
+        with tab_jeunes: afficher_gestion_equipes("Jeunes", 4)
             
         with tab_brulage:
-            st.markdown("### 🔥 Suivi des Brûlages")
-            st.write("Règle : Un joueur ayant joué 4 fois dans une équipe est définitivement 'brûlé' et ne peut plus redescendre de division.")
+            st.markdown("### 🔥 Suivi des Brûlages FFE")
+            st.info("Un joueur ayant participé à 4 matchs dans une équipe est considéré comme **BRÛLÉ**. Il lui est strictement interdit de redescendre jouer dans une division inférieure[cite: 1, 2].")
             
-            joueurs_stats = {j: {} for j in liste_joueurs}
-            for cat, equipes in st.session_state['db']['interclubs'].items():
-                for nom_equipe, rondes in equipes.items():
-                    for r_nom, compo in rondes.items():
+            joueurs_stats = {}
+            for cat, equipes in st.session_state['db'].get('equipes_interclubs', {}).items():
+                for nom_eq, data in equipes.items():
+                    for r_nom, compo in data.get("compo", {}).items():
                         for j in compo:
                             if j:
-                                if nom_equipe not in joueurs_stats[j]:
-                                    joueurs_stats[j][nom_equipe] = 0
-                                joueurs_stats[j][nom_equipe] += 1
+                                if j not in joueurs_stats: joueurs_stats[j] = {}
+                                if nom_eq not in joueurs_stats[j]: joueurs_stats[j][nom_eq] = 0
+                                joueurs_stats[j][nom_eq] += 1
                                 
             data_brulage = []
             for j, stats in joueurs_stats.items():
@@ -1276,14 +1301,14 @@ else:
                     est_brule = any(c >= 4 for c in stats.values())
                     data_brulage.append({
                         "Joueur": j,
-                        "Statut": "🔥 BRÛLÉ (>= 4 matchs)" if est_brule else "✅ OK",
-                        "Détails des matchs": details
+                        "Statut": "🔥 BRÛLÉ (Ne peut plus redescendre)" if est_brule else "✅ OK",
+                        "Détails des sélections": details
                     })
             if data_brulage:
-                df_brulage = pd.DataFrame(data_brulage).sort_values(by="Statut", ascending=False)
+                df_brulage = pd.DataFrame(data_brulage).sort_values(by="Statut", ascending=False).reset_index(drop=True)
                 st.dataframe(df_brulage, use_container_width=True)
             else:
-                st.info("Aucun match joué pour le moment dans les équipes.")
+                st.info("Aucun match n'a été saisi pour le moment.")
 
     elif module_choisi == "♟️ Module Entraîneur":
         st.subheader("♟️ Espace Entraîneur")
