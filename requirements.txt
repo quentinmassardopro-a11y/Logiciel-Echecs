@@ -5,3 +5,5 @@ gspread>=6.0.0
 google-auth
 openpyxl
 xlsxwriter
+PyPDF2
+reportlab
