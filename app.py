@@ -1205,10 +1205,9 @@ else:
                         st.rerun()
                     else:
                         st.info("Aucun changement détecté.")
-
-    elif module_choisi == "🏆 Module Interclubs":
+elif module_choisi == "🏆 Module Interclubs":
         st.subheader("🏆 Gestion des Équipes & Interclubs")
-        st.info("La FFE bloquant parfois les serveurs automatisés, les listes de joueurs sont générées directement depuis votre base locale recroisée (Licences A).")
+        st.info("Interface Capitaine : Saisissez vos compositions, vérifiez les règles FFE et générez vos feuilles de match.")
         
         try:
             import io
@@ -1225,7 +1224,7 @@ else:
         except ImportError:
             pdf_ready = False
             
-        # 1. RÉCUPÉRATION DES JOUEURS DEPUIS LA BASE LOCALE (GARANTI SANS BLOCAGE)
+        # 1. RÉCUPÉRATION DES JOUEURS (LICENCE A)
         df_licence_a = pd.DataFrame()
         if 'Licence_FFE' in df.columns:
             df_licence_a = df[df['Licence_FFE'] == 'A']
@@ -1233,28 +1232,26 @@ else:
         if not df_licence_a.empty:
             liste_totale_joueurs = df_licence_a['Identité'].tolist()
             dict_elo_global = dict(zip(df_licence_a['Identité'], df_licence_a['Elo_FFE'].fillna(1000).astype(int)))
-            st.success(f"✅ {len(liste_totale_joueurs)} joueurs avec Licence A détectés et prêts pour les compositions.")
         else:
             liste_totale_joueurs = sorted(df["Identité"].unique().tolist())
             dict_elo_global = {j: get_elo_actif(j, df, st.session_state['db'])[0] for j in liste_totale_joueurs}
-            st.warning("⚠️ Aucun joueur avec Licence A détecté en base. Avez-vous importé et recroisé le fichier CSV FFE dans le menu de gauche ? En attendant, tous les élèves sont affichés.")
 
         tab_adultes, tab_jeunes, tab_brulage = st.tabs(["🏅 Interclubs Adultes", "👦👧 Interclubs Jeunes", "🔥 Suivi & Brûlage"])
         
         def afficher_gestion_equipes(categorie):
-            # Formulaire manuel bien visible !
+            # Formulaire de création
             with st.expander(f"➕ Créer une nouvelle équipe {categorie}", expanded=False):
                 with st.form(f"form_{categorie}"):
                     c1, c2, c3 = st.columns([2, 1, 2])
                     nv_nom = c1.text_input("Nom (ex: Cassis 1)")
-                    nv_div = c2.text_input("Division (ex: N4)")
-                    nv_lien = c3.text_input("Lien FFE (Optionnel, ex: Equipe.aspx?EquipeRef=...)")
+                    nv_div = c2.text_input("Division (ex: N3 ou N4)")
+                    nv_lien = c3.text_input("Lien FFE (Optionnel)")
                     
                     if st.form_submit_button("Ajouter l'équipe"):
                         if nv_nom:
                             if nv_nom not in st.session_state['db']['equipes_interclubs']:
                                 st.session_state['db']['equipes_interclubs'][nv_nom] = {
-                                    "Categorie": categorie, "Division": nv_div, "Lien": nv_lien, "roster": [], "compo": {}
+                                    "Categorie": categorie, "Division": nv_div, "Lien": nv_lien, "roster": [], "compo": {}, "couleurs": {}
                                 }
                                 sauvegarder_base_cloud(st.session_state['db'])
                                 st.rerun()
@@ -1268,62 +1265,61 @@ else:
                 
             st.markdown("---")
             liste_noms_equipes = sorted(list(equipes_cat.keys()))
-            equipe_choisie = st.selectbox(f"🎯 Sélectionnez une équipe {categorie} à gérer :", [""] + liste_noms_equipes)
+            c_eq1, c_eq2 = st.columns([3, 1])
+            equipe_choisie = c_eq1.selectbox(f"🎯 Sélectionnez l'équipe à gérer :", [""] + liste_noms_equipes)
+            
+            # Bouton de suppression d'équipe
+            if equipe_choisie:
+                if c_eq2.button("🗑️ Supprimer cette équipe"):
+                    del st.session_state['db']['equipes_interclubs'][equipe_choisie]
+                    sauvegarder_base_cloud(st.session_state['db'])
+                    st.rerun()
 
             if equipe_choisie:
                 eq_data = equipes_db[equipe_choisie]
                 st.markdown(f"""<div class="match-card">
-                            <h4>🛡️ {equipe_choisie} <span style='font-size:14px; color:gray;'>({eq_data.get('Division', '')})</span></h4>
+                            <h3 style="margin-bottom:0;">🛡️ {equipe_choisie}</h3>
+                            <span style='font-size:16px; color:#FF8C00; font-weight:bold;'>{eq_data.get('Division', '')}</span>
                             </div>""", unsafe_allow_html=True)
                 
                 lien_equipe = eq_data.get('Lien', '')
                 url_equipe = lien_equipe if lien_equipe.startswith('http') else f"https://www.echecs.asso.fr/{lien_equipe}" if lien_equipe else ""
                 
-                # --- CALENDRIER ET CLASSEMENT (Tentative) ---
+                # --- CALENDRIER ET CLASSEMENT ---
                 df_classement = pd.DataFrame()
                 df_calendrier = pd.DataFrame()
                 
                 if html_ready and url_equipe and "echecs.asso.fr" in url_equipe:
-                    with st.spinner("Tentative de connexion à la FFE pour le calendrier..."):
-                        try:
-                            # Déguisement total
-                            headers = {
-                                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                                "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
-                                "Referer": "https://www.echecs.asso.fr/"
-                            }
-                            r_html = requests.get(url_equipe, headers=headers, timeout=5)
-                            r_html.encoding = 'utf-8'
-                            dfs = pd.read_html(io.StringIO(r_html.text))
-                            for t in dfs:
-                                cols = [str(c).lower() for c in t.columns]
-                                if any('pl' in c for c in cols) and any('pts' in c for c in cols): df_classement = t
-                                if any('date' in c for c in cols) and any('score' in c for c in cols): df_calendrier = t
-                        except Exception: pass
+                    try:
+                        headers = {"User-Agent": "Mozilla/5.0"}
+                        r_html = requests.get(url_equipe, headers=headers, timeout=5).text
+                        dfs = pd.read_html(io.StringIO(r_html))
+                        for t in dfs:
+                            cols = [str(c).lower() for c in t.columns]
+                            if any('pl' in c for c in cols) and any('pts' in c for c in cols): df_classement = t
+                            if any('date' in c for c in cols) and any('score' in c for c in cols): df_calendrier = t
+                    except Exception: pass
 
                 if not df_classement.empty or not df_calendrier.empty:
                     c1, c2 = st.columns([1, 1.5])
                     with c1:
-                        st.markdown("#### 🏆 Classement")
-                        if not df_classement.empty: st.dataframe(df_classement, hide_index=True)
+                        with st.expander("🏆 Voir le Classement FFE"):
+                            if not df_classement.empty: st.dataframe(df_classement, hide_index=True)
                     with c2:
-                        st.markdown("#### 📅 Calendrier & Résultats")
-                        if not df_calendrier.empty: st.dataframe(df_calendrier, hide_index=True)
-                else:
-                    st.info("🌐 Calendrier FFE indisponible (Blocage serveur ou lien absent). Vous pouvez tout de même saisir vos compos ci-dessous pour chaque ronde.")
+                        with st.expander("📅 Voir le Calendrier FFE"):
+                            if not df_calendrier.empty: st.dataframe(df_calendrier, hide_index=True)
 
                 st.markdown("---")
 
-                # --- BASSIN DE JOUEURS ---
+                # --- 1. BASSIN DE JOUEURS ---
                 joueurs_roster = eq_data.get("roster", [])
                 nouveau_roster = st.multiselect(
-                    f"👥 1. Construisez le bassin de joueurs pour l'équipe {equipe_choisie} :", 
+                    f"👥 1. Bassin de joueurs (Roster pour la saison) :", 
                     options=liste_totale_joueurs, 
                     default=[j for j in joueurs_roster if j in liste_totale_joueurs],
                     key=f"rost_{equipe_choisie}"
                 )
-                if st.button(f"💾 Sauvegarder le bassin de {equipe_choisie}", key=f"sv_rost_{equipe_choisie}"):
+                if st.button(f"💾 Sauvegarder le bassin", key=f"sv_rost_{equipe_choisie}"):
                     st.session_state['db']['equipes_interclubs'][equipe_choisie]["roster"] = nouveau_roster
                     sauvegarder_base_cloud(st.session_state['db'])
                     st.success("Bassin mis à jour !")
@@ -1331,63 +1327,187 @@ else:
                 
                 if nouveau_roster:
                     st.markdown("---")
-                    st.markdown("### ♟️ 2. Composition de la Ronde")
+                    st.markdown(f"### ⚔️ 2. Préparation de la Feuille de Match")
                     
-                    rondes_dispos = []
-                    idx_prochaine = 0
+                    rondes_dispos = [f"Ronde {i}" for i in range(1, 12)]
                     
-                    if not df_calendrier.empty:
-                        col_ronde = next((c for c in df_calendrier.columns if 'ronde' in str(c).lower() or 'match' in str(c).lower()), None)
-                        col_score = next((c for c in df_calendrier.columns if 'score' in str(c).lower()), None)
-                        if col_ronde:
-                            # On récupère toutes les rondes trouvées pour cette équipe (approximativement)
-                            # Parfois le nom de l'équipe est légèrement différent, on cherche large.
-                            rondes_dispos = df_calendrier[col_ronde].astype(str).tolist()
-                            for i, r in df_calendrier.iterrows():
-                                sc = str(r.get(col_score, "")).strip()
-                                if sc in ["", "nan", "None"] or " - " not in sc or "X" in sc:
-                                    idx_prochaine = i
-                                    break
-
-                    if not rondes_dispos: rondes_dispos = [f"Ronde {i}" for i in range(1, 12)]
-                    ronde_choisie = st.selectbox("Sélectionnez la ronde à préparer :", rondes_dispos, index=idx_prochaine if idx_prochaine < len(rondes_dispos) else 0)
-
-                    date_match = ""
-                    if not df_calendrier.empty and 'Date' in df_calendrier.columns:
-                        try: date_match = df_calendrier.iloc[idx_prochaine]['Date'] if idx_prochaine < len(df_calendrier) else ""
-                        except: pass
+                    c_r1, c_r2 = st.columns([1, 2])
+                    ronde_choisie = c_r1.selectbox("Sélectionnez la ronde :", rondes_dispos, key=f"sel_r_{equipe_choisie}")
+                    
+                    # --- CHOIX DE LA COULEUR ---
+                    if "couleurs" not in st.session_state['db']['equipes_interclubs'][equipe_choisie]:
+                        st.session_state['db']['equipes_interclubs'][equipe_choisie]["couleurs"] = {}
+                        
+                    couleur_saved = st.session_state['db']['equipes_interclubs'][equipe_choisie]["couleurs"].get(ronde_choisie, "⚪ Blancs")
+                    
+                    couleur_ech1 = c_r2.radio(
+                        "Couleur de notre équipe au 1er échiquier :", 
+                        ["⚪ Blancs", "⚫ Noirs"], 
+                        index=0 if couleur_saved == "⚪ Blancs" else 1,
+                        horizontal=True,
+                        key=f"coul_{equipe_choisie}"
+                    )
 
                     # --- SÉLECTION DES JOUEURS ---
                     joueurs_indispos = []
                     for eq, d in equipes_db.items():
-Pour gérer dynamiquement l'ajout et la suppression d'équipes (ou de compositions) dans ton interface, la meilleure approche est d'utiliser le `session_state` de Streamlit. 
+                        if eq != equipe_choisie:
+                            for j in d.get("compo", {}).get(ronde_choisie, []):
+                                if j: joueurs_indispos.append(j)
 
-Voici un exemple de code complet qui intègre ton message d'avertissement et crée une interface où tu peux saisir les compos tout en ayant la possibilité de supprimer une équipe à la volée.
+                    options_joueurs = [""]
+                    for nom in nouveau_roster:
+                        if nom not in joueurs_indispos:
+                            options_joueurs.append(f"{nom} ({dict_elo_global.get(nom, 1000)})")
 
-```python
-import streamlit as st
+                    st.caption(f"Les joueurs assignés à d'autres équipes pour la {ronde_choisie} sont automatiquement masqués.")
 
-# Initialisation des équipes en session_state (si vide)
-if 'equipes' not in st.session_state:
-    st.session_state.equipes = ["Équipe 1", "Équipe 2"]
+                    # Nombre d'échiquiers dynamiques selon division
+                    nb_ech = 8 if categorie == "Adultes" else 5
+                    
+                    if "compo" not in st.session_state['db']['equipes_interclubs'][equipe_choisie]: 
+                        st.session_state['db']['equipes_interclubs'][equipe_choisie]["compo"] = {}
+                    
+                    compo_actuelle = st.session_state['db']['equipes_interclubs'][equipe_choisie]["compo"].get(ronde_choisie, [""]*nb_ech)
+                    while len(compo_actuelle) < nb_ech: compo_actuelle.append("")
 
-# Fonction de callback pour supprimer l'équipe de la liste
-def supprimer_equipe(index):
-    st.session_state.equipes.pop(index)
+                    nouvelle_compo = []
+                    erreurs_100_pts = []
+                    
+                    # Interface esthétique pour la composition
+                    st.markdown("""<div style='background-color:#f8f9fa; padding:20px; border-radius:10px; border:1px solid #e0e0e0;'>""", unsafe_allow_html=True)
+                    
+                    for i in range(nb_ech):
+                        val_saved = compo_actuelle[i]
+                        val_formatted = f"{val_saved} ({dict_elo_global.get(val_saved, '??')})" if val_saved else ""
+                        if val_formatted not in options_joueurs and val_saved != "": options_joueurs.append(val_formatted)
+                        
+                        # Déduction de la couleur de cet échiquier
+                        if couleur_ech1 == "⚪ Blancs":
+                            icon_couleur = "⚪" if i % 2 == 0 else "⚫"
+                        else:
+                            icon_couleur = "⚫" if i % 2 == 0 else "⚪"
+                            
+                        idx_defaut = options_joueurs.index(val_formatted) if val_formatted in options_joueurs else 0
+                        choix = st.selectbox(f"Échiquier {i+1} {icon_couleur}", options_joueurs, index=idx_defaut, key=f"ech_{i}_{equipe_choisie}")
+                        nouvelle_compo.append(choix.split(" (")[0] if choix else "")
+                        
+                    st.markdown("</div>", unsafe_allow_html=True)
 
-# Message d'erreur / info pour le calendrier FFE
-st.warning("Calendrier FFE indisponible (Blocage serveur ou lien absent). Vous pouvez tout de même saisir vos compos ci-dessous.")
+                    # Garde fou 101 pts
+                    for i in range(len(nouvelle_compo) - 1):
+                        for j in range(i+1, len(nouvelle_compo)):
+                            j1, j2 = nouvelle_compo[i], nouvelle_compo[j]
+                            if j1 and j2:
+                                elo1, elo2 = dict_elo_global.get(j1, 1000), dict_elo_global.get(j2, 1000)
+                                if elo1 < elo2 - 100:
+                                    erreurs_100_pts.append(f"🚨 **Échiquier {i+1} ({j1}, {elo1})** est placé au-dessus de **Échiquier {j+1} ({j2}, {elo2})**. L'écart de {elo2 - elo1} pts est strictement interdit (>100).")
+                    
+                    st.write("")
+                    if erreurs_100_pts:
+                        for err in erreurs_100_pts: st.error(err)
+                    else: 
+                        if any(nouvelle_compo): st.success("✅ Règle des Elos respectée.")
 
-st.subheader("Saisie des compositions")
+                    if st.button("💾 Enregistrer la Composition", use_container_width=True):
+                        st.session_state['db']['equipes_interclubs'][equipe_choisie]["compo"][ronde_choisie] = nouvelle_compo
+                        st.session_state['db']['equipes_interclubs'][equipe_choisie]["couleurs"][ronde_choisie] = couleur_ech1
+                        sauvegarder_base_cloud(st.session_state['db'])
+                        st.success(f"Composition et couleurs enregistrées pour la {ronde_choisie} !")
+                        st.rerun()
 
-# Affichage de la liste actuelle
-if not st.session_state.equipes:
-    st.info("Aucune équipe à afficher.")
-else:
-    # On boucle sur chaque équipe pour afficher le champ de saisie et le bouton de suppression
-    for i, equipe in enumerate(st.session_state.equipes):
-        col_saisie, col_suppression = st.columns([4, 1], vertical_alignment="bottom")
-        
-        with col_saisie:
-            # Zone de texte pour la compo (tu peux remplacer ça par plusieurs champs par échiquier)
-            st.text_input(f"Composition - {equipe}", key=f"compo_{equ
+                    # --- 3. GÉNÉRATION DU PDF FFE INTELLIGENT ---
+                    if pdf_ready:
+                        st.markdown("---")
+                        with st.expander("📄 3. Générer la Feuille de Match (PDF)"):
+                            st.write("Le logiciel écrira les noms automatiquement dans la bonne colonne selon que vous avez les Blancs ou les Noirs au 1er échiquier.")
+                            
+                            pdf_vierge = st.file_uploader("Importer la feuille FFE vierge (PDF)", type=['pdf'], key=f"up_{equipe_choisie}")
+                            if pdf_vierge and st.button("🖨️ Télécharger le PDF complété", key=f"gen_{equipe_choisie}"):
+                                try:
+                                    import PyPDF2
+                                    from reportlab.pdfgen import canvas
+                                    from reportlab.lib.pagesizes import A4
+                                    
+                                    packet = io.BytesIO()
+                                    c = canvas.Canvas(packet, pagesize=A4)
+                                    
+                                    # Écriture des infos de match
+                                    date_match = datetime.now().strftime("%d/%m/%Y") # Date du jour par défaut
+                                    c.drawString(100, 770, str(date_match))
+                                    c.drawString(450, 770, str(ronde_choisie))
+                                    
+                                    # --- LOGIQUE GAUCHE / DROITE ---
+                                    # Si Blancs au 1er échiquier = Colonne de Gauche
+                                    # Si Noirs au 1er échiquier = Colonne de Droite
+                                    x_offset = 0 if couleur_ech1 == "⚪ Blancs" else 280
+                                    
+                                    # Nom de l'équipe
+                                    c.drawString(80 + x_offset, 750, str(equipe_choisie))
+                                    
+                                    # Noms, Licences, Elos
+                                    y_start = 615
+                                    y_step = 28
+                                    compo = st.session_state['db']['equipes_interclubs'][equipe_choisie]["compo"].get(ronde_choisie, [])
+                                    for idx, joueur in enumerate(compo):
+                                        if joueur:
+                                            # Nom
+                                            c.drawString(70 + x_offset, y_start - (idx * y_step), str(joueur))
+                                            # Licence FFE
+                                            row_joueur = df[df['Identité'] == joueur]
+                                            if not row_joueur.empty:
+                                                code_ffe = str(row_joueur.iloc[0].get('Licence_FFE', ''))
+                                                if code_ffe != "Non croisé": 
+                                                    c.drawString(240 + x_offset, y_start - (idx * y_step), code_ffe)
+                                            # Elo
+                                            c.drawString(300 + x_offset, y_start - (idx * y_step), str(dict_elo_global.get(joueur, "")))
+                                    
+                                    c.save()
+                                    packet.seek(0)
+                                    
+                                    new_pdf = PyPDF2.PdfReader(packet)
+                                    existing_pdf = PyPDF2.PdfReader(pdf_vierge)
+                                    output = PyPDF2.PdfWriter()
+                                    
+                                    page = existing_pdf.pages[0]
+                                    page.merge_page(new_pdf.pages[0])
+                                    output.add_page(page)
+                                    
+                                    output_stream = io.BytesIO()
+                                    output.write(output_stream)
+                                    
+                                    st.download_button("⬇️ Télécharger le PDF de match", data=output_stream.getvalue(), file_name=f"Feuille_{equipe_choisie}_{ronde_choisie}.pdf", mime="application/pdf")
+                                except Exception as e:
+                                    st.error(f"Impossible de dessiner sur le PDF : {e}")
+
+        with tab_adultes: afficher_gestion_equipes("Adultes")
+        with tab_jeunes: afficher_gestion_equipes("Jeunes")
+            
+        with tab_brulage:
+            st.markdown("### 🔥 Suivi des Brûlages FFE")
+            st.info("Un joueur ayant participé à 4 matchs dans une équipe ou division est considéré comme **BRÛLÉ**. Il lui est strictement interdit de redescendre.")
+            
+            joueurs_stats = {}
+            for nom_eq, data in st.session_state['db'].get('equipes_interclubs', {}).items():
+                for r_nom, compo in data.get("compo", {}).items():
+                    for j in compo:
+                        if j:
+                            if j not in joueurs_stats: joueurs_stats[j] = {}
+                            if nom_eq not in joueurs_stats[j]: joueurs_stats[j][nom_eq] = 0
+                            joueurs_stats[j][nom_eq] += 1
+                                
+            data_brulage = []
+            for j, stats in joueurs_stats.items():
+                if stats:
+                    details = " | ".join([f"{eq}: {c} matchs" for eq, c in stats.items()])
+                    est_brule = any(c >= 4 for c in stats.values())
+                    data_brulage.append({
+                        "Joueur": j,
+                        "Statut": "🔥 BRÛLÉ (Ne peut plus redescendre)" if est_brule else "✅ OK",
+                        "Détails des sélections": details
+                    })
+            if data_brulage:
+                df_brulage = pd.DataFrame(data_brulage).sort_values(by="Statut", ascending=False).reset_index(drop=True)
+                st.dataframe(df_brulage, use_container_width=True)
+            else:
+                st.info("Aucun match n'a été saisi pour le moment.")
