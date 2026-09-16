@@ -65,7 +65,8 @@ def initialiser_memoire_vierge():
         "dossiers_supprimes": [],
         "tshirts_donnes": {},     
         "boutique_donnees": {},
-        "equipes_interclubs": {} # NOUVELLE ARCHITECTURE INTERCLUBS
+        "equipes_interclubs": {},
+        "ffe_joueurs": []
     }
 
 def charger_base_cloud():
@@ -155,7 +156,121 @@ def generer_vcard(contact):
     vcard += "END:VCARD"
     return vcard.encode('utf-8')
 
-# --- CHARGEMENT ---
+# --- MOTEUR DE SCRAPING FFE ULTRA-ROBUSTE ---
+@st.cache_data(ttl=3600)
+def fetch_ffe_club_data(club_ref="2705"):
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
+    joueurs_a = []
+    equipes = []
+    
+    # 1. Aspirer les Joueurs (Filtre Licence A)
+    try:
+        url_j = f"https://www.echecs.asso.fr/ListeJoueurs.aspx?Action=JOUEURCLUBREF&JrTri=Elo&ClubRef={club_ref}"
+        r_j = requests.get(url_j, headers=headers, timeout=15)
+        
+        # Double Sécurité : Pandas + Regex
+        try:
+            dfs = pd.read_html(io.StringIO(r_j.text))
+            for df_p in dfs:
+                if 'Nom Prénom' in df_p.columns:
+                    lic_col = [c for c in df_p.columns if 'Lic' in c]
+                    df_a = df_p[df_p[lic_col[0]] == 'A'] if lic_col else df_p
+                    
+                    for _, row in df_a.iterrows():
+                        nom = str(row.get('Nom Prénom', '')).strip()
+                        elo_val = 1000
+                        if 'Elo' in df_p.columns:
+                            e_str = str(row['Elo']).replace('F','').replace('N','').strip()
+                            if e_str.isdigit(): elo_val = int(e_str)
+                        elif 'Rapide' in df_p.columns:
+                            e_str = str(row['Rapide']).replace('F','').replace('N','').strip()
+                            if e_str.isdigit(): elo_val = int(e_str)
+                        if nom and nom != "nan": joueurs_a.append({"Nom": nom, "Elo": elo_val})
+                    break
+        except Exception:
+            # Fallback Regex si Pandas échoue
+            lignes = re.findall(r'<tr[^>]*>(.*?)</tr>', r_j.text, re.IGNORECASE | re.DOTALL)
+            for ligne in lignes:
+                cols = re.findall(r'<td[^>]*>(.*?)</td>', ligne, re.IGNORECASE | re.DOTALL)
+                if len(cols) >= 8:
+                    nom_prenom = re.sub(r'<[^>]+>', '', cols[1]).replace("&nbsp;", " ").strip()
+                    elo_str = re.sub(r'<[^>]+>', '', cols[5]).replace("F", "").replace("N", "").strip()
+                    licence = re.sub(r'<[^>]+>', '', cols[-1]).strip().upper()
+                    if licence not in ['A', 'B'] and len(cols) >= 9:
+                        licence = re.sub(r'<[^>]+>', '', cols[-2]).strip().upper()
+                    
+                    if licence == "A" and nom_prenom and nom_prenom != "Nom Prénom":
+                        try: elo = int(elo_str)
+                        except: elo = 1000
+                        joueurs_a.append({"Nom": nom_prenom, "Elo": elo})
+    except Exception as e:
+        pass
+
+    # 2. Aspirer les Équipes du Club
+    try:
+        url_eq = f"https://www.echecs.asso.fr/ListeEquipes.aspx?ClubRef={club_ref}"
+        r_eq = requests.get(url_eq, headers=headers, timeout=15)
+        lignes_eq = re.findall(r'<tr[^>]*>(.*?)</tr>', r_eq.text, re.IGNORECASE | re.DOTALL)
+        
+        for ligne in lignes_eq:
+            if "Equipe.aspx" in ligne:
+                cols = re.findall(r'<td[^>]*>(.*?)</td>', ligne, re.IGNORECASE | re.DOTALL)
+                if len(cols) >= 2:
+                    lien_match = re.search(r'href=["\']?(Equipe\.aspx\?EquipeRef=\d+)["\']?', cols[0], re.IGNORECASE)
+                    lien_brut = lien_match.group(1) if lien_match else ""
+                    
+                    nom_eq = re.sub(r'<[^>]+>', '', cols[0]).replace("&nbsp;", " ").strip()
+                    div = re.sub(r'<[^>]+>', '', cols[1]).replace("&nbsp;", " ").strip()
+                    
+                    if nom_eq and lien_brut:
+                        cat = "Jeunes" if "jeune" in nom_eq.lower() or "jeune" in div.lower() or " j " in nom_eq.lower() else "Adultes"
+                        equipes.append({
+                            "Nom": nom_eq,
+                            "Division": div,
+                            "Lien": f"https://www.echecs.asso.fr/{lien_brut}" if not lien_brut.startswith("http") else lien_brut,
+                            "Categorie": cat
+                        })
+    except Exception as e:
+        pass
+
+    joueurs_uniques = {j["Nom"]: j for j in joueurs_a}.values()
+    joueurs_finaux = sorted(list(joueurs_uniques), key=lambda x: x["Elo"], reverse=True)
+    return joueurs_finaux, equipes
+
+@st.cache_data(ttl=3600)
+def fetch_ffe_team_calendar(team_url):
+    if not team_url: return []
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    rondes = []
+    try:
+        r = requests.get(team_url, headers=headers, timeout=15)
+        lignes = re.findall(r'<tr[^>]*>(.*?)</tr>', r.text, re.IGNORECASE | re.DOTALL)
+        for ligne in lignes:
+            cols = re.findall(r'<td[^>]*>(.*?)</td>', ligne, re.IGNORECASE | re.DOTALL)
+            if len(cols) >= 5:
+                date = re.sub(r'<[^>]+>', '', cols[0]).strip()
+                eq1 = re.sub(r'<[^>]+>', '', cols[1]).strip()
+                score = re.sub(r'<[^>]+>', '', cols[2]).strip()
+                eq2 = re.sub(r'<[^>]+>', '', cols[3]).strip()
+                ronde = re.sub(r'<[^>]+>', '', cols[4]).strip()
+                
+                if "Ronde" in ronde:
+                    if "cassis" in eq1.lower() or "calanques" in eq1.lower() or "aed" in eq1.lower():
+                        adv, lieu = eq2, "Domicile"
+                    else:
+                        adv, lieu = eq1, "Extérieur"
+                        
+                    rondes.append({
+                        "Ronde": ronde,
+                        "Date": date,
+                        "Adversaire": adv,
+                        "Lieu": lieu,
+                        "Score": score
+                    })
+    except: pass
+    return rondes
+
+# --- CHARGEMENT INITIALISATION ---
 if 'db' not in st.session_state: 
     with st.spinner("Connexion sécurisée au Cloud Google..."):
         db_loaded = charger_base_cloud()
@@ -524,6 +639,7 @@ if st.sidebar.button("⬇️ Lancer la Synchronisation HelloAsso"):
                     ("Don Bosco", "Event", "club-d-echecs-don-bosco"),
                     ("Boutique", "Shop", "objet-club")
                 ]
+                
                 all_data = []
                 for nom, type_camp, slug in campagnes:
                     all_data.extend(fetch_campaign_items(token, type_camp, slug, nom))
@@ -917,41 +1033,6 @@ else:
                     st.success("✅ Transaction supprimée et mise sur Liste Noire avec succès !")
                     st.rerun()
 
-            st.markdown("---")
-            st.markdown("#### 📥 Exports & Licences FFE")
-            col_ex1, col_ex2, col_ex3 = st.columns(3)
-            
-            nom_fich_admin = f"Administration_Club_{date_jour.replace('/', '-')}"
-            csv_data_admin = df_display[colonnes_finales].to_csv(index=True).encode('utf-8')
-            col_ex1.download_button("📄 Export Tableau (CSV)", data=csv_data_admin, file_name=f"{nom_fich_admin}.csv", mime="text/csv")
-            
-            try:
-                buffer_admin = io.BytesIO()
-                with pd.ExcelWriter(buffer_admin, engine='xlsxwriter') as writer: df_display[colonnes_finales].to_excel(writer, index=True, sheet_name='Base')
-                col_ex2.download_button("📊 Export Tableau (Excel)", data=buffer_admin.getvalue(), file_name=f"{nom_fich_admin}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-            except:
-                try:
-                    buffer_admin = io.BytesIO()
-                    with pd.ExcelWriter(buffer_admin, engine='openpyxl') as writer: df_display[colonnes_finales].to_excel(writer, index=True, sheet_name='Base')
-                    col_ex2.download_button("📊 Export Tableau (Excel)", data=buffer_admin.getvalue(), file_name=f"{nom_fich_admin}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-                except: pass
-
-            df_ffe_export = pd.DataFrame()
-            df_ffe_export['FFE Identifiant'] = ""
-            df_ffe_export['Nom'], df_ffe_export['Prénom'] = df_admin['Nom'], df_admin['Prénom']
-            df_ffe_export['Date de Naissance (AAAA-MM-JJ)'] = df_admin['Date de naissance']
-            df_ffe_export['Sexe (M ou F)'] = df_admin['Prénom'].apply(estimer_sexe)
-            df_ffe_export['Email'] = df_admin['EMail']
-            df_ffe_export['Pays (ISO 3, FRA pour France)'] = "FRA"
-            
-            col_qs = 'e confirme avoir renseigné le questionnaire de santé "Sport" (mineurs) https://www.echecs.asso.fr/Actus/14098/questionnaire_mineur.pdf'
-            if col_qs in df_admin.columns: df_ffe_export['Attestation Médicale (Oui/Non)'] = df_admin[col_qs].apply(lambda x: "Oui" if str(x).lower() in ['true', 'oui', 'yes', 'vrai', 'on', '1'] else "Non")
-            else: df_ffe_export['Attestation Médicale (Oui/Non)'] = "Non"
-            df_ffe_export['Licence (A ou B)'] = "B" 
-            
-            csv_ffe = df_ffe_export.to_csv(index=False, sep=";").encode('utf-8-sig')
-            col_ex3.download_button("♟️ Fichier Prise de Licence FFE", data=csv_ffe, file_name=f"import_ffe_{date_jour.replace('/', '-')}.csv", mime="text/csv")
-            
         with tab_ecoles:
             st.markdown("### 🏫 Pilotage des Établissements Scolaires")
             ecoles_dispos = [c for c in df["Campagne"].unique() if "club" not in c.lower() and "adhésion" not in c.lower() and "adhesion" not in c.lower() and "boutique" not in c.lower()]
@@ -1107,84 +1188,77 @@ else:
         # --- BOUTON MAGIQUE D'ASPIRATION FFE ---
         if st.button("🔄 Actualiser les Équipes & Joueurs (FFE)"):
             with st.spinner("Aspiration du serveur FFE en cours..."):
-                club_ref = "2705"
-                joueurs_a = []
-                equipes_trouvees = []
+                ffe_joueurs, ffe_equipes = fetch_ffe_club_data("2705")
+                st.session_state['db']['ffe_joueurs'] = ffe_joueurs
                 
-                # 1. Scrape Joueurs (Licence A)
-                try:
-                    url_j = f"https://www.echecs.asso.fr/ListeJoueurs.aspx?Action=JOUEURCLUBREF&JrTri=Elo&ClubRef={club_ref}"
-                    r_j = requests.get(url_j, timeout=15)
-                    lignes_j = re.findall(r'<tr[^>]*>(.*?)</tr>', r_j.text, re.IGNORECASE | re.DOTALL)
-                    for l in lignes_j:
-                        cols = re.findall(r'<td[^>]*>(.*?)</td>', l, re.IGNORECASE | re.DOTALL)
-                        if len(cols) >= 8:
-                            nom = re.sub(r'<[^>]+>', '', cols[1]).replace("&nbsp;", " ").strip()
-                            elo_str = re.sub(r'<[^>]+>', '', cols[5]).replace("F", "").replace("N", "").strip()
-                            lic = re.sub(r'<[^>]+>', '', cols[7]).strip().upper()
-                            if lic == "A" and nom and nom != "Nom Prénom":
-                                try: elo = int(elo_str)
-                                except: elo = 1000
-                                joueurs_a.append({"Nom": nom, "Elo": elo})
-                    st.session_state['db']['ffe_joueurs'] = sorted(joueurs_a, key=lambda x: x['Elo'], reverse=True)
-                except Exception as e: st.error(f"Erreur Joueurs FFE: {e}")
+                equipes_trouvees = []
+                for eq in ffe_equipes:
+                    cat = eq["Categorie"]
+                    nom = eq["Nom"]
+                    equipes_trouvees.append(nom)
+                    if nom not in st.session_state['db']['equipes_interclubs']:
+                        st.session_state['db']['equipes_interclubs'][nom] = {
+                            "Categorie": cat,
+                            "Division": eq["Division"],
+                            "Lien": eq["Lien"],
+                            "roster": [],
+                            "compo": {}
+                        }
+                    else:
+                        st.session_state['db']['equipes_interclubs'][nom]["Lien"] = eq["Lien"]
+                        st.session_state['db']['equipes_interclubs'][nom]["Division"] = eq["Division"]
+                        st.session_state['db']['equipes_interclubs'][nom]["Categorie"] = cat
+                
+                sauvegarder_base_cloud(st.session_state['db'])
+                st.success(f"✅ FFE Synchronisée ! {len(equipes_trouvees)} équipes trouvées et {len(ffe_joueurs)} joueurs avec Licence A importés.")
+                st.rerun()
 
-                # 2. Scrape Équipes
-                try:
-                    url_eq = f"https://www.echecs.asso.fr/ListeEquipes.aspx?ClubRef={club_ref}"
-                    r_eq = requests.get(url_eq, timeout=15)
-                    lignes_eq = re.findall(r'<tr[^>]*>(.*?)</tr>', r_eq.text, re.IGNORECASE | re.DOTALL)
-                    for l in lignes_eq:
-                        if "EquipeRef=" in l:
-                            cols = re.findall(r'<td[^>]*>(.*?)</td>', l, re.IGNORECASE | re.DOTALL)
-                            if len(cols) >= 2:
-                                lien_m = re.search(r'href=["\'](Equipe\.aspx\?EquipeRef=\d+)["\']', cols[0], re.IGNORECASE)
-                                lien = lien_m.group(1) if lien_m else ""
-                                nom = re.sub(r'<[^>]+>', '', cols[0]).replace("&nbsp;", " ").strip()
-                                div = re.sub(r'<[^>]+>', '', cols[1]).replace("&nbsp;", " ").strip()
-                                cat = "Jeunes" if "jeune" in nom.lower() or "jeune" in div.lower() or " j " in nom.lower() else "Adultes"
-                                
-                                if nom and lien:
-                                    equipes_trouvees.append(nom)
-                                    if nom not in st.session_state['db']['equipes_interclubs']:
-                                        st.session_state['db']['equipes_interclubs'][nom] = {
-                                            "Lien": lien, "Division": div, "Categorie": cat, "Compos": {}
-                                        }
-                                    else:
-                                        st.session_state['db']['equipes_interclubs'][nom]["Lien"] = lien
-                                        st.session_state['db']['equipes_interclubs'][nom]["Division"] = div
-                    sauvegarder_base_cloud(st.session_state['db'])
-                    st.success(f"✅ {len(equipes_trouvees)} équipes et {len(joueurs_a)} joueurs Licence A importés !")
-                except Exception as e: st.error(f"Erreur Équipes FFE: {e}")
+        # Construction du pool de joueurs sélectionnables (FFE Licence A prioritaire)
+        joueurs_ffe = st.session_state['db'].get('ffe_joueurs', [])
+        liste_totale_joueurs = [j["Nom"] for j in joueurs_ffe]
+        
+        # Fallback si l'API FFE est vide, on prend la base locale
+        if not liste_totale_joueurs:
+            liste_totale_joueurs = sorted(df["Identité"].unique().tolist())
+            st.warning("⚠️ Utilisation des joueurs de la base locale (Pensez à synchroniser la FFE).")
 
-        # --- AFFICHAGE DU MODULE ---
-        equipes_db = st.session_state['db'].get('equipes_interclubs', {})
-        if not equipes_db:
-            st.warning("⚠️ Aucune équipe trouvée. Cliquez sur le bouton 'Actualiser' ci-dessus.")
-        else:
-            liste_noms_equipes = sorted(list(equipes_db.keys()))
-            equipe_choisie = st.selectbox("🎯 Sélectionnez une équipe à gérer :", [""] + liste_noms_equipes)
+        tab_adultes, tab_jeunes, tab_brulage = st.tabs(["🏅 Interclubs Adultes", "👦👧 Interclubs Jeunes", "🔥 Suivi & Brûlage"])
+        
+        def afficher_gestion_equipes(categorie):
+            equipes_db = st.session_state['db'].get('equipes_interclubs', {})
+            equipes_cat = {k: v for k, v in equipes_db.items() if v.get("Categorie") == categorie}
+            
+            if not equipes_cat:
+                st.info(f"Aucune équipe {categorie} n'a été importée de la FFE.")
+                return
+                
+            liste_noms_equipes = sorted(list(equipes_cat.keys()))
+            equipe_choisie = st.selectbox(f"🎯 Sélectionnez une équipe {categorie} à gérer :", [""] + liste_noms_equipes)
 
             if equipe_choisie:
                 eq_data = equipes_db[equipe_choisie]
-                st.markdown(f"### 🛡️ {equipe_choisie} - <span style='font-size:18px; color:gray;'>{eq_data.get('Division', '')}</span>", unsafe_allow_html=True)
-
-                url_equipe = f"https://www.echecs.asso.fr/{eq_data['Lien']}"
+                st.markdown(f"""<div class="match-card">
+                            <h4>🛡️ {equipe_choisie} <span style='font-size:14px; color:gray;'>({eq_data.get('Division', '')})</span></h4>
+                            </div>""", unsafe_allow_html=True)
                 
-                # Scraping dynamique Classement & Calendrier
+                lien_equipe = eq_data.get('Lien', '')
+                url_equipe = lien_equipe if lien_equipe.startswith('http') else f"https://www.echecs.asso.fr/{lien_equipe}" if lien_equipe else ""
+                
+                # --- CALENDRIER ET CLASSEMENT ---
                 df_classement = pd.DataFrame()
                 df_calendrier = pd.DataFrame()
                 
-                if html_ready:
+                if html_ready and url_equipe:
                     with st.spinner("Récupération en direct sur echecs.asso.fr..."):
                         try:
-                            dfs = pd.read_html(url_equipe, encoding='utf-8')
+                            headers = {"User-Agent": "Mozilla/5.0"}
+                            r_html = requests.get(url_equipe, headers=headers, timeout=10).text
+                            dfs = pd.read_html(io.StringIO(r_html))
                             for t in dfs:
                                 if 'Pl.' in t.columns and 'Equipe' in t.columns and 'Pts' in t.columns: df_classement = t
                                 if 'Date' in t.columns and 'Score' in t.columns and 'Ronde' in t.columns: df_calendrier = t
                         except Exception: pass
 
-                # --- TABLEAUX FFE ---
                 c1, c2 = st.columns([1, 1.5])
                 with c1:
                     st.markdown("#### 🏆 Classement")
@@ -1198,60 +1272,67 @@ else:
 
                 st.markdown("---")
 
-                # --- PRÉPARATION COMPOSITION ---
-                st.markdown("### ♟️ Composition de l'Équipe")
-
-                rondes_dispos = []
-                idx_prochaine = 0
-                if not df_calendrier.empty:
-                    # Isoler les matchs de CETTE équipe
-                    matchs_eq = df_calendrier[(df_calendrier['Equipe domicile'].str.contains(equipe_choisie[:5], case=False, na=False)) | 
-                                              (df_calendrier['Equipe extérieur'].str.contains(equipe_choisie[:5], case=False, na=False))]
-                    rondes_dispos = matchs_eq['Ronde'].tolist()
+                # --- BASSIN DE JOUEURS ---
+                joueurs_roster = eq_data.get("roster", [])
+                nouveau_roster = st.multiselect(
+                    f"👥 1. Construisez le bassin de joueurs pour l'équipe {equipe_choisie} :", 
+                    options=liste_totale_joueurs, 
+                    default=[j for j in joueurs_roster if j in liste_totale_joueurs],
+                    key=f"rost_{equipe_choisie}"
+                )
+                if st.button(f"💾 Sauvegarder le bassin de {equipe_choisie}", key=f"sv_rost_{equipe_choisie}"):
+                    st.session_state['db']['equipes_interclubs'][equipe_choisie]["roster"] = nouveau_roster
+                    sauvegarder_base_cloud(st.session_state['db'])
+                    st.success("Bassin mis à jour !")
+                    st.rerun()
+                
+                if nouveau_roster:
+                    st.markdown("---")
+                    st.markdown("### ♟️ 2. Composition de la Ronde")
                     
-                    # Détecter la prochaine ronde
-                    for i, r in matchs_eq.iterrows():
-                        sc = str(r['Score']).strip()
-                        if sc in ["", "X - X", "nan"]:
-                            idx_prochaine = rondes_dispos.index(r['Ronde'])
-                            break
+                    rondes_dispos = []
+                    idx_prochaine = 0
+                    if not df_calendrier.empty:
+                        matchs_eq = df_calendrier[(df_calendrier['Equipe domicile'].str.contains(equipe_choisie[:5], case=False, na=False)) | 
+                                                  (df_calendrier['Equipe extérieur'].str.contains(equipe_choisie[:5], case=False, na=False))]
+                        rondes_dispos = matchs_eq['Ronde'].tolist()
+                        for i, r in matchs_eq.iterrows():
+                            sc = str(r['Score']).strip()
+                            if sc in ["", "X - X", "nan"]:
+                                idx_prochaine = rondes_dispos.index(r['Ronde'])
+                                break
 
-                if not rondes_dispos: rondes_dispos = [f"Ronde {i}" for i in range(1, 12)]
+                    if not rondes_dispos: rondes_dispos = [f"Ronde {i}" for i in range(1, 12)]
+                    ronde_choisie = st.selectbox("Sélectionnez la ronde à préparer :", rondes_dispos, index=idx_prochaine if idx_prochaine < len(rondes_dispos) else 0)
 
-                ronde_choisie = st.selectbox("Sélectionnez la ronde à préparer :", rondes_dispos, index=idx_prochaine if idx_prochaine < len(rondes_dispos) else 0)
+                    date_match = "Inconnue"
+                    if not df_calendrier.empty:
+                        try: date_match = df_calendrier[df_calendrier['Ronde'] == ronde_choisie]['Date'].values[0]
+                        except: pass
+                    st.write(f"**Date prévue :** {date_match}")
 
-                date_match = "Inconnue"
-                if not df_calendrier.empty:
-                    try: date_match = df_calendrier[df_calendrier['Ronde'] == ronde_choisie]['Date'].values[0]
-                    except: pass
-
-                st.write(f"**Date prévue :** {date_match}")
-
-                # Filtre Dispo & Licences A
-                joueurs_ffe = st.session_state['db'].get('ffe_joueurs', [])
-                if not joueurs_ffe:
-                    st.warning("⚠️ Importez les joueurs FFE pour faire la composition.")
-                else:
-                    # Qui joue déjà ailleurs pour cette même ronde ?
+                    # --- SÉLECTION DES JOUEURS ---
                     joueurs_indispos = []
                     for eq, d in equipes_db.items():
                         if eq != equipe_choisie:
-                            for j in d.get("Compos", {}).get(ronde_choisie, []):
+                            for j in d.get("compo", {}).get(ronde_choisie, []):
                                 if j: joueurs_indispos.append(j)
 
                     options_joueurs = [""]
                     dict_elo = {}
                     for j in joueurs_ffe:
                         dict_elo[j["Nom"]] = j["Elo"]
-                        if j["Nom"] not in joueurs_indispos: options_joueurs.append(f"{j['Nom']} ({j['Elo']})")
+                        # On ne propose que les joueurs du ROSTER qui ne sont pas indispos
+                        if j["Nom"] in nouveau_roster and j["Nom"] not in joueurs_indispos: 
+                            options_joueurs.append(f"{j['Nom']} ({j['Elo']})")
 
-                    st.info(f"💡 Seuls les joueurs avec Licence A sont affichés. Les joueurs assignés à d'autres équipes pour la {ronde_choisie} sont automatiquement masqués.")
+                    st.info(f"💡 Les joueurs de votre bassin assignés à d'autres équipes pour la {ronde_choisie} sont automatiquement masqués.")
 
-                    # Saisie Grille
                     nb_ech = 8 if eq_data.get("Categorie") == "Adultes" else 4
-                    if "Compos" not in st.session_state['db']['equipes_interclubs'][equipe_choisie]: st.session_state['db']['equipes_interclubs'][equipe_choisie]["Compos"] = {}
+                    if "compo" not in st.session_state['db']['equipes_interclubs'][equipe_choisie]: 
+                        st.session_state['db']['equipes_interclubs'][equipe_choisie]["compo"] = {}
                     
-                    compo_actuelle = st.session_state['db']['equipes_interclubs'][equipe_choisie]["Compos"].get(ronde_choisie, [""]*nb_ech)
+                    compo_actuelle = st.session_state['db']['equipes_interclubs'][equipe_choisie]["compo"].get(ronde_choisie, [""]*nb_ech)
                     while len(compo_actuelle) < nb_ech: compo_actuelle.append("")
 
                     nouvelle_compo = []
@@ -1275,85 +1356,102 @@ else:
                             if j1 and j2:
                                 elo1, elo2 = dict_elo.get(j1, 1000), dict_elo.get(j2, 1000)
                                 if elo1 < elo2 - 100:
-                                    erreurs_100_pts.append(f"🚨 **Échiquier {i+1} ({j1}, {elo1})** est placé devant l'**Échiquier {j+1} ({j2}, {elo2})**. Écart de {elo2 - elo1} pts (Interdit > 100).")
+                                    erreurs_100_pts.append(f"🚨 **Échiquier {i+1} ({j1}, {elo1})** est placé au-dessus de **Échiquier {j+1} ({j2}, {elo2})**. L'écart de {elo2 - elo1} pts est strictement interdit (>100).")
                     
                     if erreurs_100_pts:
                         for err in erreurs_100_pts: st.error(err)
                     else: st.success("✅ Règle des Elos respectée.")
 
                     if st.button("💾 Enregistrer la Composition", use_container_width=True):
-                        st.session_state['db']['equipes_interclubs'][equipe_choisie]["Compos"][ronde_choisie] = nouvelle_compo
+                        st.session_state['db']['equipes_interclubs'][equipe_choisie]["compo"][ronde_choisie] = nouvelle_compo
                         sauvegarder_base_cloud(st.session_state['db'])
                         st.success(f"Composition enregistrée pour la {ronde_choisie} !")
+                        st.rerun()
 
-                # --- SUIVI DES BRÛLAGES ---
-                st.markdown("---")
-                st.markdown("### 🔥 Suivi des Brûlages")
-                st.write("Un joueur ayant participé à 4 matchs dans une équipe est considéré comme **BRÛLÉ**. Il ne peut plus redescendre[cite: 1, 2].")
-                
-                stats_joueurs = {}
-                for eq, data_eq in equipes_db.items():
-                    for r, compos in data_eq.get("Compos", {}).items():
-                        for j in compos:
-                            if j:
-                                if j not in stats_joueurs: stats_joueurs[j] = {}
-                                if eq not in stats_joueurs[j]: stats_joueurs[j][eq] = 0
-                                stats_joueurs[j][eq] += 1
-                
-                data_brulage = []
-                for j, stats in stats_joueurs.items():
-                    details = " | ".join([f"{eq}: {c}" for eq, c in stats.items()])
+                    # --- GÉNÉRATION DU PDF FFE ---
+                    if pdf_ready:
+                        st.markdown("---")
+                        with st.expander("📄 Imprimer la Feuille de Match FFE"):
+                            c_p1, c_p2 = st.columns(2)
+                            date_pdf = c_p1.text_input("Date du match", value=date_match, key=f"date_{equipe_choisie}")
+                            lieu_pdf = c_p2.text_input("Lieu de rencontre", value="Domicile" if "cassis" in equipe_choisie.lower() else "", key=f"lieu_{equipe_choisie}")
+                            
+                            pdf_vierge = st.file_uploader("Fichier PDF vierge fourni par la FFE", type=['pdf'], key=f"up_{equipe_choisie}")
+                            if pdf_vierge and st.button("🖨️ Générer la feuille complétée", key=f"gen_{equipe_choisie}"):
+                                try:
+                                    import PyPDF2
+                                    from reportlab.pdfgen import canvas
+                                    from reportlab.lib.pagesizes import A4
+                                    
+                                    packet = io.BytesIO()
+                                    c = canvas.Canvas(packet, pagesize=A4)
+                                    
+                                    c.drawString(80, 770, str(date_pdf))
+                                    c.drawString(250, 770, str(lieu_pdf))
+                                    c.drawString(450, 770, str(ronde_choisie))
+                                    c.drawString(80, 750, str(equipe_choisie))
+                                    
+                                    y_start = 615
+                                    y_step = 28
+                                    compo = st.session_state['db']['equipes_interclubs'][equipe_choisie]["compo"][ronde_choisie]
+                                    for idx, joueur in enumerate(compo):
+                                        if joueur:
+                                            c.drawString(70, y_start - (idx * y_step), str(joueur))
+                                            row_joueur = df[df['Identité'] == joueur]
+                                            if not row_joueur.empty:
+                                                code_ffe = str(row_joueur.iloc[0].get('Licence_FFE', ''))
+                                                if code_ffe != "Non croisé": c.drawString(240, y_start - (idx * y_step), code_ffe)
+                                            c.drawString(300, y_start - (idx * y_step), str(dict_elo.get(joueur, "")))
+                                    
+                                    c.save()
+                                    packet.seek(0)
+                                    
+                                    new_pdf = PyPDF2.PdfReader(packet)
+                                    existing_pdf = PyPDF2.PdfReader(pdf_vierge)
+                                    output = PyPDF2.PdfWriter()
+                                    
+                                    page = existing_pdf.pages[0]
+                                    page.merge_page(new_pdf.pages[0])
+                                    output.add_page(page)
+                                    
+                                    output_stream = io.BytesIO()
+                                    output.write(output_stream)
+                                    
+                                    st.download_button("⬇️ Télécharger le PDF rempli", data=output_stream.getvalue(), file_name=f"Feuille_{equipe_choisie}_{ronde_choisie}.pdf", mime="application/pdf")
+                                except Exception as e:
+                                    st.error(f"Impossible de dessiner sur le PDF : {e}")
+
+        with tab_adultes: afficher_gestion_equipes("Adultes")
+        with tab_jeunes: afficher_gestion_equipes("Jeunes")
+            
+        with tab_brulage:
+            st.markdown("### 🔥 Suivi des Brûlages FFE")
+            st.info("Un joueur ayant participé à 4 matchs dans une équipe ou division est considéré comme **BRÛLÉ**. Il lui est strictement interdit de redescendre.")
+            
+            joueurs_stats = {}
+            for nom_eq, data in st.session_state['db'].get('equipes_interclubs', {}).items():
+                for r_nom, compo in data.get("compo", {}).items():
+                    for j in compo:
+                        if j:
+                            if j not in joueurs_stats: joueurs_stats[j] = {}
+                            if nom_eq not in joueurs_stats[j]: joueurs_stats[j][nom_eq] = 0
+                            joueurs_stats[j][nom_eq] += 1
+                                
+            data_brulage = []
+            for j, stats in joueurs_stats.items():
+                if stats:
+                    details = " | ".join([f"{eq}: {c} matchs" for eq, c in stats.items()])
                     est_brule = any(c >= 4 for c in stats.values())
-                    data_brulage.append({"Joueur": j, "Statut": "🔥 BRÛLÉ" if est_brule else "✅ Libre", "Participations": details})
-                
-                if data_brulage:
-                    df_brule = pd.DataFrame(data_brulage).sort_values(by="Statut", ascending=False)
-                    st.dataframe(df_brule, use_container_width=True)
-                else: st.info("Aucun historique de matchs pour le moment.")
-
-                # --- PDF ---
-                if pdf_ready:
-                    st.markdown("---")
-                    with st.expander("📄 Générer la Feuille de Match (PDF)"):
-                        st.write("Téléchargez la feuille remplie avec les noms et licences pour l'arbitre.")
-                        pdf_vierge = st.file_uploader("Importer le PDF vierge FFE", type=['pdf'], key=f"up_{equipe_choisie}")
-                        if pdf_vierge and st.button("🖨️ Générer PDF"):
-                            try:
-                                packet = io.BytesIO()
-                                c = canvas.Canvas(packet, pagesize=A4)
-                                
-                                c.drawString(80, 770, str(date_match))
-                                c.drawString(450, 770, str(ronde_choisie))
-                                c.drawString(80, 750, str(equipe_choisie))
-                                
-                                y_start = 615
-                                y_step = 28
-                                compo_finale = st.session_state['db']['equipes_interclubs'][equipe_choisie]["Compos"].get(ronde_choisie, [])
-                                for idx, joueur in enumerate(compo_finale):
-                                    if joueur:
-                                        c.drawString(70, y_start - (idx * y_step), str(joueur))
-                                        row_joueur = df[df['Identité'] == joueur]
-                                        if not row_joueur.empty:
-                                            code_ffe = str(row_joueur.iloc[0].get('Licence_FFE', ''))
-                                            if code_ffe != "Non croisé": c.drawString(240, y_start - (idx * y_step), code_ffe)
-                                        c.drawString(300, y_start - (idx * y_step), str(dict_elo.get(joueur, "")))
-                                
-                                c.save()
-                                packet.seek(0)
-                                
-                                new_pdf = PyPDF2.PdfReader(packet)
-                                existing_pdf = PyPDF2.PdfReader(pdf_vierge)
-                                output = PyPDF2.PdfWriter()
-                                
-                                page = existing_pdf.pages[0]
-                                page.merge_page(new_pdf.pages[0])
-                                output.add_page(page)
-                                
-                                output_stream = io.BytesIO()
-                                output.write(output_stream)
-                                
-                                st.download_button("⬇️ Télécharger le PDF", data=output_stream.getvalue(), file_name=f"Feuille_{equipe_choisie}_{ronde_choisie}.pdf", mime="application/pdf")
-                            except Exception as e: st.error(f"Erreur de génération : {e}")
+                    data_brulage.append({
+                        "Joueur": j,
+                        "Statut": "🔥 BRÛLÉ (Ne peut plus redescendre)" if est_brule else "✅ OK",
+                        "Détails des sélections": details
+                    })
+            if data_brulage:
+                df_brulage = pd.DataFrame(data_brulage).sort_values(by="Statut", ascending=False).reset_index(drop=True)
+                st.dataframe(df_brulage, use_container_width=True)
+            else:
+                st.info("Aucun match n'a été saisi pour le moment.")
 
     elif module_choisi == "♟️ Module Entraîneur":
         st.subheader("♟️ Espace Entraîneur")
