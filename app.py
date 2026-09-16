@@ -156,53 +156,40 @@ def generer_vcard(contact):
     vcard += "END:VCARD"
     return vcard.encode('utf-8')
 
-# --- MOTEUR DE SCRAPING FFE ULTRA-ROBUSTE ---
+# --- MOTEUR DE SCRAPING FFE (BLINDAGE ANTI-CRASH) ---
 @st.cache_data(ttl=3600)
 def fetch_ffe_club_data(club_ref="2705"):
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    }
     joueurs_a = []
     equipes = []
     
-    # 1. Aspirer les Joueurs (Filtre Licence A)
+    # 1. Aspirer les Joueurs (Licence A)
     try:
         url_j = f"https://www.echecs.asso.fr/ListeJoueurs.aspx?Action=JOUEURCLUBREF&JrTri=Elo&ClubRef={club_ref}"
         r_j = requests.get(url_j, headers=headers, timeout=15)
-        
-        # Double Sécurité : Pandas + Regex
-        try:
-            dfs = pd.read_html(io.StringIO(r_j.text))
-            for df_p in dfs:
-                if 'Nom Prénom' in df_p.columns:
-                    lic_col = [c for c in df_p.columns if 'Lic' in c]
-                    df_a = df_p[df_p[lic_col[0]] == 'A'] if lic_col else df_p
-                    
-                    for _, row in df_a.iterrows():
-                        nom = str(row.get('Nom Prénom', '')).strip()
-                        elo_val = 1000
-                        if 'Elo' in df_p.columns:
-                            e_str = str(row['Elo']).replace('F','').replace('N','').strip()
-                            if e_str.isdigit(): elo_val = int(e_str)
-                        elif 'Rapide' in df_p.columns:
-                            e_str = str(row['Rapide']).replace('F','').replace('N','').strip()
-                            if e_str.isdigit(): elo_val = int(e_str)
-                        if nom and nom != "nan": joueurs_a.append({"Nom": nom, "Elo": elo_val})
-                    break
-        except Exception:
-            # Fallback Regex si Pandas échoue
-            lignes = re.findall(r'<tr[^>]*>(.*?)</tr>', r_j.text, re.IGNORECASE | re.DOTALL)
-            for ligne in lignes:
-                cols = re.findall(r'<td[^>]*>(.*?)</td>', ligne, re.IGNORECASE | re.DOTALL)
-                if len(cols) >= 8:
-                    nom_prenom = re.sub(r'<[^>]+>', '', cols[1]).replace("&nbsp;", " ").strip()
-                    elo_str = re.sub(r'<[^>]+>', '', cols[5]).replace("F", "").replace("N", "").strip()
-                    licence = re.sub(r'<[^>]+>', '', cols[-1]).strip().upper()
-                    if licence not in ['A', 'B'] and len(cols) >= 9:
-                        licence = re.sub(r'<[^>]+>', '', cols[-2]).strip().upper()
-                    
-                    if licence == "A" and nom_prenom and nom_prenom != "Nom Prénom":
-                        try: elo = int(elo_str)
-                        except: elo = 1000
-                        joueurs_a.append({"Nom": nom_prenom, "Elo": elo})
+        r_j.encoding = 'utf-8'
+        lignes = re.findall(r'<tr[^>]*>(.*?)</tr>', r_j.text, re.IGNORECASE | re.DOTALL)
+        for ligne in lignes:
+            cols = re.findall(r'<td[^>]*>(.*?)</td>', ligne, re.IGNORECASE | re.DOTALL)
+            if len(cols) >= 6:
+                nom_prenom = re.sub(r'<[^>]+>', '', cols[1]).replace("&nbsp;", " ").strip()
+                if not nom_prenom or nom_prenom.lower() == "nom prénom": continue
+                
+                # Cherche l'Elo et la Licence dynamiquement peu importe la colonne !
+                elo_val = 1000
+                licence = "B"
+                for c in cols:
+                    c_txt = re.sub(r'<[^>]+>', '', c).replace("&nbsp;", "").strip()
+                    if c_txt in ["A", "B"]: licence = c_txt
+                    else:
+                        match_elo = re.search(r'^(\d{3,4})[FN]?$', c_txt)
+                        if match_elo: elo_val = int(match_elo.group(1))
+                            
+                if licence == "A":
+                    joueurs_a.append({"Nom": nom_prenom, "Elo": elo_val})
     except Exception as e:
         pass
 
@@ -210,14 +197,16 @@ def fetch_ffe_club_data(club_ref="2705"):
     try:
         url_eq = f"https://www.echecs.asso.fr/ListeEquipes.aspx?ClubRef={club_ref}"
         r_eq = requests.get(url_eq, headers=headers, timeout=15)
+        r_eq.encoding = 'utf-8'
         lignes_eq = re.findall(r'<tr[^>]*>(.*?)</tr>', r_eq.text, re.IGNORECASE | re.DOTALL)
         
-        for ligne in lignes_eq:
-            if "Equipe.aspx" in ligne:
-                cols = re.findall(r'<td[^>]*>(.*?)</td>', ligne, re.IGNORECASE | re.DOTALL)
+        for l in lignes_eq:
+            if "EquipeRef=" in l:
+                cols = re.findall(r'<td[^>]*>(.*?)</td>', l, re.IGNORECASE | re.DOTALL)
                 if len(cols) >= 2:
-                    lien_match = re.search(r'href=["\']?(Equipe\.aspx\?EquipeRef=\d+)["\']?', cols[0], re.IGNORECASE)
-                    lien_brut = lien_match.group(1) if lien_match else ""
+                    # Regex robuste pour attraper le lien, peu importe sa forme
+                    lien_m = re.search(r'href=["\']?([^"\'>]*EquipeRef=\d+[^"\'>]*)["\']?', cols[0], re.IGNORECASE)
+                    lien_brut = lien_m.group(1).replace("&amp;", "&") if lien_m else ""
                     
                     nom_eq = re.sub(r'<[^>]+>', '', cols[0]).replace("&nbsp;", " ").strip()
                     div = re.sub(r'<[^>]+>', '', cols[1]).replace("&nbsp;", " ").strip()
@@ -227,7 +216,7 @@ def fetch_ffe_club_data(club_ref="2705"):
                         equipes.append({
                             "Nom": nom_eq,
                             "Division": div,
-                            "Lien": f"https://www.echecs.asso.fr/{lien_brut}" if not lien_brut.startswith("http") else lien_brut,
+                            "Lien": lien_brut,
                             "Categorie": cat
                         })
     except Exception as e:
@@ -240,37 +229,47 @@ def fetch_ffe_club_data(club_ref="2705"):
 @st.cache_data(ttl=3600)
 def fetch_ffe_team_calendar(team_url):
     if not team_url: return []
+    if not team_url.startswith("http"): team_url = f"https://www.echecs.asso.fr/{team_url}"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     rondes = []
     try:
         r = requests.get(team_url, headers=headers, timeout=15)
+        r.encoding = 'utf-8'
         lignes = re.findall(r'<tr[^>]*>(.*?)</tr>', r.text, re.IGNORECASE | re.DOTALL)
         for ligne in lignes:
             cols = re.findall(r'<td[^>]*>(.*?)</td>', ligne, re.IGNORECASE | re.DOTALL)
             if len(cols) >= 5:
-                date = re.sub(r'<[^>]+>', '', cols[0]).strip()
-                eq1 = re.sub(r'<[^>]+>', '', cols[1]).strip()
-                score = re.sub(r'<[^>]+>', '', cols[2]).strip()
-                eq2 = re.sub(r'<[^>]+>', '', cols[3]).strip()
-                ronde = re.sub(r'<[^>]+>', '', cols[4]).strip()
+                textes = [re.sub(r'<[^>]+>', '', c).replace("&nbsp;", " ").strip() for c in cols]
+                date = textes[0]
                 
-                if "Ronde" in ronde:
-                    if "cassis" in eq1.lower() or "calanques" in eq1.lower() or "aed" in eq1.lower():
-                        adv, lieu = eq2, "Domicile"
-                    else:
-                        adv, lieu = eq1, "Extérieur"
-                        
-                    rondes.append({
-                        "Ronde": ronde,
-                        "Date": date,
-                        "Adversaire": adv,
-                        "Lieu": lieu,
-                        "Score": score
-                    })
+                # Cherche où est la colonne du score (souvent index 2)
+                idx_score = next((i for i, t in enumerate(textes) if " - " in t or t == ""), -1)
+                
+                if idx_score > 0 and len(textes) > idx_score+2:
+                    eq1 = textes[idx_score - 1]
+                    score = textes[idx_score]
+                    eq2 = textes[idx_score + 1]
+                    ronde = textes[idx_score + 2]
+                    
+                    if "Ronde" in ronde or "Match" in ronde:
+                        mots_club = ["cassis", "calanques", "aed", "carnoux", "ciotat"]
+                        if any(m in eq1.lower() for m in mots_club):
+                            adv, lieu = eq2, "Domicile"
+                        else:
+                            adv, lieu = eq1, "Extérieur"
+                            
+                        rondes.append({
+                            "Ronde": ronde,
+                            "Date": date,
+                            "Equipe domicile": eq1,
+                            "Score": score,
+                            "Equipe extérieur": eq2,
+                            "Lieu": lieu
+                        })
     except: pass
     return rondes
 
-# --- CHARGEMENT INITIALISATION ---
+# --- CHARGEMENT ---
 if 'db' not in st.session_state: 
     with st.spinner("Connexion sécurisée au Cloud Google..."):
         db_loaded = charger_base_cloud()
@@ -510,17 +509,6 @@ def estimer_sexe(prenom):
     if p in femmes or p.endswith(('a', 'e', 'ine', 'elle', 'ette', 'ie', 'ia')): return "F"
     return "M"
 
-def get_elo_actif(identite, df_adherents, db):
-    try:
-        row = df_adherents[df_adherents["Identité"] == identite].iloc[0]
-        elo_ffe = int(float(row.get("Elo_FFE", 0)))
-        licence = str(row.get("Licence_FFE", "Non croisé"))
-        elos_virtuels_ffe = [799, 899, 999, 1099, 1199, 1299, 1399, 1499]
-        if licence != "Non croisé" and elo_ffe > 0 and elo_ffe not in elos_virtuels_ffe: 
-            return elo_ffe, "⚡ FFE/FIDE"
-    except: pass
-    return db['elos_crevette'].get(identite, 400), "🦐 Crevette"
-
 def analyser_fichier_ffe(fichier):
     try:
         if not isinstance(fichier, str):
@@ -639,7 +627,6 @@ if st.sidebar.button("⬇️ Lancer la Synchronisation HelloAsso"):
                     ("Don Bosco", "Event", "club-d-echecs-don-bosco"),
                     ("Boutique", "Shop", "objet-club")
                 ]
-                
                 all_data = []
                 for nom, type_camp, slug in campagnes:
                     all_data.extend(fetch_campaign_items(token, type_camp, slug, nom))
@@ -1170,11 +1157,14 @@ else:
         st.info("Ce module est directement branché sur la Fédération Française des Échecs. Il aspire vos équipes, le classement, et le calendrier officiel.")
         
         try:
+            import lxml
+            import html5lib
+            import bs4
             pd.read_html("<html><table><tr><td>1</td></tr></table></html>")
             html_ready = True
         except Exception:
             html_ready = False
-            st.warning("⚠️ Pour voir les classements, ajoutez `lxml` dans votre fichier requirements.txt")
+            st.warning("⚠️ Pour voir les classements, ajoutez `lxml`, `html5lib`, `beautifulsoup4` dans `requirements.txt` ET **REDÉMARREZ (Reboot App)** l'application depuis votre console Streamlit Cloud.")
 
         pdf_ready = True
         try:
@@ -1183,11 +1173,12 @@ else:
             from reportlab.lib.pagesizes import A4
         except ImportError:
             pdf_ready = False
-            st.warning("⚠️ Pour générer des PDFs, ajoutez `PyPDF2` et `reportlab` dans votre fichier requirements.txt")
-
+            st.warning("⚠️ L'imprimante PDF FFE est désactivée. Pour l'activer, ajoutez `PyPDF2` et `reportlab` à votre serveur.")
+            
         # --- BOUTON MAGIQUE D'ASPIRATION FFE ---
         if st.button("🔄 Actualiser les Équipes & Joueurs (FFE)"):
-            with st.spinner("Aspiration du serveur FFE en cours..."):
+            st.cache_data.clear() # Force le vidage de la mémoire corrompue
+            with st.spinner("Aspiration du serveur FFE en cours (contournement sécurité)..."):
                 ffe_joueurs, ffe_equipes = fetch_ffe_club_data("2705")
                 st.session_state['db']['ffe_joueurs'] = ffe_joueurs
                 
@@ -1217,7 +1208,6 @@ else:
         joueurs_ffe = st.session_state['db'].get('ffe_joueurs', [])
         liste_totale_joueurs = [j["Nom"] for j in joueurs_ffe]
         
-        # Fallback si l'API FFE est vide, on prend la base locale
         if not liste_totale_joueurs:
             liste_totale_joueurs = sorted(df["Identité"].unique().tolist())
             st.warning("⚠️ Utilisation des joueurs de la base locale (Pensez à synchroniser la FFE).")
@@ -1255,19 +1245,25 @@ else:
                             r_html = requests.get(url_equipe, headers=headers, timeout=10).text
                             dfs = pd.read_html(io.StringIO(r_html))
                             for t in dfs:
-                                if 'Pl.' in t.columns and 'Equipe' in t.columns and 'Pts' in t.columns: df_classement = t
-                                if 'Date' in t.columns and 'Score' in t.columns and 'Ronde' in t.columns: df_calendrier = t
+                                cols = [str(c).lower() for c in t.columns]
+                                if any('pl' in c for c in cols) and any('pts' in c for c in cols): df_classement = t
+                                if any('date' in c for c in cols) and any('score' in c for c in cols): df_calendrier = t
                         except Exception: pass
+
+                # Fallback de secours si le tableau Pandas plante
+                if df_calendrier.empty and url_equipe:
+                    cal_fallback = fetch_ffe_team_calendar(url_equipe)
+                    if cal_fallback: df_calendrier = pd.DataFrame(cal_fallback)
 
                 c1, c2 = st.columns([1, 1.5])
                 with c1:
                     st.markdown("#### 🏆 Classement")
-                    if not df_classement.empty: st.dataframe(df_classement[['Pl.', 'Equipe', 'Pts', 'J.', 'd.']], hide_index=True)
+                    if not df_classement.empty: st.dataframe(df_classement, hide_index=True)
                     else: st.info("Non disponible.")
 
                 with c2:
                     st.markdown("#### 📅 Calendrier & Résultats")
-                    if not df_calendrier.empty: st.dataframe(df_calendrier[['Ronde', 'Date', 'Equipe domicile', 'Score', 'Equipe extérieur']], hide_index=True)
+                    if not df_calendrier.empty: st.dataframe(df_calendrier, hide_index=True)
                     else: st.info("Non disponible.")
 
                 st.markdown("---")
@@ -1292,22 +1288,25 @@ else:
                     
                     rondes_dispos = []
                     idx_prochaine = 0
-                    if not df_calendrier.empty:
-                        matchs_eq = df_calendrier[(df_calendrier['Equipe domicile'].str.contains(equipe_choisie[:5], case=False, na=False)) | 
-                                                  (df_calendrier['Equipe extérieur'].str.contains(equipe_choisie[:5], case=False, na=False))]
-                        rondes_dispos = matchs_eq['Ronde'].tolist()
-                        for i, r in matchs_eq.iterrows():
-                            sc = str(r['Score']).strip()
-                            if sc in ["", "X - X", "nan"]:
-                                idx_prochaine = rondes_dispos.index(r['Ronde'])
-                                break
+                    col_ronde = next((c for c in df_calendrier.columns if 'ronde' in str(c).lower() or 'match' in str(c).lower()), None)
+                    col_score = next((c for c in df_calendrier.columns if 'score' in str(c).lower()), None)
+                    
+                    if not df_calendrier.empty and col_ronde:
+                        matchs_eq = df_calendrier[df_calendrier.apply(lambda r: equipe_choisie[:5].lower() in str(r.values).lower(), axis=1)]
+                        if not matchs_eq.empty:
+                            rondes_dispos = matchs_eq[col_ronde].astype(str).tolist()
+                            for i, r in matchs_eq.iterrows():
+                                sc = str(r.get(col_score, "")).strip()
+                                if sc in ["", "nan", "None"] or " - " not in sc or "X" in sc:
+                                    idx_prochaine = rondes_dispos.index(str(r[col_ronde]))
+                                    break
 
                     if not rondes_dispos: rondes_dispos = [f"Ronde {i}" for i in range(1, 12)]
                     ronde_choisie = st.selectbox("Sélectionnez la ronde à préparer :", rondes_dispos, index=idx_prochaine if idx_prochaine < len(rondes_dispos) else 0)
 
                     date_match = "Inconnue"
-                    if not df_calendrier.empty:
-                        try: date_match = df_calendrier[df_calendrier['Ronde'] == ronde_choisie]['Date'].values[0]
+                    if not df_calendrier.empty and 'Date' in df_calendrier.columns and col_ronde:
+                        try: date_match = df_calendrier[df_calendrier[col_ronde] == ronde_choisie]['Date'].values[0]
                         except: pass
                     st.write(f"**Date prévue :** {date_match}")
 
@@ -1322,7 +1321,6 @@ else:
                     dict_elo = {}
                     for j in joueurs_ffe:
                         dict_elo[j["Nom"]] = j["Elo"]
-                        # On ne propose que les joueurs du ROSTER qui ne sont pas indispos
                         if j["Nom"] in nouveau_roster and j["Nom"] not in joueurs_indispos: 
                             options_joueurs.append(f"{j['Nom']} ({j['Elo']})")
 
@@ -1393,7 +1391,7 @@ else:
                                     
                                     y_start = 615
                                     y_step = 28
-                                    compo = st.session_state['db']['equipes_interclubs'][equipe_choisie]["compo"][ronde_choisie]
+                                    compo = st.session_state['db']['equipes_interclubs'][equipe_choisie]["compo"].get(ronde_choisie, [])
                                     for idx, joueur in enumerate(compo):
                                         if joueur:
                                             c.drawString(70, y_start - (idx * y_step), str(joueur))
