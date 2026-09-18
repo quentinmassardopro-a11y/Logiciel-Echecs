@@ -265,7 +265,6 @@ if st.session_state.get('plein_ecran_ronde'):
     """, unsafe_allow_html=True)
     
     t_data = st.session_state.get('plein_ecran_ronde_data', {})
-    
     st.markdown(f"<h1 style='text-align:center; font-size:4rem; color:#FF8C00; margin-bottom: 30px;'>🏆 Appariements - Ronde {t_data.get('ronde', 1)}</h1>", unsafe_allow_html=True)
     
     html_table = "<table><tr><th>Table</th><th>⚪ Blancs</th><th>Score</th><th>⚫ Noirs</th></tr>"
@@ -280,14 +279,11 @@ if st.session_state.get('plein_ecran_ronde'):
     html_table += "</table>"
     
     st.markdown(html_table, unsafe_allow_html=True)
-    
-    st.write("")
     st.write("")
     if st.button("🔙 Retour à l'écran de gestion", use_container_width=True):
         st.session_state['plein_ecran_ronde'] = False
         st.rerun()
     st.stop()
-
 
 if 'db' not in st.session_state:
     with st.spinner("Connexion sécurisée au Cloud Google..."):
@@ -374,16 +370,12 @@ else:
                     eleve_a_renommer = st.selectbox("Élève à corriger :", [""] + sorted(list(mapping_renommage.keys())))
                     if eleve_a_renommer:
                         idx_cible = mapping_renommage[eleve_a_renommer]
-                        identite_cible = df.loc[idx_cible, 'Identité']
                         c_r1, c_r2 = st.columns(2)
                         nv_nom = c_r1.text_input("Nouveau Nom", value=df.loc[idx_cible, 'Nom']).strip().upper()
                         nv_prenom = c_r2.text_input("Nouveau Prénom", value=df.loc[idx_cible, 'Prénom']).strip().title()
                         if st.button("✅ Valider"):
-                            nv_identite = f"{nv_prenom} {nv_nom}"
-                            st.session_state['df_adherents'].loc[idx_cible, ['Nom', 'Prénom', 'Identité']] = [nv_nom, nv_prenom, nv_identite]
-                            sauvegarder_adherents_cloud(st.session_state['df_adherents'])
-                            st.success("Modifié!")
-                            st.rerun()
+                            st.session_state['df_adherents'].loc[idx_cible, ['Nom', 'Prénom', 'Identité']] = [nv_nom, nv_prenom, f"{nv_prenom} {nv_nom}"]
+                            sauvegarder_adherents_cloud(st.session_state['df_adherents']); st.success("Modifié!"); st.rerun()
 
             st.markdown("---")
             df_admin = df[df["Type"] != "Boutique"].copy()
@@ -428,8 +420,12 @@ else:
             ecoles_dispos = [c for c in df["Campagne"].unique() if "club" not in c.lower() and "boutique" not in c.lower()]
             if ecoles_dispos:
                 ecole_choisie = st.selectbox("Sélectionnez l'établissement :", ecoles_dispos)
+                
+                # DÉDUPLICATION : On ne garde qu'une ligne par personne physique pour l'école
                 df_ec = df[df["Campagne"] == ecole_choisie].copy()
-                st.metric("🎓 Total Élèves", len(df_ec))
+                df_ec = df_ec.drop_duplicates(subset=["Identité"])
+                
+                st.metric("🎓 Total Élèves (Personnes Physiques)", len(df_ec))
                 df_ec['Sortie Seul'] = df_ec.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Identité'], r['Sortie Seul']), axis=1)
                 st.dataframe(df_ec[["Identité", "Classe", "Formule", "Sortie Seul", "N° Portable"]], use_container_width=True)
 
@@ -461,6 +457,15 @@ else:
             import PyPDF2; from reportlab.pdfgen import canvas; from reportlab.lib.pagesizes import A4
         except: pdf_ready = False
             
+        def get_rank_division(div_str):
+            d = str(div_str).lower()
+            if 'top' in d: return 1
+            if '1' in d: return 2
+            if '2' in d: return 3
+            if '3' in d: return 4
+            if '4' in d: return 5
+            return 99
+
         liste_totale_joueurs = sorted(df["Identité"].unique().tolist())
         dict_elo_global = {j: get_elo_actif(j, df, st.session_state['db'])[0] for j in liste_totale_joueurs}
 
@@ -493,7 +498,6 @@ else:
                 if url_equipe and not url_equipe.startswith("http"): url_equipe = f"https://www.echecs.asso.fr/{url_equipe}"
                 st.markdown(f"### 🛡️ {equipe_choisie} — {eq_data.get('Division', '')}")
 
-                # SCRAPING FFE (Proxy intégré)
                 df_classement, df_calendrier = pd.DataFrame(), pd.DataFrame()
                 if url_equipe:
                     with st.spinner("Recherche du calendrier FFE en direct..."):
@@ -598,12 +602,48 @@ else:
             liste_identites = st.session_state['db']['affectations_creneaux'].get(lieu_appel, [])
             if not liste_identites: st.info("Aucun élève.")
             else:
-                df_groupe = df[df["Identité"].isin(liste_identites)]
-                presences = {idx: st.checkbox(row['Identité'], value=True, key=f"appel_{idx}_{row['Identité']}") for idx, row in df_groupe.iterrows()}
-                if st.button("💾 Enregistrer l'appel"):
+                # DÉDUPLICATION PAR IDENTITÉ : On ne garde qu'une seule ligne par enfant physique
+                df_groupe = df[df["Identité"].isin(liste_identites)].drop_duplicates(subset=["Identité"])
+                total_appel = len(df_groupe)
+                st.markdown("---")
+                presences = {}
+                for idx, row in df_groupe.iterrows():
+                    c1, c2 = st.columns([4, 1])
+                    sortie_act = st.session_state['db']['sorties_manuelles'].get(row['Identité'], row.get('Sortie Seul', '-'))
+                    nom_aff = f"{row['Nom']} {row['Prénom']}"
+                    c1.write(f"👤 **{nom_aff}** *(Sortie: {sortie_act})*")
+                    # Ajout d'une clé unique incluant le nom de l'enfant pour éviter les conflits Streamlit
+                    presences[idx] = c2.checkbox("Présent", value=True, key=f"appel_{idx}_{row['Identité']}")
+
+                presents_count = sum(presences.values())
+                absents_count = total_appel - presents_count
+                
+                st.markdown("---")
+                c_m1, c_m2, c_m3 = st.columns(3)
+                c_m1.metric("👥 Total Liste (Uniques)", total_appel)
+                c_m2.metric("✅ Présents", presents_count)
+                c_m3.metric("❌ Absents", absents_count)
+
+                if st.button(f"💾 Enregistrer l'appel"):
+                    liste_presents = [df_groupe.loc[idx_app, 'Identité'] for idx_app, est_present in presences.items() if est_present]
                     if date_jour not in st.session_state['db']['historique_appels']: st.session_state['db']['historique_appels'][date_jour] = {}
-                    st.session_state['db']['historique_appels'][date_jour][lieu_appel] = {"presents": [df_groupe.loc[i, 'Identité'] for i, p in presences.items() if p]}
-                    sauvegarder_base_cloud(st.session_state['db']); st.success("Appel enregistré !")
+                    st.session_state['db']['historique_appels'][date_jour][lieu_appel] = {"presents": liste_presents}
+                    sauvegarder_base_cloud(st.session_state['db'])
+                    st.success("Appel enregistré !")
+
+                st.markdown("---")
+                st.markdown("#### 📥 Exporter la liste d'appel")
+                col_ap1, col_ap2 = st.columns(2)
+                nom_fich_ap = f"Appel_{lieu_appel}".replace(" ", "_").replace("/", "-")
+                df_appel_export = df_groupe[["Nom", "Prénom", "N° Portable", "N° Portable 2 (en cas d'urgence)", "Campagne"]].copy()
+                df_appel_export['Sortie Seul'] = df_appel_export.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Nom']+" "+r['Prénom'], "-"), axis=1)
+                
+                col_ap1.download_button("📄 Exporter en CSV", data=df_appel_export.to_csv(index=False).encode('utf-8'), file_name=f"{nom_fich_ap}.csv", mime="text/csv")
+                try:
+                    buffer_ap = io.BytesIO()
+                    with pd.ExcelWriter(buffer_ap, engine='xlsxwriter') as writer: df_appel_export.to_excel(writer, index=False, sheet_name='Appel')
+                    col_ap2.download_button("📊 Exporter en Excel", data=buffer_ap.getvalue(), file_name=f"{nom_fich_ap}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                except: pass
 
         with tab_tournoi:
             st.markdown("### ⚔️ Tournoi Suisse")
