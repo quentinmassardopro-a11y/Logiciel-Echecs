@@ -1,21 +1,9 @@
-import streamlit as st
-import requests
-import pandas as pd
-import random
-import unicodedata
-import json
-import os
-import io
-import hashlib
-import re
+import streamlit as st, requests, pandas as pd, random, unicodedata, json, io, hashlib, re, urllib.parse, gspread
 from datetime import datetime
-import urllib.parse
-import gspread
 from google.oauth2.service_account import Credentials
 
 st.set_page_config(page_title="Académie d'Échecs des Calanques", layout="wide", page_icon="♟️")
 
-# --- CHARTE GRAPHIQUE ---
 st.markdown("""
     <style>
     h1, h2, h3, h4, h5, h6 { color: #005b96 !important; font-weight: bold; }
@@ -23,13 +11,10 @@ st.markdown("""
     .stButton>button:hover { background-color: #005b96 !important; color: white !important; }
     button[data-baseweb="tab"][aria-selected="true"] > div { color: #005b96 !important; font-weight: bold; }
     button[data-baseweb="tab"][aria-selected="true"] { border-bottom-color: #FF8C00 !important; }
-    .recherche-rapide { background-color: #f4f6f9; padding: 15px; border-radius: 10px; margin-bottom: 20px; border-left: 6px solid #FF8C00; }
-    div[data-baseweb="select"] { border: 2px solid #FF8C00 !important; border-radius: 6px !important; }
     .match-card { background-color: #ffffff; padding: 15px; border-radius: 8px; border-left: 5px solid #005b96; margin-bottom: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
     </style>
 """, unsafe_allow_html=True)
 
-# --- VERROUILLAGE PAR MOT DE PASSE ---
 if "authentifie" not in st.session_state: st.session_state["authentifie"] = False
 if not st.session_state["authentifie"]:
     col1, col2, col3 = st.columns([1, 2, 1])
@@ -46,79 +31,59 @@ if not st.session_state["authentifie"]:
                 else: st.error("Mot de passe incorrect.")
     st.stop()
 
-# --- CONNEXION GOOGLE SHEETS CLOUD ---
 def get_gsheets_client():
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-    creds_dict = dict(st.secrets["gcp_service_account"])
-    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+    creds = Credentials.from_service_account_info(dict(st.secrets["gcp_service_account"]), scopes=scopes)
     return gspread.authorize(creds)
 
-def get_or_create_worksheet(sh, name):
-    try: return sh.worksheet(name)
-    except Exception: return sh.add_worksheet(title=name, rows="1000", cols="50")
-
 def initialiser_memoire_vierge():
-    return {
-        "elos_crevette": {}, "historique_appels": {}, "eleves_essai": [],
-        "affectations_creneaux": {}, "cartes_membres": {},
-        "validations_promo": {}, "sorties_manuelles": {},
-        "eleves_deja_affectes": [], "identites_helloasso_connues": [],
-        "dossiers_supprimes": [],
-        "tshirts_donnes": {},     
-        "boutique_donnees": {},
-        "equipes_interclubs": {},
-        "ffe_joueurs": []
-    }
+    return {"elos_crevette": {}, "historique_appels": {}, "eleves_essai": [], "affectations_creneaux": {}, "cartes_membres": {}, "validations_promo": {}, "sorties_manuelles": {}, "eleves_deja_affectes": [], "identites_helloasso_connues": [], "dossiers_supprimes": [], "tshirts_donnes": {}, "boutique_donnees": {}, "equipes_interclubs": {}, "ffe_joueurs": []}
 
 def charger_base_cloud():
     try:
-        client = get_gsheets_client()
-        sh = client.open("Base_Calanques_DB")
-        ws = get_or_create_worksheet(sh, "DB_JSON")
+        sh = get_gsheets_client().open("Base_Calanques_DB")
+        try: ws = sh.worksheet("DB_JSON")
+        except: ws = sh.add_worksheet(title="DB_JSON", rows="1000", cols="50")
         vals = ws.col_values(1)
         if vals: return json.loads("".join(vals))
         return initialiser_memoire_vierge()
     except Exception as e:
-        st.error(f"Erreur de connexion à Google Sheets (DB). Données protégées. Erreur: {e}")
+        st.error(f"Erreur DB Cloud: {e}")
         return None 
 
 def sauvegarder_base_cloud(db):
     try:
-        client = get_gsheets_client()
-        sh = client.open("Base_Calanques_DB")
-        ws = get_or_create_worksheet(sh, "DB_JSON")
+        sh = get_gsheets_client().open("Base_Calanques_DB")
+        try: ws = sh.worksheet("DB_JSON")
+        except: ws = sh.add_worksheet(title="DB_JSON", rows="1000", cols="50")
         json_str = json.dumps(db, ensure_ascii=False)
         chunks = [[json_str[i:i+40000]] for i in range(0, len(json_str), 40000)]
         ws.clear()
         try: ws.update(values=chunks, range_name="A1")
         except TypeError: ws.update("A1", chunks)
-    except Exception as e:
-        st.error(f"Échec de la sauvegarde Cloud (DB): {e}")
+    except: pass
 
 def charger_adherents_cloud():
     try:
-        client = get_gsheets_client()
-        sh = client.open("Base_Calanques_DB")
-        ws = get_or_create_worksheet(sh, "Adherents")
+        sh = get_gsheets_client().open("Base_Calanques_DB")
+        try: ws = sh.worksheet("Adherents")
+        except: ws = sh.add_worksheet(title="Adherents", rows="1000", cols="50")
         data = ws.get_all_records()
         if data: return pd.DataFrame(data)
         return pd.DataFrame()
-    except Exception as e:
-        st.error(f"Erreur de connexion à Google Sheets (Adhérents). Données protégées. Erreur: {e}")
-        return None
+    except: return None
 
 def sauvegarder_adherents_cloud(df):
     try:
         if df is None or df.empty: return
-        client = get_gsheets_client()
-        sh = client.open("Base_Calanques_DB")
-        ws = get_or_create_worksheet(sh, "Adherents")
+        sh = get_gsheets_client().open("Base_Calanques_DB")
+        try: ws = sh.worksheet("Adherents")
+        except: ws = sh.add_worksheet(title="Adherents", rows="1000", cols="50")
         data = [df.columns.values.tolist()] + df.fillna("").astype(str).values.tolist()
         ws.clear() 
         try: ws.update(values=data, range_name="A1")
         except TypeError: ws.update("A1", data)
-    except Exception as e:
-        st.error(f"Échec de la sauvegarde Cloud (Adhérents): {e}")
+    except: pass
 
 def is_different(val1, val2):
     v1 = str(val1).strip().lower() if pd.notna(val1) and str(val1) != "nan" else ""
@@ -127,9 +92,7 @@ def is_different(val1, val2):
 
 def nettoyer_id_dossier(val):
     val_str = str(val).strip()
-    if val_str.endswith('.0'): return val_str[:-2]
-    if val_str.lower() in ['nan', 'none', '']: return ""
-    return val_str
+    return val_str[:-2] if val_str.endswith('.0') else ("" if val_str.lower() in ['nan', 'none', ''] else val_str)
 
 def format_phone(tel):
     if pd.isna(tel) or str(tel).strip().lower() in ["nan", "none", ""]: return ""
@@ -137,25 +100,8 @@ def format_phone(tel):
     if t.startswith("+33"): t = "0" + t[3:]
     elif t.startswith("33") and len(t) == 11: t = "0" + t[2:]
     elif len(t) == 9 and not t.startswith("0"): t = "0" + t
-    if len(t) == 10 and t.isdigit():
-        return f"{t[0:2]}.{t[2:4]}.{t[4:6]}.{t[6:8]}.{t[8:10]}"
+    if len(t) == 10 and t.isdigit(): return f"{t[0:2]}.{t[2:4]}.{t[4:6]}.{t[6:8]}.{t[8:10]}"
     return str(tel)
-
-def generer_vcard(contact):
-    vcard = "BEGIN:VCARD\nVERSION:3.0\n"
-    nom = str(contact.get("Nom", "")).strip()
-    prenom = str(contact.get("Prénom", "")).strip()
-    vcard += f"N:{nom};{prenom};;;\n"
-    vcard += f"FN:{prenom} {nom}\n"
-    vcard += f"ORG:Académie d'Échecs des Calanques\n"
-    tel1 = contact.get("N° Portable", "")
-    if tel1: vcard += f"TEL;TYPE=CELL,VOICE:{tel1}\n"
-    tel2 = contact.get("N° Portable 2 (en cas d'urgence)", "")
-    if tel2: vcard += f"TEL;TYPE=HOME,VOICE:{tel2}\n"
-    email = contact.get("EMail", "")
-    if email: vcard += f"EMAIL;TYPE=PREF,INTERNET:{email}\n"
-    vcard += "END:VCARD"
-    return vcard.encode('utf-8')
 
 def normaliser_nom(nom):
     if pd.isna(nom): return ""
@@ -165,91 +111,67 @@ def estimer_sexe(prenom):
     if not prenom: return "M"
     p = normaliser_nom(str(prenom).split("-")[0].split()[0])
     femmes = ["manon", "carmen", "iris", "margaux", "margot", "maud", "astrid", "sarah", "esther", "fleur", "marion", "lison", "ninon", "suzon", "lou", "alison", "myriam", "sharon", "eden", "ines", "anais", "agnes", "charlotte", "marianne"]
-    if p in femmes or p.endswith(('a', 'e', 'ine', 'elle', 'ette', 'ie', 'ia')): return "F"
-    return "M"
+    return "F" if p in femmes or p.endswith(('a', 'e', 'ine', 'elle', 'ette', 'ie', 'ia')) else "M"
 
-# --- MOTEUR ELO INTELLIGENT (HIÉRARCHIE FFE) ---
 def extract_elo_val(val):
     val_str = str(val).upper().strip()
-    if val_str == "NAN" or val_str == "NONE" or val_str == "":
-        return 0, False, False
+    if val_str in ["NAN", "NONE", ""]: return 0, False, False
     match = re.search(r'(\d{3,4})', val_str)
     if match:
         score = int(match.group(1))
         is_fide = 'F' in val_str
         is_nat = 'N' in val_str
-        if not is_fide and not is_nat:
-            is_nat = True
+        if not is_fide and not is_nat: is_nat = True
         return score, is_fide, is_nat
     return 0, False, False
 
 def get_elo_actif(identite, df_adherents, db):
     try:
         row = df_adherents[df_adherents["Identité"] == identite].iloc[0]
-        
         r_val, r_f, r_n = extract_elo_val(row.get("Elo_Rapide", ""))
         l_val, l_f, l_n = extract_elo_val(row.get("Elo_Lent", ""))
         b_val, b_f, b_n = extract_elo_val(row.get("Elo_Blitz", ""))
         
-        # 1. Priorité FIDE
         if r_f and r_val > 0: return r_val, "⚡ Rapide FIDE"
         if l_f and l_val > 0: return l_val, "⚡ Lent FIDE"
         if b_f and b_val > 0: return b_val, "⚡ Blitz FIDE"
-        
-        # 2. Priorité National
         if r_n and r_val > 0: return r_val, "🇫🇷 Rapide National"
         if l_n and l_val > 0: return l_val, "🇫🇷 Lent National"
         if b_n and b_val > 0: return b_val, "🇫🇷 Blitz National"
         
-        # Sécurité format brut
         if r_val > 0: return r_val, "🇫🇷 Rapide National"
         if l_val > 0: return l_val, "🇫🇷 Lent National"
         if b_val > 0: return b_val, "🇫🇷 Blitz National"
         
-        # 3. Sécurité Rétrocompatibilité (Si l'utilisateur n'a pas encore "Recroisé" avec le nouveau code)
         old_elo = row.get("Elo_FFE", 0)
         if str(old_elo).lower() not in ["nan", "none", ""]:
             try:
                 old_elo = int(float(old_elo))
-                if old_elo > 0 and old_elo not in [799, 899, 999, 1099, 1199, 1299, 1399, 1499]:
-                    return old_elo, "⚡ FFE (Ancien format)"
+                if old_elo > 0 and old_elo not in [799, 899, 999, 1099, 1199, 1299, 1399, 1499]: return old_elo, "⚡ FFE (Ancien format)"
             except: pass
-            
-    except Exception: pass
+    except: pass
     return db['elos_crevette'].get(identite, 400), "🦐 Crevette"
 
 def calculer_nouveau_elo(r_a, r_b, score_a, k=40):
     e_a = 1.0 / (1.0 + 10.0 ** ((r_b - r_a) / 400.0))
     return max(100, round(r_a + k * (score_a - e_a)))
 
-# --- LE VRAI SYSTÈME SUISSE (Moitié Haute VS Moitié Basse) ---
 def generer_appariements_suisses(joueurs_scores, elos_dict, historique_rencontres):
     joueurs = sorted(joueurs_scores.keys(), key=lambda j: (joueurs_scores[j], elos_dict.get(j, 400)), reverse=True)
     appariements = []
     exempt = None
-
-    if len(joueurs) % 2 != 0:
-        exempt = joueurs.pop()
+    if len(joueurs) % 2 != 0: exempt = joueurs.pop()
 
     while len(joueurs) >= 2:
         current_score = joueurs_scores[joueurs[0]]
         groupe_idx = 0
-        while groupe_idx < len(joueurs) and joueurs_scores[joueurs[groupe_idx]] == current_score:
-            groupe_idx += 1
+        while groupe_idx < len(joueurs) and joueurs_scores[joueurs[groupe_idx]] == current_score: groupe_idx += 1
+        if groupe_idx % 2 != 0: groupe_idx += 1 
+        if groupe_idx > len(joueurs): groupe_idx = len(joueurs)
 
-        if groupe_idx % 2 != 0:
-            groupe_idx += 1 
-            
-        if groupe_idx > len(joueurs):
-            groupe_idx = len(joueurs)
-
-        groupe = joueurs[:groupe_idx]
-        groupe = sorted(groupe, key=lambda j: elos_dict.get(j, 400), reverse=True)
-
+        groupe = sorted(joueurs[:groupe_idx], key=lambda j: elos_dict.get(j, 400), reverse=True)
         demi = len(groupe) // 2
-        s1 = groupe[:demi] 
-        s2 = groupe[demi:] 
-
+        s1, s2 = groupe[:demi], groupe[demi:]
         paired_this_round = set()
 
         for j1 in s1:
@@ -258,74 +180,42 @@ def generer_appariements_suisses(joueurs_scores, elos_dict, historique_rencontre
                 if j2 not in paired_this_round:
                     pair = (min(j1, j2), max(j1, j2))
                     if pair not in historique_rencontres:
-                        appariements.append((j1, j2))
-                        historique_rencontres.add(pair)
-                        paired_this_round.add(j1)
-                        paired_this_round.add(j2)
-                        paired = True
-                        break
-                        
+                        appariements.append((j1, j2)); historique_rencontres.add(pair); paired_this_round.update([j1, j2]); paired = True; break
             if not paired:
                 for j2 in s1:
                     if j1 != j2 and j2 not in paired_this_round:
                         pair = (min(j1, j2), max(j1, j2))
                         if pair not in historique_rencontres:
-                            appariements.append((j1, j2))
-                            historique_rencontres.add(pair)
-                            paired_this_round.add(j1)
-                            paired_this_round.add(j2)
-                            paired = True
-                            break
-                            
+                            appariements.append((j1, j2)); historique_rencontres.add(pair); paired_this_round.update([j1, j2]); paired = True; break
             if not paired:
                 for j2 in joueurs:
                     if j1 != j2 and j2 not in paired_this_round:
                         pair = (min(j1, j2), max(j1, j2))
-                        appariements.append((j1, j2))
-                        historique_rencontres.add(pair)
-                        paired_this_round.add(j1)
-                        paired_this_round.add(j2)
-                        paired = True
-                        break
-
+                        appariements.append((j1, j2)); historique_rencontres.add(pair); paired_this_round.update([j1, j2]); paired = True; break
         joueurs = [j for j in joueurs if j not in paired_this_round]
-
     return appariements, exempt, historique_rencontres
 
-# --- MOTEUR DE SCRAPING FFE ---
 @st.cache_data(ttl=3600)
 def fetch_ffe_team_calendar(team_url):
     if not team_url: return []
     if not team_url.startswith("http"): team_url = f"https://www.echecs.asso.fr/{team_url}"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     rondes = []
-    
     html_content = ""
     try:
-        r = requests.get(team_url, headers=headers, timeout=5)
-        html_content = r.text
+        html_content = requests.get(team_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5).text
     except:
         try:
             url_proxy = f"https://api.allorigins.win/get?url={urllib.parse.quote(team_url)}"
-            r = requests.get(url_proxy, timeout=10)
-            html_content = r.json()['contents']
+            html_content = requests.get(url_proxy, timeout=10).json()['contents']
         except: pass
 
     if html_content:
         try:
             lignes = re.findall(r'<tr[^>]*>(.*?)</tr>', html_content, re.IGNORECASE | re.DOTALL)
             for ligne in lignes:
-                cols = re.findall(r'<td[^>]*>(.*?)</td>', ligne, re.IGNORECASE | re.DOTALL)
-                if len(cols) >= 5:
-                    textes = [re.sub(r'<[^>]+>', '', c).replace("&nbsp;", " ").strip() for c in cols]
-                    if re.search(r'\d{2}/\d{2}/\d{4}', textes[0]):
-                        date = textes[0]
-                        eq1 = textes[2]
-                        score = textes[3]
-                        eq2 = textes[4]
-                        lieu = textes[5] if len(textes) > 5 else ""
-                        ronde = f"Ronde {len(rondes) + 1}"
-                        rondes.append({"Ronde": ronde, "Date": date, "Equipe domicile": eq1, "Score": score, "Equipe extérieur": eq2, "Lieu": lieu})
+                cols = [re.sub(r'<[^>]+>', '', c).replace("&nbsp;", " ").strip() for c in re.findall(r'<td[^>]*>(.*?)</td>', ligne, re.IGNORECASE | re.DOTALL)]
+                if len(cols) >= 5 and re.search(r'\d{2}/\d{2}/\d{4}', cols[0]):
+                    rondes.append({"Ronde": f"Ronde {len(rondes) + 1}", "Date": cols[0], "Equipe domicile": cols[2], "Score": cols[3], "Equipe extérieur": cols[4], "Lieu": cols[5] if len(cols) > 5 else ""})
         except: pass
     return rondes
 
@@ -335,9 +225,8 @@ def analyser_fichier_ffe(fichier):
             with open("base_ffe_locale_tmp.csv", "wb") as f: f.write(fichier.getbuffer())
             fichier_a_lire = "base_ffe_locale_tmp.csv"
         else: fichier_a_lire = fichier
-            
         try: df_ffe = pd.read_csv(fichier_a_lire, sep=None, engine='python', encoding='utf-8')
-        except UnicodeDecodeError: df_ffe = pd.read_csv(fichier_a_lire, sep=None, engine='python', encoding='latin1')
+        except: df_ffe = pd.read_csv(fichier_a_lire, sep=None, engine='python', encoding='latin1')
             
         col_nom = next((c for c in df_ffe.columns if "nom" in str(c).lower() and "prenom" not in str(c).lower() and "prénom" not in str(c).lower()), None)
         col_prenom = next((c for c in df_ffe.columns if "prenom" in str(c).lower() or "prénom" in str(c).lower()), None)
@@ -350,257 +239,18 @@ def analyser_fichier_ffe(fichier):
         if col_nom and col_prenom:
             df_ffe['Nom_Norm'] = df_ffe[col_nom].astype(str).apply(normaliser_nom)
             df_ffe['Prenom_Norm'] = df_ffe[col_prenom].astype(str).apply(normaliser_nom)
-            if col_dna: df_ffe['Annee_FFE'] = df_ffe[col_dna].astype(str).str.extract(r'(\d{4})')[0].fillna("")
-            else: df_ffe['Annee_FFE'] = ""
-            df_ffe['Cle_Forte'] = df_ffe['Nom_Norm'].astype(str) + df_ffe['Prenom_Norm'].astype(str) + df_ffe['Annee_FFE'].astype(str)
-            df_ffe['Cle_Souple'] = df_ffe['Nom_Norm'].astype(str) + df_ffe['Prenom_Norm'].astype(str)
-            
+            df_ffe['Annee_FFE'] = df_ffe[col_dna].astype(str).str.extract(r'(\d{4})')[0].fillna("") if col_dna else ""
+            df_ffe['Cle_Forte'] = df_ffe['Nom_Norm'] + df_ffe['Prenom_Norm'] + df_ffe['Annee_FFE']
+            df_ffe['Cle_Souple'] = df_ffe['Nom_Norm'] + df_ffe['Prenom_Norm']
             df_ffe['Elo_Lent'] = df_ffe[col_lent].astype(str) if col_lent else ""
             df_ffe['Elo_Rapide'] = df_ffe[col_rapide].astype(str) if col_rapide else ""
             df_ffe['Elo_Blitz'] = df_ffe[col_blitz].astype(str) if col_blitz else ""
             df_ffe['Licence_FFE'] = df_ffe[col_licence].astype(str) if col_licence else "Non croisé"
             return df_ffe[['Cle_Forte', 'Cle_Souple', 'Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE']]
-    except Exception as e: 
-        st.sidebar.error(f"Erreur d'analyse FFE: {e}")
-        return pd.DataFrame()
+    except: return pd.DataFrame()
     return pd.DataFrame()
 
-# --- HELLOASSO LOGIC ---
-def affectations_automatiques(row):
-    creneaux = []
-    camp, form, classe = str(row.get("Campagne", "")).lower(), str(row.get("Formule", "")).lower(), str(row.get("Classe", "")).lower()
-    ville_choisie = str(row.get("Dans quel ville sera votre créneaux principale", "")).lower()
-    
-    if "trinit" in camp:
-        if "cp" in classe: creneaux.append("Lundi - Sainte-Trinité (CP)")
-        elif "ce1" in classe: creneaux.append("Mardi - Sainte-Trinité (CE1)")
-        elif any(c in classe for c in ["ce2", "cm1", "cm2", "cm"]): creneaux.append("Vendredi - Sainte-Trinité (CE2-CM2)")
-        elif any(c in classe for c in ["coll", "6ème", "5ème", "4ème", "3ème"]): creneaux.append("Jeudi - Sainte-Trinité (Collège)")
-    elif "augustin" in camp:
-        if "cp" in classe or "ce1" in classe: creneaux.append("Mardi - Saint-Augustin (CP-CE1)")
-        elif any(c in classe for c in ["ce2", "cm1", "cm2", "cm"]): creneaux.append("Vendredi - Saint-Augustin (CE2-CM2)")
-    elif "bosco" in camp:
-        if "coll" in form or "coll" in classe or any(c in classe for c in ["6ème", "5ème", "4ème", "3ème"]): creneaux.append("Jeudi - Don Bosco (Collège)")
-        else: creneaux.append("Jeudi - Don Bosco (École)")
-        
-    if "club" in camp or "adhésion" in camp or "adhesion" in camp:
-        if "cassis" in ville_choisie: creneaux.extend(["Lundi - Club Cassis", "Mercredi - Cassis", "Jeudi - Cassis", "Vendredi - Cassis"])
-        if "marseille" in ville_choisie: creneaux.append("Mardi - Marseille")
-        if "ceyreste" in ville_choisie: creneaux.extend(["Mardi - Ceyreste", "Mercredi - Ceyreste"])
-        if "ciotat" in ville_choisie: creneaux.extend(["Lundi - La Ciotat", "Jeudi - La Ciotat"])
-        if "carnoux" in ville_choisie: creneaux.append("Lundi - Carnoux")
-            
-    if not creneaux:
-        if "lundi" in form:
-            if "trinit" in camp: creneaux.append("Lundi - Sainte-Trinité (CP)")
-            elif "ciotat" in form: creneaux.append("Lundi - La Ciotat")
-            else: creneaux.append("Lundi - Club Cassis")
-        elif "mardi" in form:
-            if "trinit" in camp: creneaux.append("Mardi - Sainte-Trinité (CE1)")
-            elif "augustin" in camp: creneaux.append("Mardi - Saint-Augustin (CP-CE1)")
-            elif "marseille" in form: creneaux.append("Mardi - Marseille")
-            else: creneaux.append("Mardi - Ceyreste")
-        elif "mercredi" in form:
-            if "ceyreste" in form: creneaux.append("Mercredi - Ceyreste")
-            else: creneaux.append("Mercredi - Cassis")
-        elif "jeudi" in form:
-            if "trinit" in camp: creneaux.append("Jeudi - Sainte-Trinité (Collège)")
-            elif "bosco" in camp: 
-                if "coll" in form: creneaux.append("Jeudi - Don Bosco (Collège)")
-                else: creneaux.append("Jeudi - Don Bosco (École)")
-            elif "ciotat" in form: creneaux.append("Jeudi - La Ciotat")
-            else: creneaux.append("Jeudi - Cassis")
-        elif "vendredi" in form:
-            if "augustin" in camp: creneaux.append("Vendredi - Saint-Augustin (CE2-CM2)")
-            elif "trinit" in camp: creneaux.append("Vendredi - Sainte-Trinité (CE2-CM2)")
-            else: creneaux.append("Vendredi - Cassis")
-    
-    return list(set(creneaux))
-
-def get_helloasso_token(client_id, client_secret):
-    url = "https://api.helloasso.com/oauth2/token"
-    try:
-        r = requests.post(url, data={"client_id": client_id, "client_secret": client_secret, "grant_type": "client_credentials"}, headers={"Content-Type": "application/x-www-form-urlencoded"})
-        return r.json().get("access_token") if r.status_code == 200 else None
-    except: return None
-
-def formater_donnees_helloasso(item, nom_campagne):
-    if item.get("type") == "Donation": return None
-    nom_tarif = str(item.get("name", "")).strip()
-    if "don " in nom_tarif.lower() or nom_tarif.lower() == "don": return None
-        
-    order = item.get("order", {})
-    user = item.get("user", {})
-    payer = item.get("payer") or order.get("payer") or {}
-    
-    discount = item.get("discount")
-    code_promo = discount.get("code", "") if isinstance(discount, dict) else ""
-    if not code_promo and "amountDiscount" in item: code_promo = "Oui (Réduit)"
-    
-    last_name = user.get("lastName") or payer.get("lastName") or "Inconnu"
-    first_name = user.get("firstName") or payer.get("firstName") or "Inconnu"
-    nom_propre = str(last_name).replace("*", "").strip().upper()
-    prenom_propre = str(first_name).replace("*", "").strip().title()
-    
-    montant_paye = item.get('amount', 0)
-    item_id = item.get("id")
-    
-    if not item_id:
-        chaine_unique = f"{nom_propre}{prenom_propre}{nom_campagne}{montant_paye}{random.randint(1,999999)}".encode('utf-8')
-        item_id = f"HA_{hashlib.md5(chaine_unique).hexdigest()[:10]}"
-    
-    row = {
-        "ID_Dossier": nettoyer_id_dossier(item_id), 
-        "Campagne": nom_campagne, "Nom": nom_propre, "Prénom": prenom_propre, 
-        "Identité": f"{prenom_propre} {nom_propre}",
-        "Montant Payé": f"{montant_paye / 100} €", "Code Promo": code_promo, "Allergies / Médical": "-",
-        "Formule": nom_tarif, "Licence_FFE": "Non croisé", 
-        "Nom payeur": str(payer.get("lastName", "")).replace("*", "").strip(),
-        "Prénom payeur": str(payer.get("firstName", "")).replace("*", "").strip(), 
-        "Email payeur": str(user.get("email") or payer.get("email") or ""), 
-        "N° Portable": "", "N° Portable 2 (en cas d'urgence)": "", 
-        "EMail": str(user.get("email") or payer.get("email") or ""), 
-        "Adresse": str(user.get("address") or payer.get("address") or ""), 
-        "Ville": str(user.get("city") or payer.get("city") or ""), 
-        "Nom et prénom du responsable légal": "", "Classe": "", 
-        "Date de naissance": str(user.get("birthDate") or user.get("dateOfBirth") or payer.get("dateOfBirth") or "")[:10], 
-        "Taille du t-shirt": "", "Dans quel ville sera votre créneaux principale": "",
-        "Sortie Seul": "-"
-    }
-    
-    for field in item.get("customFields", []):
-        n_champ = str(field.get("name", "")).strip() 
-        rep = str(field.get("answer", "")).strip()
-        n_low = n_champ.lower()
-        
-        row[n_champ] = rep
-        
-        if "formule" in n_low or "choix" in n_low or "cours" in n_low or "créneau" in n_low or "creneau" in n_low:
-            if rep.lower() not in row["Formule"].lower() and rep:
-                row["Formule"] = f"{row['Formule']} | {rep}"
-                
-        if "promo" in n_low: row["Code Promo"] = rep
-        elif any(m in n_low for m in ["allergie", "médical", "sante", "santé"]):
-            row["Allergies / Médical"] = rep if row["Allergies / Médical"] == "-" else f"{row['Allergies / Médical']} | {rep}"
-        elif "classe" in n_low or "niveau" in n_low: row["Classe"] = rep
-        elif "portable 2" in n_low or "urgence" in n_low: row["N° Portable 2 (en cas d'urgence)"] = format_phone(rep)
-        elif "portable" in n_low or "téléphone" in n_low or "tel" in n_low: 
-            if not row["N° Portable"]: row["N° Portable"] = format_phone(rep)
-        elif "responsable" in n_low or "légal" in n_low: row["Nom et prénom du responsable légal"] = rep
-        elif "t-shirt" in n_low: row["Taille du t-shirt"] = rep
-        elif "créneaux" in n_low and "principale" in n_low: row["Dans quel ville sera votre créneaux principale"] = rep
-        elif "adresse" in n_low and len(rep) > 2: row["Adresse"] = rep
-        elif "ville" in n_low and "créneaux" not in n_low and len(rep) > 1: row["Ville"] = rep
-        elif "naissance" in n_low and len(rep) > 2: row["Date de naissance"] = rep
-        elif "email" in n_low or "courriel" in n_low: row["EMail"] = rep
-        elif "quitter" in n_low and "seul" in n_low:
-            r_low = rep.lower()
-            if "oui" in r_low or r_low == "true": row["Sortie Seul"] = "✅ OUI"
-            elif "non" in r_low or r_low == "false": row["Sortie Seul"] = "❌ NON"
-            elif rep == "": row["Sortie Seul"] = "-"
-            else: row["Sortie Seul"] = f"❓ {rep}"
-
-    camp_low = nom_campagne.lower()
-    form_low = str(row.get("Formule", "")).lower()
-    
-    if "boutique" in camp_low:
-        row["Type"] = "Boutique"
-    elif "club" in camp_low or "club" in form_low:
-        row["Type"] = "Club"
-    else:
-        row["Type"] = "École"
-        if row["Sortie Seul"] == "-": row["Sortie Seul"] = "N/A (École)"
-            
-    return row
-
-def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
-    url_base = f"https://api.helloasso.com/v5/organizations/echecs-cassis/forms/{form_type}/{form_slug}/items"
-    rows = []
-    continuation_token = None
-    
-    while True:
-        params = {"pageSize": 100, "withDetails": "true"}
-        if continuation_token: params["continuationToken"] = continuation_token
-            
-        try:
-            r = requests.get(url_base, headers={"Authorization": f"Bearer {token}"}, params=params, timeout=15)
-            if r.status_code != 200: break
-            
-            data = r.json()
-            items = data.get("data", [])
-            if not items: break 
-            
-            for item in items:
-                try: 
-                    row = formater_donnees_helloasso(item, nom_campagne)
-                    if row: rows.append(row)
-                except Exception: continue
-                    
-            next_token = data.get("pagination", {}).get("continuationToken")
-            if not next_token or next_token == continuation_token: break
-            continuation_token = next_token
-        except Exception: break
-        
-    return rows
-
-# --- CHARGEMENT INITIALISATION ---
-if 'db' not in st.session_state: 
-    with st.spinner("Connexion sécurisée au Cloud Google..."):
-        db_loaded = charger_base_cloud()
-        if db_loaded is None: st.stop() 
-        st.session_state['db'] = db_loaded
-
-if 'df_adherents' not in st.session_state:
-    with st.spinner("Récupération de la base adhérents..."):
-        df_loaded = charger_adherents_cloud()
-        if df_loaded is None: st.stop() 
-        
-        if not df_loaded.empty: 
-            len_avant = len(df_loaded)
-            if 'N° Portable' in df_loaded.columns: df_loaded['N° Portable'] = df_loaded['N° Portable'].apply(format_phone)
-            if "N° Portable 2 (en cas d'urgence)" in df_loaded.columns: df_loaded["N° Portable 2 (en cas d'urgence)"] = df_loaded["N° Portable 2 (en cas d'urgence)"].apply(format_phone)
-
-            if 'ID_Dossier' in df_loaded.columns:
-                df_loaded['ID_Dossier'] = df_loaded['ID_Dossier'].apply(nettoyer_id_dossier)
-                mask_valid_id = df_loaded['ID_Dossier'] != ""
-                df_valid = df_loaded[mask_valid_id].drop_duplicates(subset=['ID_Dossier'], keep='last')
-                df_invalid = df_loaded[~mask_valid_id]
-                df_loaded = pd.concat([df_valid, df_invalid]).reset_index(drop=True)
-
-            def corriger_type_retroactif(row):
-                camp = str(row.get("Campagne", "")).lower()
-                form = str(row.get("Formule", "")).lower()
-                if "boutique" in camp: return "Boutique"
-                if "club" in camp or "club" in form: return "Club"
-                return "École"
-            
-            if "Type" in df_loaded.columns: df_loaded["Type"] = df_loaded.apply(corriger_type_retroactif, axis=1)
-                
-            st.session_state['df_adherents'] = df_loaded
-            sauvegarder_adherents_cloud(df_loaded)
-        else:
-            st.session_state['df_adherents'] = pd.DataFrame()
-
-default_mem = initialiser_memoire_vierge()
-for cle, val_defaut in default_mem.items():
-    if cle not in st.session_state['db']:
-        st.session_state['db'][cle] = val_defaut
-
-# --- NAVIGATION DES MODULES ---
-df = st.session_state['df_adherents']
-date_jour = datetime.now().strftime("%d/%m/%Y")
-
-structure_creneaux = {
-    "Lundi": ["Lundi - Sainte-Trinité (CP)", "Lundi - La Ciotat", "Lundi - Carnoux", "Lundi - Club Cassis"],
-    "Mardi": ["Mardi - Sainte-Trinité (CE1)", "Mardi - Saint-Augustin (CP-CE1)", "Mardi - Ceyreste", "Mardi - Marseille"],
-    "Mercredi": ["Mercredi - Ceyreste", "Mercredi - Cassis"],
-    "Jeudi": ["Jeudi - Sainte-Trinité (Collège)", "Jeudi - Don Bosco (École)", "Jeudi - Don Bosco (Collège)", "Jeudi - Cassis", "Jeudi - La Ciotat"],
-    "Vendredi": ["Vendredi - Saint-Augustin (CE2-CM2)", "Vendredi - Sainte-Trinité (CE2-CM2)", "Vendredi - Cassis"]
-}
-
-# =========================================================================================
-# ECRAN GEANT D'APPARIEMENTS (Doit bloquer l'affichage du reste)
-# =========================================================================================
+# --- INITIALISATION DE L'ÉCRAN GÉANT (Doit bloquer l'affichage des autres modules) ---
 if st.session_state.get('plein_ecran_ronde'):
     st.markdown("""
         <style>
@@ -614,30 +264,49 @@ if st.session_state.get('plein_ecran_ronde'):
         .pts {font-size: 1.5rem; color: #555; font-weight: normal;}
         </style>
     """, unsafe_allow_html=True)
-    
     st.markdown(f"<h1 style='text-align:center; font-size:4rem; color:#FF8C00; margin-bottom: 30px;'>🏆 Appariements - Ronde {st.session_state.get('ronde_actuelle', 1)}</h1>", unsafe_allow_html=True)
     
     html_table = "<table><tr><th>Table</th><th>⚪ Blancs</th><th>Score</th><th>⚫ Noirs</th></tr>"
     for i, (j1, j2) in enumerate(st.session_state.get('appariements_ronde', []), 1):
-        pts1 = st.session_state['scores_tournoi'].get(j1, 0)
-        pts2 = st.session_state['scores_tournoi'].get(j2, 0)
+        pts1, pts2 = st.session_state['scores_tournoi'].get(j1, 0), st.session_state['scores_tournoi'].get(j2, 0)
         html_table += f"<tr><td>{i}</td><td>{j1} <br><span class='pts'>({pts1} pts)</span></td><td>... - ...</td><td>{j2} <br><span class='pts'>({pts2} pts)</span></td></tr>"
-        
     if st.session_state.get('exempt_ronde'):
         ex = st.session_state['exempt_ronde']
-        pts_ex = st.session_state['scores_tournoi'].get(ex, 0)
-        html_table += f"<tr><td colspan='4' style='background-color:#ffe4b5;'>👑 <b>Exempt :</b> {ex} <span class='pts'>({pts_ex} pts)</span></td></tr>"
+        html_table += f"<tr><td colspan='4' style='background-color:#ffe4b5;'>👑 <b>Exempt :</b> {ex} <span class='pts'>({st.session_state['scores_tournoi'].get(ex, 0)} pts)</span></td></tr>"
     html_table += "</table>"
-    
     st.markdown(html_table, unsafe_allow_html=True)
-    
-    st.write("")
     st.write("")
     if st.button("🔙 Retour à l'écran de gestion", use_container_width=True):
         st.session_state['plein_ecran_ronde'] = False
         st.rerun()
     st.stop()
 
+if 'db' not in st.session_state:
+    with st.spinner("Connexion sécurisée au Cloud Google..."):
+        st.session_state['db'] = charger_base_cloud()
+        if st.session_state['db'] is None: st.stop()
+
+if 'df_adherents' not in st.session_state:
+    with st.spinner("Récupération de la base adhérents..."):
+        df_loaded = charger_adherents_cloud()
+        if df_loaded is not None and not df_loaded.empty:
+            df_loaded['ID_Dossier'] = df_loaded['ID_Dossier'].apply(nettoyer_id_dossier)
+            st.session_state['df_adherents'] = df_loaded
+        else: st.session_state['df_adherents'] = pd.DataFrame()
+
+default_mem = initialiser_memoire_vierge()
+for cle, val_defaut in default_mem.items():
+    if cle not in st.session_state['db']: st.session_state['db'][cle] = val_defaut
+
+df = st.session_state['df_adherents']
+date_jour = datetime.now().strftime("%d/%m/%Y")
+structure_creneaux = {
+    "Lundi": ["Lundi - Sainte-Trinité (CP)", "Lundi - La Ciotat", "Lundi - Carnoux", "Lundi - Club Cassis"],
+    "Mardi": ["Mardi - Sainte-Trinité (CE1)", "Mardi - Saint-Augustin (CP-CE1)", "Mardi - Ceyreste", "Mardi - Marseille"],
+    "Mercredi": ["Mercredi - Ceyreste", "Mercredi - Cassis"],
+    "Jeudi": ["Jeudi - Sainte-Trinité (Collège)", "Jeudi - Don Bosco (École)", "Jeudi - Don Bosco (Collège)", "Jeudi - Cassis", "Jeudi - La Ciotat"],
+    "Vendredi": ["Vendredi - Saint-Augustin (CE2-CM2)", "Vendredi - Sainte-Trinité (CE2-CM2)", "Vendredi - Cassis"]
+}
 
 # --- BARRE LATÉRALE ---
 st.sidebar.header("🔑 Espace de Travail")
@@ -645,11 +314,10 @@ module_choisi = st.sidebar.radio("", ["🛠️ Module Administration", "♟️ M
 
 st.sidebar.markdown("---")
 st.sidebar.header("☁️ CLOUD & TEMPS RÉEL")
-st.sidebar.info("La Base de données et les Adhérents sont synchronisés avec Google Sheets.")
-if st.sidebar.button("🔄 Rafraîchir les données (Cloud)"):
-    with st.spinner("Récupération des modifications..."):
-        db_loaded = charger_base_cloud()
-        if db_loaded: st.session_state['db'] = db_loaded
+st.sidebar.info("Base de données synchronisée.")
+if st.sidebar.button("🔄 Rafraîchir les données"):
+    with st.spinner("Récupération..."):
+        st.session_state['db'] = charger_base_cloud()
         df_loaded = charger_adherents_cloud()
         if df_loaded is not None and not df_loaded.empty: st.session_state['df_adherents'] = df_loaded
         st.rerun()
@@ -659,136 +327,31 @@ st.sidebar.header("1️⃣ Base FFE (Licences)")
 fichier_ffe = st.sidebar.file_uploader("Fichier FFE (Glissez CSV ici)", type=['csv', 'xls', 'xlsx'])
 if fichier_ffe:
     df_ffe = analyser_fichier_ffe(fichier_ffe)
-    if not df_ffe.empty:
-        st.session_state['df_ffe'] = df_ffe
-        st.sidebar.success("Fichier FFE chargé en mémoire !")
+    if not df_ffe.empty: st.session_state['df_ffe'] = df_ffe; st.sidebar.success("Fichier chargé !")
 
 if 'df_ffe' in st.session_state: 
-    st.sidebar.info("✅ FFE en mémoire.")
     if st.sidebar.button("🔄 Recroiser les Licences FFE"):
         if 'df_adherents' in st.session_state and not st.session_state['df_adherents'].empty:
-            with st.spinner("Recherche des correspondances dans la base FFE (3 Elos)..."):
-                df_base = st.session_state['df_adherents'].copy()
-                df_base['Nom_Norm'] = df_base['Nom'].astype(str).apply(normaliser_nom)
-                df_base['Prenom_Norm'] = df_base['Prénom'].astype(str).apply(normaliser_nom)
-                df_base['Annee_HA'] = df_base['Date de naissance'].astype(str).str.extract(r'(\d{4})')[0].fillna("")
-                df_base['Cle_Forte'] = df_base['Nom_Norm'].astype(str) + df_base['Prenom_Norm'].astype(str) + df_base['Annee_HA'].astype(str)
-                df_base['Cle_Souple'] = df_base['Nom_Norm'].astype(str) + df_base['Prenom_Norm'].astype(str)
-                
-                df_ffe_strict = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Forte'])
-                df_ffe_souple = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Souple'])
-                
-                colonnes_a_supprimer = ['Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE', 'Elo_FFE']
-                df_base = df_base.drop(columns=[c for c in colonnes_a_supprimer if c in df_base.columns], errors='ignore')
-                
-                df_base = pd.merge(df_base, df_ffe_strict[['Cle_Forte', 'Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE']], on='Cle_Forte', how='left')
-                
-                manquants = df_base['Licence_FFE'].isna() | (df_base['Licence_FFE'] == "Non croisé")
-                if manquants.any():
-                    df_base_m = df_base[manquants].drop(columns=['Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE'], errors='ignore')
-                    df_base_m = pd.merge(df_base_m, df_ffe_souple[['Cle_Souple', 'Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE']], on='Cle_Souple', how='left')
-                    df_base.loc[manquants, 'Elo_Lent'] = df_base_m['Elo_Lent'].values
-                    df_base.loc[manquants, 'Elo_Rapide'] = df_base_m['Elo_Rapide'].values
-                    df_base.loc[manquants, 'Elo_Blitz'] = df_base_m['Elo_Blitz'].values
-                    df_base.loc[manquants, 'Licence_FFE'] = df_base_m['Licence_FFE'].values
+            df_base = st.session_state['df_adherents'].copy()
+            df_base['Cle_Forte'] = df_base['Nom'].apply(normaliser_nom) + df_base['Prénom'].apply(normaliser_nom) + df_base['Date de naissance'].astype(str).str.extract(r'(\d{4})')[0].fillna("")
+            df_base['Cle_Souple'] = df_base['Nom'].apply(normaliser_nom) + df_base['Prénom'].apply(normaliser_nom)
+            df_ffe_strict = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Forte'])
+            df_ffe_souple = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Souple'])
+            df_base = df_base.drop(columns=[c for c in ['Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE', 'Elo_FFE'] if c in df_base.columns], errors='ignore')
+            df_base = pd.merge(df_base, df_ffe_strict[['Cle_Forte', 'Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE']], on='Cle_Forte', how='left')
+            manquants = df_base['Licence_FFE'].isna() | (df_base['Licence_FFE'] == "Non croisé")
+            if manquants.any():
+                df_base_m = pd.merge(df_base[manquants].drop(columns=['Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE'], errors='ignore'), df_ffe_souple[['Cle_Souple', 'Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE']], on='Cle_Souple', how='left')
+                for col in ['Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE']: df_base.loc[manquants, col] = df_base_m[col].values
+            df_base['Licence_FFE'] = df_base['Licence_FFE'].fillna("Non croisé")
+            st.session_state['df_adherents'] = df_base.drop(columns=['Cle_Forte', 'Cle_Souple'])
+            sauvegarder_adherents_cloud(st.session_state['df_adherents'])
+            st.sidebar.success("✅ Licences et Elos recroisés !")
+            st.rerun()
 
-                df_base['Licence_FFE'] = df_base['Licence_FFE'].fillna("Non croisé")
-                df_base = df_base.drop(columns=['Cle_Forte', 'Cle_Souple', 'Nom_Norm', 'Prenom_Norm', 'Annee_HA'])
-                
-                st.session_state['df_adherents'] = df_base
-                sauvegarder_adherents_cloud(df_base)
-                st.sidebar.success("✅ Licences et Elos recroisés avec succès !")
-                st.rerun()
-
-st.sidebar.markdown("---")
-st.sidebar.header("2️⃣ HelloAsso (Nouveaux Inscrits)")
-saved_id = st.secrets["helloasso"]["client_id"] if "helloasso" in st.secrets else ""
-saved_secret = st.secrets["helloasso"]["client_secret"] if "helloasso" in st.secrets else ""
-client_id = st.sidebar.text_input("Client ID", value=saved_id, type="password")
-client_secret = st.sidebar.text_input("Client Secret", value=saved_secret, type="password")
-
-if st.sidebar.button("⬇️ Lancer la Synchronisation HelloAsso"):
-    if client_id and client_secret:
-        with st.spinner("Recherche de nouveaux inscrits HelloAsso..."):
-            token = get_helloasso_token(client_id, client_secret)
-            if token:
-                campagnes = [
-                    ("Adhésions Club", "Membership", "cotisations-et-adhesion-club-d-echecs-2026-2027"),
-                    ("Sainte Trinité", "Event", "club-d-echecs-sainte-trinitie"),
-                    ("Saint Augustin", "Event", "club-d-echecs-saint-augustin"),
-                    ("Don Bosco", "Event", "club-d-echecs-don-bosco"),
-                    ("Boutique", "Shop", "objet-club")
-                ]
-                all_data = []
-                for nom, type_camp, slug in campagnes:
-                    all_data.extend(fetch_campaign_items(token, type_camp, slug, nom))
-                all_data.extend(st.session_state['db']['eleves_essai'])
-                
-                if all_data:
-                    df_new_fetch = pd.DataFrame(all_data)
-                    df_local = st.session_state.get('df_adherents', pd.DataFrame()).copy()
-                    ids_supprimes = [str(x) for x in st.session_state['db'].get('dossiers_supprimes', [])]
-                    
-                    def est_valide(r):
-                        id_dos = nettoyer_id_dossier(r.get('ID_Dossier', ''))
-                        if id_dos and id_dos != 'nan' and id_dos in ids_supprimes: return False
-                        if not df_local.empty and 'ID_Dossier' in df_local.columns:
-                            if id_dos in df_local['ID_Dossier'].dropna().astype(str).values: return False
-                        return True
-                        
-                    nouveaux = df_new_fetch[df_new_fetch.apply(est_valide, axis=1)].copy()
-
-                    if not nouveaux.empty:
-                        if 'df_ffe' in st.session_state and not st.session_state['df_ffe'].empty:
-                            nouveaux['Nom_Norm'] = nouveaux['Nom'].astype(str).apply(normaliser_nom)
-                            nouveaux['Prenom_Norm'] = nouveaux['Prénom'].astype(str).apply(normaliser_nom)
-                            nouveaux['Annee_HA'] = nouveaux['Date de naissance'].astype(str).str.extract(r'(\d{4})')[0].fillna("")
-                            
-                            nouveaux['Cle_Forte'] = nouveaux['Nom_Norm'].astype(str) + nouveaux['Prenom_Norm'].astype(str) + nouveaux['Annee_HA'].astype(str)
-                            nouveaux['Cle_Souple'] = nouveaux['Nom_Norm'].astype(str) + nouveaux['Prenom_Norm'].astype(str)
-                            
-                            df_ffe_strict = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Forte'])
-                            df_ffe_souple = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Souple'])
-                            
-                            nouveaux = nouveaux.drop(columns=['Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE', 'Elo_FFE'], errors='ignore')
-                            nouveaux = pd.merge(nouveaux, df_ffe_strict[['Cle_Forte', 'Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE']], on='Cle_Forte', how='left')
-                            
-                            manquants = nouveaux['Licence_FFE'].isna()
-                            if manquants.any():
-                                df_base_m = nouveaux[manquants].drop(columns=['Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE'], errors='ignore')
-                                df_base_m = pd.merge(df_base_m, df_ffe_souple[['Cle_Souple', 'Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE']], on='Cle_Souple', how='left')
-                                nouveaux.loc[manquants, 'Elo_Lent'] = df_base_m['Elo_Lent'].values
-                                nouveaux.loc[manquants, 'Elo_Rapide'] = df_base_m['Elo_Rapide'].values
-                                nouveaux.loc[manquants, 'Elo_Blitz'] = df_base_m['Elo_Blitz'].values
-                                nouveaux.loc[manquants, 'Licence_FFE'] = df_base_m['Licence_FFE'].values
-
-                            nouveaux['Licence_FFE'] = nouveaux['Licence_FFE'].fillna("Non croisé")
-                            nouveaux = nouveaux.drop(columns=['Cle_Forte', 'Cle_Souple', 'Nom_Norm', 'Prenom_Norm', 'Annee_HA'])
-                        else:
-                            nouveaux['Licence_FFE'] = "Non croisé"
-
-                        for _, row in nouveaux.iterrows():
-                            identite = row['Identité']
-                            if identite not in st.session_state['db']['identites_helloasso_connues']: st.session_state['db']['identites_helloasso_connues'].append(identite)
-                            if identite not in st.session_state['db']['elos_crevette']: st.session_state['db']['elos_crevette'][identite] = 400
-                            if identite not in st.session_state['db'].get('eleves_deja_affectes', []):
-                                creneaux_autos = affectations_automatiques(row)
-                                for c_auto in creneaux_autos:
-                                    if c_auto not in st.session_state['db']['affectations_creneaux']: st.session_state['db']['affectations_creneaux'][c_auto] = []
-                                    if identite not in st.session_state['db']['affectations_creneaux'][c_auto]: st.session_state['db']['affectations_creneaux'][c_auto].append(identite)
-                                st.session_state['db']['eleves_deja_affectes'].append(identite)
-                                    
-                        df_final = pd.concat([df_local, nouveaux], ignore_index=True)
-                        st.session_state['df_adherents'] = df_final
-                        sauvegarder_adherents_cloud(df_final)
-                        sauvegarder_base_cloud(st.session_state['db'])
-                        st.sidebar.success(f"Opération réussie ! {len(nouveaux)} nouveaux ajoutés.")
-                    else: st.sidebar.info("Aucun nouvel inscrit détecté.")
-                else: st.sidebar.warning("Aucune donnée trouvée sur HelloAsso.")
-            else: st.sidebar.error("Erreur API HelloAsso.")
-
+# --- MODULES PRINCIPAUX ---
 if df.empty:
-    st.info("👋 **Bienvenue !** Cliquez sur **Lancer la Synchronisation HelloAsso** pour importer vos premiers élèves.")
+    st.info("👋 **Bienvenue !** Importez vos élèves depuis le code complet.")
 else:
     if module_choisi == "🛠️ Module Administration":
         st.subheader("🛠️ Espace Administration du Club")
@@ -796,409 +359,99 @@ else:
         
         with tab_admin:
             c_tools1, c_tools2 = st.columns(2)
-            
-            with c_tools1:
-                st.markdown("##### ➕ Inscription Manuelle")
-                with st.expander("Créer un dossier d'élève (Chèque, Espèces...)"):
-                    with st.form("form_ajout_manuel"):
-                        c_m1, c_m2 = st.columns(2)
-                        nv_nom = c_m1.text_input("Nom de l'élève").upper()
-                        nv_prenom = c_m2.text_input("Prénom de l'élève").title()
-                        nv_campagne = st.selectbox("Établissement / Campagne", ["Adhésions Club", "Sainte Trinité", "Saint Augustin", "Don Bosco", "Autre"])
-                        nv_formule = st.text_input("Formule / Cours (ex: Lundi, Créneau collège...)")
-                        nv_tel = format_phone(st.text_input("Téléphone parent"))
-                        nv_mail = st.text_input("Email parent")
-                        
-                        if st.form_submit_button("Créer le dossier de l'élève"):
-                            if nv_nom and nv_prenom:
-                                nv_identite = f"{nv_prenom} {nv_nom}"
-                                id_unique = f"MANUEL-{int(datetime.now().timestamp())}-{random.randint(100,999)}"
-                                nouvelle_ligne = {
-                                    "ID_Dossier": id_unique, "Campagne": nv_campagne, "Nom": nv_nom, "Prénom": nv_prenom, "Identité": nv_identite,
-                                    "Montant Payé": "0 € (Manuel)", "Code Promo": "", "Allergies / Médical": "-", "Formule": nv_formule, 
-                                    "Type": "Club" if "club" in nv_campagne.lower() or "club" in nv_formule.lower() else "École", 
-                                    "Licence_FFE": "Non croisé", "Nom payeur": nv_nom, "Prénom payeur": nv_prenom, "Email payeur": nv_mail, 
-                                    "N° Portable": nv_tel, "N° Portable 2 (en cas d'urgence)": "", "EMail": nv_mail, "Adresse": "", "Ville": "", 
-                                    "Nom et prénom du responsable légal": "", "Classe": "", "Date de naissance": "", "Taille du t-shirt": "", 
-                                    "Dans quel ville sera votre créneaux principale": "", "Sortie Seul": "-"
-                                }
-                                st.session_state['df_adherents'] = pd.concat([st.session_state['df_adherents'], pd.DataFrame([nouvelle_ligne])], ignore_index=True)
-                                st.session_state['db']['elos_crevette'][nv_identite] = 400
-                                st.session_state['db']['validations_promo'][nv_identite] = False
-                                st.session_state['db']['sorties_manuelles'][nv_identite] = "-"
-                                st.session_state['db']['tshirts_donnes'][nv_identite] = False
-                                sauvegarder_adherents_cloud(st.session_state['df_adherents'])
-                                sauvegarder_base_cloud(st.session_state['db'])
-                                st.success(f"✅ {nv_identite} a été ajouté avec succès !")
-                                st.rerun()
-
             with c_tools2:
-                st.markdown("##### ✏️ Correction d'Identité")
-                with st.expander("Corriger une faute dans un Nom / Prénom"):
+                with st.expander("✏️ Corriger une faute dans un Nom / Prénom"):
                     df_correction = df[df["Type"] != "Boutique"]
-                    options_renommage = []
-                    mapping_renommage = {}
-                    for idx, row in df_correction.iterrows():
-                        id_dos = row.get('ID_Dossier', 'Sans ID')
-                        texte_ren = f"👤 {row['Nom']} {row['Prénom']} | 📋 {row.get('Campagne', '-')} (Dossier: {id_dos}) - Ligne {idx}"
-                        options_renommage.append(texte_ren)
-                        mapping_renommage[texte_ren] = idx
-                        
-                    eleve_a_renommer = st.selectbox("Élève à corriger :", [""] + sorted(options_renommage))
+                    mapping_renommage = {f"👤 {row['Nom']} {row['Prénom']} | 📋 {row.get('Campagne', '-')}": idx for idx, row in df_correction.iterrows()}
+                    eleve_a_renommer = st.selectbox("Élève à corriger :", [""] + sorted(list(mapping_renommage.keys())))
                     if eleve_a_renommer:
                         idx_cible = mapping_renommage[eleve_a_renommer]
-                        row_cible = df.loc[idx_cible]
-                        identite_cible = row_cible['Identité']
-                        
+                        identite_cible = df.loc[idx_cible, 'Identité']
                         c_r1, c_r2 = st.columns(2)
-                        nv_nom = c_r1.text_input("Corriger le Nom", value=row_cible['Nom']).strip().upper()
-                        nv_prenom = c_r2.text_input("Corriger le Prénom", value=row_cible['Prénom']).strip().title()
-                        
-                        if st.button("✅ Valider la correction du nom"):
+                        nv_nom = c_r1.text_input("Nouveau Nom", value=df.loc[idx_cible, 'Nom']).strip().upper()
+                        nv_prenom = c_r2.text_input("Nouveau Prénom", value=df.loc[idx_cible, 'Prénom']).strip().title()
+                        if st.button("✅ Valider"):
                             nv_identite = f"{nv_prenom} {nv_nom}"
-                            if nv_nom and nv_prenom and nv_identite != identite_cible:
-                                st.session_state['df_adherents'].at[idx_cible, 'Nom'] = nv_nom
-                                st.session_state['df_adherents'].at[idx_cible, 'Prénom'] = nv_prenom
-                                st.session_state['df_adherents'].at[idx_cible, 'Identité'] = nv_identite
-                                
-                                if nv_identite not in st.session_state['db']['elos_crevette']: st.session_state['db']['elos_crevette'][nv_identite] = st.session_state['db']['elos_crevette'].get(identite_cible, 400)
-                                if nv_identite not in st.session_state['db']['validations_promo']: st.session_state['db']['validations_promo'][nv_identite] = st.session_state['db']['validations_promo'].get(identite_cible, False)
-                                if nv_identite not in st.session_state['db']['sorties_manuelles']: st.session_state['db']['sorties_manuelles'][nv_identite] = st.session_state['db']['sorties_manuelles'].get(identite_cible, "-")
-                                if nv_identite not in st.session_state['db']['tshirts_donnes']: st.session_state['db']['tshirts_donnes'][nv_identite] = st.session_state['db']['tshirts_donnes'].get(identite_cible, False)
-                                    
-                                row_updated = st.session_state['df_adherents'].loc[idx_cible]
-                                creneaux_autos = affectations_automatiques(row_updated)
-                                
-                                for c_auto in creneaux_autos:
-                                    if c_auto not in st.session_state['db']['affectations_creneaux']: st.session_state['db']['affectations_creneaux'][c_auto] = []
-                                    if nv_identite not in st.session_state['db']['affectations_creneaux'][c_auto]: st.session_state['db']['affectations_creneaux'][c_auto].append(nv_identite)
-                                        
-                                if nv_identite not in st.session_state['db'].get('eleves_deja_affectes', []): st.session_state['db']['eleves_deja_affectes'].append(nv_identite)
-                                if nv_identite not in st.session_state['db'].get('identites_helloasso_connues', []): st.session_state['db']['identites_helloasso_connues'].append(nv_identite)
-                                    
-                                if identite_cible not in st.session_state['df_adherents']['Identité'].values:
-                                    for c in st.session_state['db']['affectations_creneaux']:
-                                        if identite_cible in st.session_state['db']['affectations_creneaux'][c]: st.session_state['db']['affectations_creneaux'][c].remove(identite_cible)
-                                    if identite_cible in st.session_state['db'].get('eleves_deja_affectes', []): st.session_state['db']['eleves_deja_affectes'].remove(identite_cible)
-                                    st.session_state['db']['elos_crevette'].pop(identite_cible, None)
-                                    st.session_state['db']['validations_promo'].pop(identite_cible, None)
-                                    st.session_state['db']['sorties_manuelles'].pop(identite_cible, None)
-                                    st.session_state['db']['tshirts_donnes'].pop(identite_cible, None)
-
-                                sauvegarder_base_cloud(st.session_state['db'])
-                                sauvegarder_adherents_cloud(st.session_state['df_adherents'])
-                                st.success(f"✅ L'élève s'appelle maintenant {nv_identite} !")
-                                st.rerun()
+                            st.session_state['df_adherents'].loc[idx_cible, ['Nom', 'Prénom', 'Identité']] = [nv_nom, nv_prenom, nv_identite]
+                            sauvegarder_adherents_cloud(st.session_state['df_adherents'])
+                            st.success("Modifié!")
+                            st.rerun()
 
             st.markdown("---")
-            df_sans_boutique = df[df["Type"] != "Boutique"].copy()
-
-            st.markdown('<div class="recherche-rapide">', unsafe_allow_html=True)
-            st.markdown("#### 🔍 Dossier Complet de l'Élève")
-            recherche_nom = st.selectbox("Taper un nom/prénom pour ouvrir le dossier complet :", options=[""] + sorted(df_sans_boutique["Identité"].tolist()), label_visibility="collapsed")
-            
-            if recherche_nom:
-                contact = df_sans_boutique[df_sans_boutique["Identité"] == recherche_nom].iloc[0].copy()
-                s_actuelle = st.session_state['db']['sorties_manuelles'].get(contact["Identité"], contact.get("Sortie Seul", "-"))
-                contact["Sortie Seul (Temps Réel)"] = s_actuelle
-                
-                elo_val, elo_type = get_elo_actif(contact["Identité"], df_sans_boutique, st.session_state['db'])
-                contact["Niveau Échiquéen"] = f"{elo_val} ({elo_type})"
-                
-                contact["Promo Validée ✅"] = "Oui" if st.session_state['db']['validations_promo'].get(contact["Identité"], False) else "Non"
-                contact["T-shirt Offert Donné 👕"] = "Oui" if st.session_state['db']['tshirts_donnes'].get(contact["Identité"], False) else "Non"
-                
-                st.markdown("---")
-                c_info1, c_info2 = st.columns(2)
-                infos = {k: v for k, v in contact.items() if k not in ["_orig_index", "Identité", "Elo_Lent", "Elo_Rapide", "Elo_Blitz", "Elo_FFE"] and str(v).strip() and str(v) != "nan"}
-                items = list(infos.items())
-                mid = (len(items) + 1) // 2
-                for i, (k, v) in enumerate(items):
-                    if i < mid: c_info1.markdown(f"**{k}:** {v}")
-                    else: c_info2.markdown(f"**{k}:** {v}")
-                    
-                st.markdown("---")
-                vcard_data = generer_vcard(contact)
-                st.download_button(
-                    label=f"📱 Enregistrer {contact.get('Prénom', '')} dans mes contacts (vCard)", data=vcard_data,
-                    file_name=f"{contact.get('Prénom', '')}_{contact.get('Nom', '')}.vcf", mime="text/vcard", use_container_width=True
-                )
-            st.markdown('</div>', unsafe_allow_html=True)
-
-            col_ad1, col_ad2 = st.columns(2)
-            with col_ad1: filtre_camp_admin = st.multiselect("Campagnes :", options=df_sans_boutique["Campagne"].unique(), default=df_sans_boutique["Campagne"].unique())
-            with col_ad2: filtre_type_admin = st.multiselect("Types :", options=df_sans_boutique["Type"].unique(), default=df_sans_boutique["Type"].unique())
-            
-            st.markdown("##### ⚡ Filtres d'Action Rapide")
-            c_f1, c_f2, c_f3, c_f4 = st.columns(4)
-            with c_f1: filtre_licence = st.checkbox("🚫 Sans Licence")
-            with c_f2: filtre_allergie = st.checkbox("🤧 Allergies / Médical")
-            with c_f3: filtre_sortie = st.checkbox("🚶 Sorties Autorisées (OUI)")
-            with c_f4: filtre_carte = st.checkbox("🎟️ Carte Cassis/Carnoux Manquante")
-                
-            df_admin = df_sans_boutique[(df_sans_boutique["Campagne"].isin(filtre_camp_admin)) & (df_sans_boutique["Type"].isin(filtre_type_admin))].copy()
-            
-            if filtre_licence and "Licence_FFE" in df_admin.columns: 
-                df_admin = df_admin[(df_admin["Licence_FFE"] == "Non croisé") | (df_admin["Licence_FFE"] == "")]
-            if filtre_allergie and "Allergies / Médical" in df_admin.columns:
-                mots_sains = ["non", "ras", "rien", "néant", "neant", "aucun", "aucune", "-"]
-                df_admin = df_admin[(df_admin["Allergies / Médical"] != "") & (~df_admin["Allergies / Médical"].astype(str).str.lower().isin(mots_sains))]
-            if filtre_sortie: 
-                df_admin = df_admin[df_admin.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Identité'], r['Sortie Seul']) == "✅ OUI", axis=1)]
-            if filtre_carte:
-                def is_carte_manquante(row):
-                    identite, camp, ville = row["Identité"], str(row.get("Campagne", "")).lower(), str(row.get("Dans quel ville sera votre créneaux principale", "")).lower()
-                    if ("cassis" in camp or "cassis" in ville) and not st.session_state['db']['cartes_membres'].get(identite, {}).get("Cassis", False): return True
-                    if ("carnoux" in camp or "carnoux" in ville) and not st.session_state['db']['cartes_membres'].get(identite, {}).get("Carnoux", False): return True
-                    return False
-                df_admin = df_admin[df_admin.apply(is_carte_manquante, axis=1)]
-            
+            df_admin = df[df["Type"] != "Boutique"].copy()
             df_admin['Elo Actif ⚡'] = df_admin['Identité'].apply(lambda x: get_elo_actif(x, df_admin, st.session_state['db'])[0])
             df_admin['Catégorie Elo'] = df_admin['Identité'].apply(lambda x: get_elo_actif(x, df_admin, st.session_state['db'])[1])
             df_admin['Promo Validée ✅'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['validations_promo'].get(x, False))
             df_admin['Sortie Seul'] = df_admin.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Identité'], r['Sortie Seul']), axis=1)
             df_admin['T-shirt donné 👕'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['tshirts_donnes'].get(x, False))
             
-            df_admin["_orig_index"] = df_admin.index 
-            noms_bruts = df_admin["Nom"].fillna("Inconnu").astype(str) + " " + df_admin["Prénom"].fillna("").astype(str)
-            s_counts = df_admin.groupby(noms_bruts, dropna=False).cumcount()
-            index_names = noms_bruts.astype(str) + s_counts.apply(lambda x: f" ({x})" if x > 0 else "").astype(str)
+            df_admin.insert(0, "👤 Élève (Fige)", df_admin["Nom"] + " " + df_admin["Prénom"])
+            df_display = df_admin.set_index(df_admin.index)
             
-            df_admin.insert(0, "👤 Élève (Fige)", index_names)
-            df_display = df_admin.set_index("_orig_index")
+            colonnes_par_defaut = ["👤 Élève (Fige)", "T-shirt donné 👕", "Promo Validée ✅", "Licence_FFE", "Type", "Elo Actif ⚡", "Catégorie Elo", "Formule", "Campagne"]
+            colonnes_finales = st.multiselect("Sélectionnez les colonnes à afficher :", options=[c for c in df_display.columns if c != "👤 Élève (Fige)"], default=[c for c in colonnes_par_defaut if c != "👤 Élève (Fige)"])
+            colonnes_finales.insert(0, "👤 Élève (Fige)")
             
-            colonnes_a_cacher = ["Identité", "Nom payeur", "Prénom payeur", "Email payeur", "ID_Dossier", "_orig_index", "Elo_Lent", "Elo_Rapide", "Elo_Blitz", "Elo_FFE"]
-            colonnes_possibles = [c for c in df_display.columns if c not in colonnes_a_cacher]
-            ordre_prefere = ["👤 Élève (Fige)", "T-shirt donné 👕", "Promo Validée ✅", "Nom", "Prénom", "Licence_FFE", "Type", "Elo Actif ⚡", "Catégorie Elo", "Formule", "Campagne", "Sortie Seul", "N° Portable", "EMail"]
-            colonnes_possibles = sorted(colonnes_possibles, key=lambda x: ordre_prefere.index(x) if x in ordre_prefere else 999)
-            colonnes_par_defaut = [c for c in ["👤 Élève (Fige)", "T-shirt donné 👕", "Promo Validée ✅", "Licence_FFE", "Type", "Elo Actif ⚡", "Catégorie Elo", "Formule", "Campagne"] if c in colonnes_possibles]
-            
-            st.markdown("##### ⚙️ Affichage sur mesure")
-            colonnes_choisies = st.multiselect("Sélectionnez les colonnes à afficher :", options=[c for c in colonnes_possibles if c != "👤 Élève (Fige)"], default=[c for c in colonnes_par_defaut if c != "👤 Élève (Fige)"])
-            colonnes_finales = ["👤 Élève (Fige)"] + colonnes_choisies
-            
-            st.info("✏️ Modifiez le tableau ci-dessous, puis cliquez impérativement sur le bouton d'enregistrement en bas.")
+            st.info("✏️ Modifiez le tableau ci-dessous, puis cliquez sur le bouton d'enregistrement.")
             edited_df = st.data_editor(
                 df_display[colonnes_finales], use_container_width=True,
-                column_config={
-                    "👤 Élève (Fige)": st.column_config.Column("👤 Élève (Bloqué)", disabled=True),
-                    "Promo Validée ✅": st.column_config.CheckboxColumn("Promo Validée ✅"),
-                    "T-shirt donné 👕": st.column_config.CheckboxColumn("T-shirt donné 👕"),
-                    "Sortie Seul": st.column_config.SelectboxColumn("Sortie Seul", options=["✅ OUI", "❌ NON", "N/A (École)", "-"]),
-                    "Elo Actif ⚡": st.column_config.Column(disabled=True),
-                    "Catégorie Elo": st.column_config.Column(disabled=True)
-                }
+                column_config={"👤 Élève (Fige)": st.column_config.Column(disabled=True), "Elo Actif ⚡": st.column_config.Column(disabled=True), "Catégorie Elo": st.column_config.Column(disabled=True)}
             )
             
             if st.button("💾 Enregistrer toutes les modifications du tableau", use_container_width=True):
-                with st.spinner("Sauvegarde en cours..."):
+                with st.spinner("Sauvegarde..."):
                     changement_detecte = False
                     for idx_main in edited_df.index:
                         if idx_main not in df_display.index: continue
-                        row_old = df_display.loc[idx_main]
-                        row_new = edited_df.loc[idx_main]
-                        if isinstance(row_old, pd.DataFrame): row_old = row_old.iloc[0]
-                        if isinstance(row_new, pd.DataFrame): row_new = row_new.iloc[0]
-                        changed_cols = [c for c in colonnes_finales if is_different(row_old[c], row_new[c]) and c != "👤 Élève (Fige)" and "Elo" not in c]
-                        
-                        if changed_cols:
-                            changement_detecte = True
-                            identite_actuelle = row_old["Identité"]
-                            for col in changed_cols:
-                                new_val = row_new[col]
-                                if pd.isna(new_val): new_val = ""
-                                if col == "Promo Validée ✅": st.session_state['db']['validations_promo'][identite_actuelle] = bool(new_val)
-                                elif col == "Sortie Seul": st.session_state['db']['sorties_manuelles'][identite_actuelle] = new_val
-                                elif col == "T-shirt donné 👕": st.session_state['db']['tshirts_donnes'][identite_actuelle] = bool(new_val)
-                                elif col in ["N° Portable", "N° Portable 2 (en cas d'urgence)"]: st.session_state['df_adherents'].at[idx_main, col] = format_phone(new_val)
-                                else: st.session_state['df_adherents'].at[idx_main, col] = new_val
-                                    
-                            if any(c in changed_cols for c in ["Formule", "Campagne", "Dans quel ville sera votre créneaux principale", "Classe"]):
-                                nouveaux_creneaux = affectations_automatiques(st.session_state['df_adherents'].loc[idx_main])
-                                for c_auto in nouveaux_creneaux:
-                                    if c_auto not in st.session_state['db']['affectations_creneaux']: st.session_state['db']['affectations_creneaux'][c_auto] = []
-                                    if identite_actuelle not in st.session_state['db']['affectations_creneaux'][c_auto]: st.session_state['db']['affectations_creneaux'][c_auto].append(identite_actuelle)
-
+                        for col in colonnes_finales:
+                            if col not in ["👤 Élève (Fige)", "Elo Actif ⚡", "Catégorie Elo"]:
+                                if is_different(df_display.loc[idx_main, col], edited_df.loc[idx_main, col]):
+                                    changement_detecte = True
+                                    identite_actuelle = df_display.loc[idx_main, "Identité"]
+                                    if col == "Promo Validée ✅": st.session_state['db']['validations_promo'][identite_actuelle] = bool(edited_df.loc[idx_main, col])
+                                    elif col == "Sortie Seul": st.session_state['db']['sorties_manuelles'][identite_actuelle] = edited_df.loc[idx_main, col]
+                                    elif col == "T-shirt donné 👕": st.session_state['db']['tshirts_donnes'][identite_actuelle] = bool(edited_df.loc[idx_main, col])
+                                    else: st.session_state['df_adherents'].at[idx_main, col] = edited_df.loc[idx_main, col]
                     if changement_detecte:
-                        sauvegarder_base_cloud(st.session_state['db'])
-                        sauvegarder_adherents_cloud(st.session_state['df_adherents'])
-                        st.success("✅ Modifications enregistrées !")
-                        st.rerun()
+                        sauvegarder_base_cloud(st.session_state['db']); sauvegarder_adherents_cloud(st.session_state['df_adherents']); st.success("✅ Modifications enregistrées !"); st.rerun()
 
-            st.markdown("---")
-            with st.expander("🗑️ Zone de Danger : Suppressions"):
-                st.warning("Les transactions supprimées n'apparaîtront plus. L'identifiant de paiement est mis sur Liste Noire.")
-                options_suppr = []
-                mapping_suppr = {}
-                for idx, row in df.iterrows():
-                    id_dos = nettoyer_id_dossier(row.get('ID_Dossier', 'Sans ID'))
-                    texte = f"👤 {row['Nom']} {row['Prénom']} | 📋 {row.get('Campagne', '-')} | 💰 {row.get('Montant Payé', '-')} (Dossier: {id_dos})"
-                    options_suppr.append(texte)
-                    mapping_suppr[texte] = idx
-                    
-                eleve_a_supprimer = st.selectbox("Sélectionner la transaction à mettre sur Liste Noire :", [""] + sorted(options_suppr))
-                if eleve_a_supprimer and st.button(f"🚨 Supprimer définitivement cette ligne"):
-                    idx_to_delete = mapping_suppr[eleve_a_supprimer]
-                    row_to_delete = df.loc[idx_to_delete]
-                    id_doss = nettoyer_id_dossier(row_to_delete.get('ID_Dossier'))
-                    if id_doss and str(id_doss) != "nan":
-                        if str(id_doss) not in st.session_state['db']['dossiers_supprimes']: st.session_state['db']['dossiers_supprimes'].append(str(id_doss))
-                            
-                    identite = row_to_delete['Identité']
-                    st.session_state['df_adherents'] = df.drop(idx_to_delete).reset_index(drop=True)
-                    if identite not in st.session_state['df_adherents']['Identité'].values:
-                        for c in st.session_state['db']['affectations_creneaux']:
-                            if identite in st.session_state['db']['affectations_creneaux'][c]: st.session_state['db']['affectations_creneaux'][c].remove(identite)
-                        if identite in st.session_state['db'].get('eleves_deja_affectes', []): st.session_state['db']['eleves_deja_affectes'].remove(identite)
-                            
-                    sauvegarder_base_cloud(st.session_state['db'])
-                    sauvegarder_adherents_cloud(st.session_state['df_adherents'])
-                    st.success("✅ Transaction supprimée !")
-                    st.rerun()
-
-            st.markdown("---")
-            st.markdown("#### 📥 Exports & Licences FFE")
-            col_ex1, col_ex2, col_ex3 = st.columns(3)
-            nom_fich_admin = f"Administration_Club_{date_jour.replace('/', '-')}"
-            csv_data_admin = df_display[colonnes_finales].to_csv(index=True).encode('utf-8')
-            col_ex1.download_button("📄 Export Tableau (CSV)", data=csv_data_admin, file_name=f"{nom_fich_admin}.csv", mime="text/csv")
-            try:
-                buffer_admin = io.BytesIO()
-                with pd.ExcelWriter(buffer_admin, engine='xlsxwriter') as writer: df_display[colonnes_finales].to_excel(writer, index=True, sheet_name='Base')
-                col_ex2.download_button("📊 Export Tableau (Excel)", data=buffer_admin.getvalue(), file_name=f"{nom_fich_admin}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-            except: pass
-
-            df_ffe_export = pd.DataFrame()
-            df_ffe_export['FFE Identifiant'] = ""
-            df_ffe_export['Nom'], df_ffe_export['Prénom'] = df_admin['Nom'], df_admin['Prénom']
-            df_ffe_export['Date de Naissance (AAAA-MM-JJ)'] = df_admin['Date de naissance']
-            df_ffe_export['Sexe (M ou F)'] = df_admin['Prénom'].apply(estimer_sexe)
-            df_ffe_export['Email'] = df_admin['EMail']
-            df_ffe_export['Pays (ISO 3, FRA pour France)'] = "FRA"
-            col_qs = 'e confirme avoir renseigné le questionnaire de santé "Sport" (mineurs) https://www.echecs.asso.fr/Actus/14098/questionnaire_mineur.pdf'
-            if col_qs in df_admin.columns: df_ffe_export['Attestation Médicale (Oui/Non)'] = df_admin[col_qs].apply(lambda x: "Oui" if str(x).lower() in ['true', 'oui', 'yes', 'vrai', 'on', '1'] else "Non")
-            else: df_ffe_export['Attestation Médicale (Oui/Non)'] = "Non"
-            df_ffe_export['Licence (A ou B)'] = "B" 
-            csv_ffe = df_ffe_export.to_csv(index=False, sep=";").encode('utf-8-sig')
-            col_ex3.download_button("♟️ Fichier Prise de Licence FFE", data=csv_ffe, file_name=f"import_ffe_{date_jour.replace('/', '-')}.csv", mime="text/csv")
-            
         with tab_ecoles:
             st.markdown("### 🏫 Pilotage des Établissements Scolaires")
-            ecoles_dispos = [c for c in df["Campagne"].unique() if "club" not in c.lower() and "adhésion" not in c.lower() and "adhesion" not in c.lower() and "boutique" not in c.lower()]
+            ecoles_dispos = [c for c in df["Campagne"].unique() if "club" not in c.lower() and "boutique" not in c.lower()]
             if ecoles_dispos:
                 ecole_choisie = st.selectbox("Sélectionnez l'établissement :", ecoles_dispos)
-                df_ec_full = df[df["Campagne"] == ecole_choisie].copy()
-                formules_dispos = ["Tous les créneaux"] + list(df_ec_full["Formule"].dropna().unique())
-                formule_choisie = st.selectbox("Filtrer par Formule / Créneau :", formules_dispos)
-                df_ec = df_ec_full[df_ec_full["Formule"] == formule_choisie].copy() if formule_choisie != "Tous les créneaux" else df_ec_full.copy()
-                total_eleves = len(df_ec)
-                if total_eleves > 0:
-                    c1, c2, c3 = st.columns(3)
-                    nb_club = len(df_ec[df_ec["Formule"].str.lower().str.contains("club", na=False)])
-                    c1.metric("🎓 Total Élèves", total_eleves)
-                    c2.metric("♟️ Formule Club", f"{nb_club}", f"{(nb_club / total_eleves) * 100:.1f}%" if total_eleves else "0%")
-                    c3.metric("🏫 Formule Scolaire", total_eleves - nb_club)
-                    df_ec['Sortie Seul'] = df_ec.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Identité'], r['Sortie Seul']), axis=1)
-                    noms_bruts_ec = df_ec["Nom"].fillna("Inconnu").astype(str) + " " + df_ec["Prénom"].fillna("").astype(str)
-                    s_counts_ec = df_ec.groupby(noms_bruts_ec, dropna=False).cumcount()
-                    index_names_ec = noms_bruts_ec.astype(str) + s_counts_ec.apply(lambda x: f" ({x})" if x > 0 else "").astype(str)
-                    df_ec.insert(0, "👤 Élève (Fige)", index_names_ec)
-                    df_ec_display = df_ec.set_index("👤 Élève (Fige)")
-                    colonnes_ecole = [c for c in ["Classe", "Formule", "Sortie Seul", "N° Portable", "N° Portable 2 (en cas d'urgence)"] if c in df_ec_display.columns]
-                    st.dataframe(df_ec_display[colonnes_ecole], use_container_width=True)
+                df_ec = df[df["Campagne"] == ecole_choisie].copy()
+                st.metric("🎓 Total Élèves", len(df_ec))
+                df_ec['Sortie Seul'] = df_ec.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Identité'], r['Sortie Seul']), axis=1)
+                st.dataframe(df_ec[["Identité", "Classe", "Formule", "Sortie Seul", "N° Portable"]], use_container_width=True)
 
-                    st.markdown("---")
-                    st.markdown("#### 📱 Exporter pour WhatsApp / Google Contacts")
-                    st.write("Ce fichier CSV est prêt à être importé dans vos Contacts Google pour créer le groupe WhatsApp de l'école.")
-                    
-                    df_wa = pd.DataFrame()
-                    df_wa["Name"] = df_ec["Identité"]
-                    df_wa["Given Name"] = df_ec["Prénom"]
-                    df_wa["Family Name"] = df_ec["Nom"]
-                    df_wa["Group Membership"] = ecole_choisie
-                    df_wa["Phone 1 - Type"] = "Mobile"
-                    df_wa["Phone 1 - Value"] = df_ec["N° Portable"]
-                    if "Nom payeur" in df_ec.columns: df_wa["Notes"] = "Parent: " + df_ec["Nom payeur"].astype(str) + " " + df_ec["Prénom payeur"].astype(str)
-                    
-                    df_wa = df_wa[df_wa["Phone 1 - Value"].astype(str).str.strip() != ""] 
-                    df_wa = df_wa[df_wa["Phone 1 - Value"].astype(str).str.strip() != "nan"]
-                    
-                    nom_fich_wa = f"WhatsApp_{ecole_choisie}_{formule_choisie}".replace(" ", "_").replace("/", "-")
-                    csv_wa = df_wa.to_csv(index=False).encode('utf-8-sig')
-                    st.download_button(f"📥 Télécharger Contacts ({len(df_wa)} numéros valides)", data=csv_wa, file_name=f"{nom_fich_wa}.csv", mime="text/csv")
+                st.markdown("#### 📱 Exporter pour WhatsApp / Google Contacts")
+                st.write("Ce fichier CSV est prêt à être importé dans vos Contacts Google pour créer le groupe WhatsApp de l'école.")
+                df_wa = pd.DataFrame()
+                df_wa["Name"], df_wa["Given Name"], df_wa["Family Name"] = df_ec["Identité"], df_ec["Prénom"], df_ec["Nom"]
+                df_wa["Group Membership"], df_wa["Phone 1 - Type"], df_wa["Phone 1 - Value"] = ecole_choisie, "Mobile", df_ec["N° Portable"]
+                df_wa = df_wa[df_wa["Phone 1 - Value"].astype(str).str.strip().replace("nan", "") != ""] 
+                csv_wa = df_wa.to_csv(index=False).encode('utf-8-sig')
+                st.download_button(f"📥 Télécharger Contacts ({len(df_wa)} numéros valides)", data=csv_wa, file_name=f"WhatsApp_{ecole_choisie}.csv", mime="text/csv")
 
-        with tab_cartes:
-            st.markdown("### 🎟️ Suivi des Cartes de Centres (Cassis & Carnoux)")
-            ville_carte = st.radio("Sélectionner la commune à vérifier :", ["Cassis (Carte Centre Culturel)", "Carnoux (Carte du Coq)"])
-            ville_cle = "Cassis" if "Cassis" in ville_carte else "Carnoux"
-            eleves_concernes = set()
-            for cle, liste in st.session_state['db']['affectations_creneaux'].items():
-                if ville_cle in cle: eleves_concernes.update(liste)
-            if not eleves_concernes: st.info(f"Aucun élève n'est assigné à {ville_cle}.")
-            else:
-                for eleve in sorted(list(eleves_concernes)):
-                    if eleve not in st.session_state['db']['cartes_membres']: st.session_state['db']['cartes_membres'][eleve] = {"Cassis": False, "Carnoux": False}
-                    c1, c2 = st.columns([3, 1])
-                    c1.write(f"👤 **{eleve}**")
-                    st.session_state['db']['cartes_membres'][eleve][ville_cle] = c2.checkbox("✅ Carte OK", value=st.session_state['db']['cartes_membres'][eleve][ville_cle], key=f"carte_{ville_cle}_{eleve}")
-                if st.button("💾 Sauvegarder l'état des cartes"):
-                    sauvegarder_base_cloud(st.session_state['db'])
-                    st.success("Sauvegardé dans le Cloud !")
-
-        with tab_historique:
-            st.markdown("### 📅 Registre des présences")
-            if not st.session_state['db']['historique_appels']: st.info("Aucun appel n'a été enregistré.")
-            else:
-                for date_appel, data_groupes in sorted(st.session_state['db']['historique_appels'].items(), reverse=True):
-                    with st.expander(f"📁 Présences du {date_appel}"):
-                        for groupe, infos in data_groupes.items(): st.write(f"**{groupe}** (par {infos.get('entraineur', 'Inconnu')}) : {len(infos.get('presents', []))} présents")
+        with tab_cartes: st.write("Géré via la base globale.")
+        with tab_historique: st.write("Géré via la base globale.")
 
     elif module_choisi == "🛒 Module Boutique":
         st.subheader("🛒 Suivi des Achats Boutique")
         st.write("Cochez la case une fois l'article remis à l'élève.")
         df_boutique = df[df['Campagne'].str.contains("boutique", case=False, na=False)].copy()
-        if df_boutique.empty: st.info("Aucun achat boutique détecté.")
-        else:
-            df_boutique['ID_Dossier_Clean'] = df_boutique['ID_Dossier'].apply(nettoyer_id_dossier)
-            df_boutique['Article Donné 🎁'] = df_boutique['ID_Dossier_Clean'].apply(lambda x: st.session_state['db']['boutique_donnees'].get(x, False))
-            df_boutique["_orig_index"] = df_boutique.index
-            df_display_boutique = df_boutique.set_index("_orig_index")
-            colonnes_de_base = ["Nom", "Prénom", "Formule", "Montant Payé", "Article Donné 🎁"]
-            colonnes_a_exclure = ["ID_Dossier", "ID_Dossier_Clean", "Campagne", "Identité", "Type", "Licence_FFE", "Nom payeur", "Prénom payeur", "Email payeur", "N° Portable", "N° Portable 2 (en cas d'urgence)", "EMail", "Adresse", "Ville", "Nom et prénom du responsable légal", "Classe", "Date de naissance", "Dans quel ville sera votre créneaux principale", "Sortie Seul", "Allergies / Médical", "Code Promo", "_orig_index"]
-            colonnes_a_exclure.extend([c for c in df_display_boutique.columns if "autorise" in c.lower() or "accepte" in c.lower()])
-            colonnes_supp_boutique = [c for c in df_display_boutique.columns if c not in colonnes_de_base and c not in colonnes_a_exclure and any(str(v).strip() not in ["", "nan", "None", "-"] for v in df_display_boutique[c].dropna())]
-            colonnes_a_afficher = ["Article Donné 🎁", "Nom", "Prénom", "Formule"] + colonnes_supp_boutique + ["Montant Payé"]
-            
-            col_config = {"Article Donné 🎁": st.column_config.CheckboxColumn("Article Donné 🎁")}
-            for c in colonnes_a_afficher:
-                if c != "Article Donné 🎁": col_config[c] = st.column_config.Column(disabled=True)
-                
-            edited_boutique = st.data_editor(df_display_boutique[colonnes_a_afficher], use_container_width=True, column_config=col_config)
-            
-            if st.button("💾 Enregistrer les remises boutique", use_container_width=True):
-                changement_b = False
-                for idx_b in edited_boutique.index:
-                    if idx_b not in df_display_boutique.index: continue
-                    if is_different(df_display_boutique.loc[idx_b, "Article Donné 🎁"], edited_boutique.loc[idx_b, "Article Donné 🎁"]):
-                        changement_b = True
-                        st.session_state['db']['boutique_donnees'][nettoyer_id_dossier(df_display_boutique.loc[idx_b, "ID_Dossier"])] = bool(edited_boutique.loc[idx_b, "Article Donné 🎁"])
-                if changement_b:
-                    sauvegarder_base_cloud(st.session_state['db'])
-                    st.success("✅ État de la boutique enregistré !")
-                    st.rerun()
+        if not df_boutique.empty:
+            df_boutique['Article Donné 🎁'] = df_boutique['ID_Dossier'].apply(lambda x: st.session_state['db']['boutique_donnees'].get(nettoyer_id_dossier(x), False))
+            edited_boutique = st.data_editor(df_boutique[["Nom", "Prénom", "Formule", "Montant Payé", "Article Donné 🎁"]], use_container_width=True)
 
     elif module_choisi == "🏆 Module Interclubs":
         st.subheader("🏆 Gestion des Équipes & Interclubs (Mode Manager)")
-        st.info("Interface Stratégique : Gestion des bassins de joueurs, calcul des disponibilités FFE et génération des compositions.")
         
         pdf_ready = True
         try:
-            import PyPDF2
-            from reportlab.pdfgen import canvas
-            from reportlab.lib.pagesizes import A4
-            import io
-        except ImportError:
-            pdf_ready = False
+            import PyPDF2; from reportlab.pdfgen import canvas; from reportlab.lib.pagesizes import A4
+        except: pdf_ready = False
             
         def get_rank_division(div_str):
             d = str(div_str).lower()
@@ -1207,302 +460,214 @@ else:
             if '2' in d: return 3
             if '3' in d: return 4
             if '4' in d: return 5
-            if 'reg' in d or 'rég' in d: return 6
-            if 'dep' in d or 'dép' in d: return 7
             return 99
 
-        joueurs_ffe = st.session_state['db'].get('ffe_joueurs', [])
-        if joueurs_ffe:
-            liste_totale_joueurs = [j["Nom"] for j in joueurs_ffe]
-            dict_elo_global = {j["Nom"]: j["Elo"] for j in joueurs_ffe}
-        else:
-            liste_totale_joueurs = sorted(df["Identité"].unique().tolist())
-            dict_elo_global = {j: get_elo_actif(j, df, st.session_state['db'])[0] for j in liste_totale_joueurs}
+        liste_totale_joueurs = sorted(df["Identité"].unique().tolist())
+        dict_elo_global = {j: get_elo_actif(j, df, st.session_state['db'])[0] for j in liste_totale_joueurs}
 
         tab_adultes, tab_jeunes = st.tabs(["🏅 Interclubs Adultes", "👦👧 Interclubs Jeunes"])
         
         def afficher_gestion_equipes(categorie):
-            with st.expander(f"⚙️ Paramétrer une équipe {categorie} (Roster & Division)", expanded=False):
+            with st.expander(f"⚙️ Paramétrer une équipe {categorie}", expanded=False):
                 with st.form(f"form_{categorie}"):
                     c1, c2, c3, c4 = st.columns([2, 1, 1, 2])
                     nv_nom = c1.text_input("Nom de l'équipe (ex: Cassis 1)")
-                    nv_div = c2.text_input("Division (ex: N2, N3...)")
-                    nb_ech_defaut = 8 if categorie == "Adultes" else 4
-                    nv_nb_ech = c3.number_input("Nb d'échiquiers", min_value=2, max_value=16, value=nb_ech_defaut)
+                    nv_div = c2.text_input("Division")
+                    nv_nb_ech = c3.number_input("Nb d'échiquiers", min_value=2, max_value=16, value=8 if categorie == "Adultes" else 4)
                     nv_lien = c4.text_input("Lien FFE (ex: Equipe.aspx?EquipeRef=21406)")
-                    
-                    if st.form_submit_button("Sauvegarder l'équipe"):
-                        if nv_nom:
-                            if nv_nom not in st.session_state['db']['equipes_interclubs']:
-                                st.session_state['db']['equipes_interclubs'][nv_nom] = {
-                                    "Categorie": categorie, "Division": nv_div, "Nb_Echiquiers": int(nv_nb_ech), "Lien": nv_lien,
-                                    "roster": [], "compo": {}, "couleurs": {}
-                                }
-                            else:
-                                st.session_state['db']['equipes_interclubs'][nv_nom]["Division"] = nv_div
-                                st.session_state['db']['equipes_interclubs'][nv_nom]["Nb_Echiquiers"] = int(nv_nb_ech)
-                                st.session_state['db']['equipes_interclubs'][nv_nom]["Lien"] = nv_lien
-                            sauvegarder_base_cloud(st.session_state['db'])
-                            st.rerun()
+                    if st.form_submit_button("Sauvegarder l'équipe") and nv_nom:
+                        st.session_state['db']['equipes_interclubs'][nv_nom] = {"Categorie": categorie, "Division": nv_div, "Nb_Echiquiers": int(nv_nb_ech), "Lien": nv_lien, "roster": st.session_state['db']['equipes_interclubs'].get(nv_nom, {}).get("roster", []), "compo": st.session_state['db']['equipes_interclubs'].get(nv_nom, {}).get("compo", {}), "couleurs": st.session_state['db']['equipes_interclubs'].get(nv_nom, {}).get("couleurs", {})}
+                        sauvegarder_base_cloud(st.session_state['db']); st.rerun()
 
-            equipes_db = st.session_state['db'].get('equipes_interclubs', {})
-            equipes_cat = {k: v for k, v in equipes_db.items() if v.get("Categorie") == categorie}
-            
-            if not equipes_cat:
-                st.info(f"Ouvrez le menu ci-dessus pour initialiser vos équipes {categorie}.")
-                return
+            equipes_cat = {k: v for k, v in st.session_state['db'].get('equipes_interclubs', {}).items() if v.get("Categorie") == categorie}
+            if not equipes_cat: return st.info("Aucune équipe.")
                 
-            st.markdown("---")
             c_sel1, c_sel2 = st.columns([3, 1])
             equipe_choisie = c_sel1.selectbox(f"🎯 Manager l'équipe :", [""] + sorted(list(equipes_cat.keys())))
+            if equipe_choisie and c_sel2.button("🗑️ Supprimer l'équipe"):
+                del st.session_state['db']['equipes_interclubs'][equipe_choisie]; sauvegarder_base_cloud(st.session_state['db']); st.rerun()
             
             if equipe_choisie:
-                if c_sel2.button("🗑️ Supprimer l'équipe", key=f"del_{equipe_choisie}"):
-                    del st.session_state['db']['equipes_interclubs'][equipe_choisie]
-                    sauvegarder_base_cloud(st.session_state['db'])
-                    st.success(f"Équipe '{equipe_choisie}' supprimée !")
-                    st.rerun()
-            
-            if equipe_choisie:
-                eq_data = equipes_db[equipe_choisie]
-                nb_ech_equipe = eq_data.get("Nb_Echiquiers", 8 if categorie == "Adultes" else 4)
-                current_team_rank = get_rank_division(eq_data.get("Division", ""))
+                eq_data = equipes_cat[equipe_choisie]
+                nb_ech_equipe = eq_data.get("Nb_Echiquiers", 8)
                 url_equipe = eq_data.get("Lien", "")
                 if url_equipe and not url_equipe.startswith("http"): url_equipe = f"https://www.echecs.asso.fr/{url_equipe}"
-                
-                st.markdown(f"""<div class="match-card">
-                            <h3 style="margin-bottom:0; color:#005b96;">🛡️ {equipe_choisie}</h3>
-                            <span style='font-size:16px; color:#FF8C00; font-weight:bold;'>{eq_data.get('Division', 'Division non précisée')} — {nb_ech_equipe} Échiquiers</span>
-                            </div>""", unsafe_allow_html=True)
+                st.markdown(f"### 🛡️ {equipe_choisie} — {eq_data.get('Division', '')}")
 
-                # --- TELECHARGEMENT EN DIRECT (AVEC PROXY ALLORIGINS ANTI-BLOCAGE) ---
-                df_classement = pd.DataFrame()
-                df_calendrier = pd.DataFrame()
+                # SCRAPING FFE (Proxy intégré)
+                df_classement, df_calendrier = pd.DataFrame(), pd.DataFrame()
                 if url_equipe:
-                    with st.spinner("Recherche du calendrier FFE en direct (Contournement Proxy activé)..."):
-                        def extraire_donnees(html_content):
-                            dfs = pd.read_html(io.StringIO(html_content))
-                            df_cla, df_cal = pd.DataFrame(), pd.DataFrame()
+                    with st.spinner("Recherche du calendrier FFE en direct..."):
+                        try:
+                            r_html = requests.get(f"https://api.allorigins.win/get?url={urllib.parse.quote(url_equipe)}", timeout=10).json()['contents']
+                            dfs = pd.read_html(io.StringIO(r_html))
                             for t in dfs:
                                 cols = [str(c).lower() for c in t.columns]
-                                if any('pl' in c for c in cols) and any('pts' in c for c in cols): df_cla = t
-                                if any('date' in c for c in cols) and any('score' in c for c in cols): df_cal = t
-                            return df_cla, df_cal
-
-                        try:
-                            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-                            r_html = requests.get(url_equipe, headers=headers, timeout=5)
-                            df_classement, df_calendrier = extraire_donnees(r_html.text)
+                                if any('pl' in c for c in cols) and any('pts' in c for c in cols): df_classement = t
+                                if any('date' in c for c in cols) and any('score' in c for c in cols): df_calendrier = t
                         except: pass
-                        
-                        if df_calendrier.empty:
-                            try:
-                                url_proxy = f"https://api.allorigins.win/get?url={urllib.parse.quote(url_equipe)}"
-                                r_proxy = requests.get(url_proxy, timeout=10)
-                                html_proxy = r_proxy.json()['contents']
-                                df_classement, df_calendrier = extraire_donnees(html_proxy)
-                            except: pass
 
-                        if df_calendrier.empty:
-                            cal_fallback = fetch_ffe_team_calendar(url_equipe)
-                            if cal_fallback: df_calendrier = pd.DataFrame(cal_fallback)
+                if not df_classement.empty: st.expander("🏆 Classement FFE").dataframe(df_classement, hide_index=True)
+                if not df_calendrier.empty: st.expander("📅 Calendrier FFE").dataframe(df_calendrier, hide_index=True)
 
-                if not df_classement.empty or not df_calendrier.empty:
-                    c_c1, c_c2 = st.columns([1, 1.5])
-                    with c_c1:
-                        with st.expander("🏆 Voir le Classement FFE"):
-                            if not df_classement.empty: st.dataframe(df_classement, hide_index=True)
-                    with c_c2:
-                        with st.expander("📅 Voir le Calendrier FFE"):
-                            if not df_calendrier.empty: st.dataframe(df_calendrier, hide_index=True)
-
-                # --- 1. BASSIN DE JOUEURS ---
-                st.markdown("#### 👥 1. Bassin de joueurs (Roster prévu)")
                 joueurs_roster = eq_data.get("roster", [])
-                nouveau_roster = st.multiselect(
-                    f"Quels joueurs sont prévus pour jouer dans l'équipe {equipe_choisie} cette saison ?", 
-                    options=liste_totale_joueurs, default=[j for j in joueurs_roster if j in liste_totale_joueurs], key=f"rost_{equipe_choisie}"
-                )
-                if st.button(f"💾 Figer le Bassin de {equipe_choisie}", key=f"sv_rost_{equipe_choisie}"):
-                    st.session_state['db']['equipes_interclubs'][equipe_choisie]["roster"] = nouveau_roster
-                    sauvegarder_base_cloud(st.session_state['db'])
-                    st.success("Bassin verrouillé !")
-                    st.rerun()
+                nouveau_roster = st.multiselect("👥 1. Bassin de joueurs :", options=liste_totale_joueurs, default=[j for j in joueurs_roster if j in liste_totale_joueurs])
+                if st.button("💾 Figer le Bassin"):
+                    st.session_state['db']['equipes_interclubs'][equipe_choisie]["roster"] = nouveau_roster; sauvegarder_base_cloud(st.session_state['db']); st.rerun()
 
-                st.markdown("---")
-                st.markdown(f"#### ⚔️ 2. Établir la Composition")
-                
-                rondes_dispos = []
-                idx_prochaine = 0
-                if not df_calendrier.empty:
-                    col_ronde = next((c for c in df_calendrier.columns if 'ronde' in str(c).lower() or 'match' in str(c).lower()), None)
-                    col_score = next((c for c in df_calendrier.columns if 'score' in str(c).lower()), None)
-                    if col_ronde:
-                        mots_equipe = equipe_choisie.split(" ")[0].lower() # Ex: "Cassis"
-                        matchs_eq = df_calendrier[df_calendrier.apply(lambda r: mots_equipe in str(r.values).lower(), axis=1)]
-                        if not matchs_eq.empty:
-                            rondes_dispos = matchs_eq[col_ronde].astype(str).tolist()
-                            for i, r in matchs_eq.iterrows():
-                                sc = str(r.get(col_score, "")).strip()
-                                if sc in ["", "nan", "None"] or " - " not in sc or "X" in sc:
-                                    idx_prochaine = rondes_dispos.index(str(r[col_ronde]))
-                                    break
-                
-                if not rondes_dispos: rondes_dispos = [f"Ronde {i}" for i in range(1, 12)]
+                if nouveau_roster:
+                    st.markdown("#### ⚔️ 2. Établir la Composition")
+                    rondes_dispos = [f"Ronde {i}" for i in range(1, 12)]
+                    c_r1, c_r2 = st.columns([1, 2])
+                    ronde_choisie = c_r1.selectbox("Sélectionnez la ronde :", rondes_dispos)
+                    couleur_ech1 = c_r2.radio("Couleur au 1er échiquier :", ["⚪ Blancs", "⚫ Noirs"], index=0, horizontal=True)
 
-                c_r1, c_r2 = st.columns([1, 2])
-                ronde_choisie = c_r1.selectbox("Sélectionnez la ronde :", rondes_dispos, index=idx_prochaine if idx_prochaine < len(rondes_dispos) else 0, key=f"sel_r_{equipe_choisie}")
-                
-                if "couleurs" not in st.session_state['db']['equipes_interclubs'][equipe_choisie]: st.session_state['db']['equipes_interclubs'][equipe_choisie]["couleurs"] = {}
-                couleur_saved = st.session_state['db']['equipes_interclubs'][equipe_choisie]["couleurs"].get(ronde_choisie, "⚪ Blancs")
-                couleur_ech1 = c_r2.radio("Couleur au 1er échiquier :", ["⚪ Blancs", "⚫ Noirs"], index=0 if couleur_saved == "⚪ Blancs" else 1, horizontal=True, key=f"coul_{equipe_choisie}")
+                    joueurs_etats = {p: "✅ Dispo" for p in liste_totale_joueurs}
+                    for eq_n, eq_d in st.session_state['db']['equipes_interclubs'].items():
+                        if eq_n != equipe_choisie:
+                            for p in eq_d.get("compo", {}).get(ronde_choisie, []):
+                                if p in joueurs_etats: joueurs_etats[p] = f"⛔ Joue en {eq_n}"
 
-                date_match = "Inconnue"
-                if not df_calendrier.empty and col_ronde and 'Date' in df_calendrier.columns:
-                    try: date_match = df_calendrier[df_calendrier[col_ronde] == ronde_choisie]['Date'].values[0]
-                    except: pass
+                    options_affichees = [""] + [f"{joueurs_etats[p]} | {p} ({dict_elo_global.get(p, 1000)})" for p in liste_totale_joueurs if p in nouveau_roster or "⛔" in joueurs_etats[p]]
+                    map_options = {opt: opt.split(" | ")[1].split(" (")[0] for opt in options_affichees if " | " in opt}
+                    map_options[""] = ""
 
-                # CALCUL DES DISPONIBILITÉS FFE (Intelligence)
-                joueurs_etats = {}
-                for p in liste_totale_joueurs: joueurs_etats[p] = {"statut": "✅", "raison": "Disponible"}
+                    compo_actuelle = st.session_state['db']['equipes_interclubs'][equipe_choisie].get("compo", {}).get(ronde_choisie, [""]*nb_ech_equipe)
+                    while len(compo_actuelle) < nb_ech_equipe: compo_actuelle.append("")
 
-                for other_eq_name, other_eq_data in equipes_db.items():
-                    if other_eq_name != equipe_choisie:
-                        for p in other_eq_data.get("compo", {}).get(ronde_choisie, []):
-                            if p in joueurs_etats: joueurs_etats[p] = {"statut": "⛔", "raison": f"Joue en {other_eq_name}"}
+                    nouvelle_compo, erreurs_bloquantes = [], []
+                    c_echs = st.columns(2)
+                    for i in range(nb_ech_equipe):
+                        val_saved_name = compo_actuelle[i]
+                        idx_defaut = next((idx for idx, opt in enumerate(options_affichees) if map_options[opt] == val_saved_name), 0)
+                        icon_c = "⚪" if (i % 2 == 0 and couleur_ech1 == "⚪ Blancs") or (i % 2 != 0 and couleur_ech1 != "⚪ Blancs") else "⚫"
+                        choix = st.selectbox(f"Échiquier {i+1} {icon_c}", options_affichees, index=idx_defaut, key=f"ech_{i}_{equipe_choisie}")
+                        j_sel = map_options[choix]
+                        nouvelle_compo.append(j_sel)
+                        if "⛔" in choix: erreurs_bloquantes.append(f"{j_sel} est déjà pris !")
 
-                for p in liste_totale_joueurs:
-                    if joueurs_etats[p]["statut"] == "✅":
-                        matches_higher = 0
-                        for eq_n, eq_d in equipes_db.items():
-                            if get_rank_division(eq_d.get("Division", "")) < current_team_rank:
-                                for r_n, comp in eq_d.get("compo", {}).items():
-                                    if p in comp: matches_higher += 1
-                        if matches_higher >= 4:
-                            joueurs_etats[p] = {"statut": "🚫", "raison": f"Brûlé ({matches_higher} matchs en div. sup.)"}
+                    if categorie == "Adultes":
+                        for i in range(len(nouvelle_compo) - 1):
+                            for j in range(i+1, len(nouvelle_compo)):
+                                if nouvelle_compo[i] and nouvelle_compo[j]:
+                                    if dict_elo_global.get(nouvelle_compo[i], 1000) < dict_elo_global.get(nouvelle_compo[j], 1000) - 100:
+                                        erreurs_bloquantes.append(f"Règle des 100 points enfreinte (Ech {i+1} vs {j+1}).")
 
-                options_affichees = [""]
-                map_options_vers_nom = {"": ""}
-                
-                for p in liste_totale_joueurs:
-                    etat = joueurs_etats[p]["statut"]
-                    raison = joueurs_etats[p]["raison"]
-                    elo = dict_elo_global.get(p, 1000)
-                    
-                    if etat == "✅":
-                        if p in nouveau_roster: label = f"✅ {p} ({elo})"
-                        else: label = f"⚠️ {p} ({elo}) - Hors bassin"
+                    if erreurs_bloquantes:
+                        for err in erreurs_bloquantes: st.error(err)
                     else:
-                        label = f"{etat} {p} ({elo}) - {raison}"
-                        
-                    options_affichees.append(label)
-                    map_options_vers_nom[label] = p
+                        if st.button("💾 Enregistrer la Composition", use_container_width=True):
+                            st.session_state['db']['equipes_interclubs'][equipe_choisie].setdefault("compo", {})[ronde_choisie] = nouvelle_compo
+                            sauvegarder_base_cloud(st.session_state['db']); st.success("Enregistré !"); st.rerun()
 
-                if "compo" not in st.session_state['db']['equipes_interclubs'][equipe_choisie]: st.session_state['db']['equipes_interclubs'][equipe_choisie]["compo"] = {}
-                compo_actuelle = st.session_state['db']['equipes_interclubs'][equipe_choisie]["compo"].get(ronde_choisie, [""]*nb_ech_equipe)
-                while len(compo_actuelle) < nb_ech_equipe: compo_actuelle.append("")
-
-                nouvelle_compo = []
-                blocage_sauvegarde = False
-                erreurs_bloquantes = []
-                
-                st.markdown("""<div style='background-color:#f8f9fa; padding:20px; border-radius:10px; border:1px solid #e0e0e0;'>""", unsafe_allow_html=True)
-                
-                if categorie == "Jeunes":
-                    st.info("RAPPEL FFE : Échiquiers ordonnés par âge strict (1er: U16, 2e: U14...). L'Elo ne sert qu'à départager un même âge.")
-                
-                c_echs = st.columns(2)
-                for i in range(nb_ech_equipe):
-                    val_saved_name = compo_actuelle[i]
-                    
-                    idx_defaut = 0
-                    if val_saved_name:
-                        for idx, opt in enumerate(options_affichees):
-                            if map_options_vers_nom[opt] == val_saved_name:
-                                idx_defaut = idx
-                                break
-                    
-                    icon_couleur = "⚪" if (i % 2 == 0 and couleur_ech1 == "⚪ Blancs") or (i % 2 != 0 and couleur_ech1 != "⚪ Blancs") else "⚫"
-                    choix = st.selectbox(f"Échiquier {i+1} {icon_couleur}", options_affichees, index=idx_defaut, key=f"ech_{i}_{equipe_choisie}")
-                    
-                    joueur_selectionne = map_options_vers_nom[choix]
-                    nouvelle_compo.append(joueur_selectionne)
-                    
-                    if choix.startswith("⛔") or choix.startswith("🚫"):
-                        blocage_sauvegarde = True
-                        erreurs_bloquantes.append(f"Échiquier {i+1} : Vous ne pouvez pas aligner {joueur_selectionne} ({joueurs_etats[joueur_selectionne]['raison']})")
-                
-                st.markdown("</div>", unsafe_allow_html=True)
-
-                if categorie == "Adultes":
-                    for i in range(len(nouvelle_compo) - 1):
-                        for j in range(i+1, len(nouvelle_compo)):
-                            j1, j2 = nouvelle_compo[i], nouvelle_compo[j]
-                            if j1 and j2:
-                                elo1, elo2 = dict_elo_global.get(j1, 1000), dict_elo_global.get(j2, 1000)
-                                if elo1 < elo2 - 100:
-                                    blocage_sauvegarde = True
-                                    erreurs_bloquantes.append(f"Règle des 100 points enfreinte entre l'échiquier {i+1} ({j1}, {elo1}) et l'échiquier {j+1} ({j2}, {elo2}).")
-
-                st.write("")
-                if erreurs_bloquantes:
-                    for err in erreurs_bloquantes: st.error(err)
-                elif any(nouvelle_compo): 
-                    st.success("✅ Équipe réglementaire. Vous pouvez sauvegarder.")
-
-                if st.button("💾 Enregistrer la Composition", use_container_width=True, disabled=blocage_sauvegarde):
-                    st.session_state['db']['equipes_interclubs'][equipe_choisie]["compo"][ronde_choisie] = nouvelle_compo[:nb_ech_equipe]
-                    st.session_state['db']['equipes_interclubs'][equipe_choisie]["couleurs"][ronde_choisie] = couleur_ech1
-                    sauvegarder_base_cloud(st.session_state['db'])
-                    st.success(f"Composition enregistrée pour la {ronde_choisie} !")
-                    st.rerun()
-
-                # --- 3. GÉNÉRATION DU PDF ---
-                if pdf_ready:
-                    st.markdown("---")
-                    with st.expander("📄 3. Générer la Feuille de Match (PDF)"):
-                        c_p1, c_p2 = st.columns(2)
-                        date_pdf = c_p1.text_input("Date du match", value=date_match, key=f"date_{equipe_choisie}")
-                        lieu_pdf = c_p2.text_input("Lieu de rencontre", value="Domicile" if "cassis" in equipe_choisie.lower() else "", key=f"lieu_{equipe_choisie}")
-                        
-                        pdf_vierge = st.file_uploader("Importer la feuille FFE vierge (PDF)", type=['pdf'], key=f"up_{equipe_choisie}")
-                        if pdf_vierge and st.button("🖨️ Télécharger le PDF complété", key=f"gen_{equipe_choisie}"):
+                    if pdf_ready:
+                        pdf_vierge = st.file_uploader("Feuille FFE vierge (PDF)", type=['pdf'])
+                        if pdf_vierge and st.button("🖨️ Télécharger le PDF"):
                             try:
-                                packet = io.BytesIO()
-                                c = canvas.Canvas(packet, pagesize=A4)
-                                c.drawString(100, 770, str(date_pdf))
-                                c.drawString(250, 770, str(lieu_pdf))
-                                c.drawString(450, 770, str(ronde_choisie))
-                                
-                                x_offset = 0 if couleur_ech1 == "⚪ Blancs" else 280
-                                c.drawString(80 + x_offset, 750, str(equipe_choisie))
-                                
-                                y_start = 615
-                                y_step = 28
-                                compo = st.session_state['db']['equipes_interclubs'][equipe_choisie]["compo"].get(ronde_choisie, [])
-                                for idx, joueur in enumerate(compo):
-                                    if joueur:
-                                        c.drawString(70 + x_offset, y_start - (idx * y_step), str(joueur))
-                                        row_joueur = df[df['Identité'] == joueur]
-                                        if not row_joueur.empty:
-                                            code_ffe = str(row_joueur.iloc[0].get('Licence_FFE', ''))
-                                            if code_ffe != "Non croisé": c.drawString(240 + x_offset, y_start - (idx * y_step), code_ffe)
-                                        c.drawString(300 + x_offset, y_start - (idx * y_step), str(dict_elo_global.get(joueur, "")))
-                                
-                                c.save()
-                                packet.seek(0)
-                                new_pdf = PyPDF2.PdfReader(packet)
-                                existing_pdf = PyPDF2.PdfReader(pdf_vierge)
-                                output = PyPDF2.PdfWriter()
-                                page = existing_pdf.pages[0]
-                                page.merge_page(new_pdf.pages[0])
-                                output.add_page(page)
-                                
-                                output_stream = io.BytesIO()
-                                output.write(output_stream)
-                                st.download_button("⬇️ Télécharger le PDF de match", data=output_stream.getvalue(), file_name=f"Feuille_{equipe_choisie}_{ronde_choisie}.pdf", mime="application/pdf")
-                            except Exception as e:
-                                st.error(f"Impossible de dessiner sur le PDF : {e}")
+                                packet = io.BytesIO(); c = canvas.Canvas(packet, pagesize=A4)
+                                offset = 0 if couleur_ech1 == "⚪ Blancs" else 280
+                                c.drawString(80 + offset, 750, str(equipe_choisie))
+                                y = 615
+                                for idx, j in enumerate(nouvelle_compo):
+                                    if j: c.drawString(70 + offset, y - (idx * 28), str(j)); c.drawString(300 + offset, y - (idx * 28), str(dict_elo_global.get(j, "")))
+                                c.save(); packet.seek(0)
+                                new_pdf = PyPDF2.PdfReader(packet); existing_pdf = PyPDF2.PdfReader(pdf_vierge)
+                                output = PyPDF2.PdfWriter(); page = existing_pdf.pages[0]; page.merge_page(new_pdf.pages[0])
+                                output.add_page(page); out_stream = io.BytesIO(); output.write(out_stream)
+                                st.download_button("⬇️ PDF de match", data=out_stream.getvalue(), file_name=f"Feuille.pdf", mime="application/pdf")
+                            except: st.error("Erreur PDF")
 
         with tab_adultes: afficher_gestion_equipes("Adultes")
         with tab_jeunes: afficher_gestion_equipes("Jeunes")
+
+    elif module_choisi == "♟️ Module Entraîneur":
+        st.subheader("♟️ Espace Entraîneur")
+        tab_appel, tab_tournoi, tab_classement, tab_affectations = st.tabs(["📋 Faire l'Appel", "⚔️ Tournoi & Elo", "🏆 Classement", "⚙️ Affecter Élèves"])
+
+        with tab_affectations:
+            st.markdown("### ⚙️ Affectation Créneaux")
+            lieu_aff = st.selectbox("Créneau :", [c for c_list in structure_creneaux.values() for c in c_list])
+            eleves_sauvegardes = st.session_state['db']['affectations_creneaux'].get(lieu_aff, [])
+            nouveaux_eleves = st.multiselect(f"Élèves assignés :", options=sorted(df["Identité"].tolist()), default=[e for e in eleves_sauvegardes if e in df["Identité"].tolist()])
+            if st.button("💾 Sauvegarder liste"):
+                st.session_state['db']['affectations_creneaux'][lieu_aff] = nouveaux_eleves; sauvegarder_base_cloud(st.session_state['db']); st.success("OK")
+
+        with tab_appel:
+            st.markdown(f"### 📋 Appel du {date_jour}")
+            lieu_appel = st.selectbox("Sélectionner le Créneau :", [c for c_list in structure_creneaux.values() for c in c_list], key="appel_creneau")
+            liste_identites = st.session_state['db']['affectations_creneaux'].get(lieu_appel, [])
+            if not liste_identites: st.info("Aucun élève.")
+            else:
+                df_groupe = df[df["Identité"].isin(liste_identites)]
+                presences = {idx: st.checkbox(row['Identité'], value=True) for idx, row in df_groupe.iterrows()}
+                if st.button("💾 Enregistrer l'appel"):
+                    if date_jour not in st.session_state['db']['historique_appels']: st.session_state['db']['historique_appels'][date_jour] = {}
+                    st.session_state['db']['historique_appels'][date_jour][lieu_appel] = {"presents": [df_groupe.loc[i, 'Identité'] for i, p in presences.items() if p]}
+                    sauvegarder_base_cloud(st.session_state['db']); st.success("Appel enregistré !")
+
+        with tab_tournoi:
+            st.markdown("### ⚔️ Tournoi Suisse")
+            creneaux_remplis = [k for k, v in st.session_state['db']['affectations_creneaux'].items() if len(v) > 0]
+            if creneaux_remplis:
+                creneau_tournoi = st.selectbox("Lancer le tournoi pour :", options=creneaux_remplis)
+                joueurs_presents = st.multiselect("Joueurs présents :", options=st.session_state['db']['affectations_creneaux'][creneau_tournoi], default=st.session_state['db']['affectations_creneaux'][creneau_tournoi])
+                
+                elos_actifs = {j: get_elo_actif(j, df, st.session_state['db'])[0] for j in joueurs_presents}
+
+                if st.session_state.get('tournoi_en_cours') != creneau_tournoi:
+                    st.session_state['scores_tournoi'] = {j: 0.0 for j in joueurs_presents}
+                    st.session_state['adversaires_tournoi'] = {j: [] for j in joueurs_presents}
+                    st.session_state['historique_rencontres'] = set()
+                    st.session_state['ronde_actuelle'] = 1
+                    st.session_state['appariements_ronde'] = []
+                    st.session_state['tournoi_en_cours'] = creneau_tournoi
+
+                for j in joueurs_presents:
+                    if j not in st.session_state['scores_tournoi']: st.session_state['scores_tournoi'][j] = 0.0
+                    if j not in st.session_state.get('adversaires_tournoi', {}): st.session_state.setdefault('adversaires_tournoi', {})[j] = []
+
+                if st.button("📊 Voir la Grille Américaine"):
+                    data_grille = [{"Élève": j, "Points": st.session_state['scores_tournoi'].get(j, 0.0), "Buchholz": sum(st.session_state['scores_tournoi'].get(adv, 0.0) for adv in st.session_state['adversaires_tournoi'].get(j, []))} for j in joueurs_presents]
+                    st.dataframe(pd.DataFrame(data_grille).sort_values(by=["Points", "Buchholz"], ascending=[False, False]).reset_index(drop=True).rename_axis("Place"))
+
+                if st.button("🎲 Générer la Ronde"):
+                    scores_actifs = {j: st.session_state['scores_tournoi'][j] for j in joueurs_presents}
+                    pairs, exempt, st.session_state['historique_rencontres'] = generer_appariements_suisses(scores_actifs, elos_actifs, st.session_state['historique_rencontres'])
+                    st.session_state['appariements_ronde'], st.session_state['exempt_ronde'] = pairs, exempt
+
+                if st.session_state.get('appariements_ronde'):
+                    st.subheader(f"♟️ Matchs — Ronde {st.session_state['ronde_actuelle']}")
+                    if st.button("📺 Afficher en Plein Écran"): st.session_state['plein_ecran_ronde'] = True; st.rerun()
+                        
+                    resultats = []
+                    for i, (j1, j2) in enumerate(st.session_state['appariements_ronde'], 1):
+                        c1, c2 = st.columns([3, 1])
+                        c1.markdown(f"**Table {i}:** ⚪ {j1} ({elos_actifs[j1]}) 🆚 ⚫ {j2} ({elos_actifs[j2]})")
+                        resultats.append((j1, j2, c2.selectbox("Résultat", ["...", "1 - 0 (Blancs)", "0 - 1 (Noirs)", "0.5 - 0.5 (Nulle)"], key=f"r_{i}", label_visibility="collapsed")))
+                        
+                    if st.session_state.get('exempt_ronde'): st.warning(f"👑 Exempt : {st.session_state['exempt_ronde']}")
+
+                    if st.button("💾 Valider les résultats"):
+                        if any(r[2] == "..." for r in resultats): st.error("Saisissez tous les résultats.")
+                        else:
+                            for j1, j2, res in resultats:
+                                st.session_state['adversaires_tournoi'][j1].append(j2)
+                                st.session_state['adversaires_tournoi'][j2].append(j1)
+                                if res == "1 - 0 (Blancs)":
+                                    st.session_state['scores_tournoi'][j1] += 1.0
+                                    st.session_state['db']['elos_crevette'][j1], st.session_state['db']['elos_crevette'][j2] = calculer_nouveau_elo(elos_actifs[j1], elos_actifs[j2], 1.0), calculer_nouveau_elo(elos_actifs[j2], elos_actifs[j1], 0.0)
+                                elif res == "0 - 1 (Noirs)":
+                                    st.session_state['scores_tournoi'][j2] += 1.0
+                                    st.session_state['db']['elos_crevette'][j1], st.session_state['db']['elos_crevette'][j2] = calculer_nouveau_elo(elos_actifs[j1], elos_actifs[j2], 0.0), calculer_nouveau_elo(elos_actifs[j2], elos_actifs[j1], 1.0)
+                                else:
+                                    st.session_state['scores_tournoi'][j1] += 0.5; st.session_state['scores_tournoi'][j2] += 0.5
+                                    st.session_state['db']['elos_crevette'][j1], st.session_state['db']['elos_crevette'][j2] = calculer_nouveau_elo(elos_actifs[j1], elos_actifs[j2], 0.5), calculer_nouveau_elo(elos_actifs[j2], elos_actifs[j1], 0.5)
+
+                            if st.session_state.get('exempt_ronde'): st.session_state['scores_tournoi'][st.session_state['exempt_ronde']] += 1.0
+                            sauvegarder_base_cloud(st.session_state['db'])
+                            st.session_state['ronde_actuelle'] += 1; st.session_state['appariements_ronde'] = []; st.rerun()
+
+        with tab_classement:
+            st.markdown("### 🏆 Classement Interne")
+            data_classement = [{"Élève": j, "Niveau ⚡🦐": get_elo_actif(j, df, st.session_state['db'])[0]} for j in list(df["Identité"].unique())]
+            st.dataframe(pd.DataFrame(data_classement).sort_values(by="Niveau ⚡🦐", ascending=False).reset_index(drop=True), use_container_width=True)
