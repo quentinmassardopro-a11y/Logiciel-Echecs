@@ -202,6 +202,33 @@ def generer_appariements_suisses(joueurs_scores, elos_dict, historique_rencontre
             appariements.append((j1, j2_trouve))
     return appariements, exempt, historique_rencontres
 
+@st.cache_data(ttl=3600)
+def fetch_ffe_team_calendar(team_url):
+    if not team_url: return []
+    if not team_url.startswith("http"): team_url = f"https://www.echecs.asso.fr/{team_url}"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    rondes = []
+    try:
+        r = requests.get(team_url, headers=headers, timeout=15)
+        r.encoding = 'utf-8'
+        lignes = re.findall(r'<tr[^>]*>(.*?)</tr>', r.text, re.IGNORECASE | re.DOTALL)
+        for ligne in lignes:
+            cols = re.findall(r'<td[^>]*>(.*?)</td>', ligne, re.IGNORECASE | re.DOTALL)
+            if len(cols) >= 5:
+                textes = [re.sub(r'<[^>]+>', '', c).replace("&nbsp;", " ").strip() for c in cols]
+                if re.search(r'\d{2}/\d{2}/\d{4}', textes[0]): # C'est une ligne de match avec date
+                    date = textes[0]
+                    eq1 = textes[2]
+                    score = textes[3]
+                    eq2 = textes[4]
+                    lieu = textes[5] if len(textes) > 5 else ""
+                    ronde = f"Ronde {len(rondes) + 1}"
+                    rondes.append({
+                        "Ronde": ronde, "Date": date, "Equipe domicile": eq1, "Score": score, "Equipe extérieur": eq2, "Lieu": lieu
+                    })
+    except: pass
+    return rondes
+
 def analyser_fichier_ffe(fichier):
     try:
         if not isinstance(fichier, str):
@@ -929,6 +956,24 @@ else:
                     colonnes_ecole = [c for c in ["Classe", "Formule", "Sortie Seul", "N° Portable", "N° Portable 2 (en cas d'urgence)"] if c in df_ec_display.columns]
                     st.dataframe(df_ec_display[colonnes_ecole], use_container_width=True)
 
+                    st.markdown("---")
+                    st.markdown("#### 📱 Exporter pour WhatsApp / Téléphone")
+                    st.write("Ce fichier CSV est spécialement formaté pour être importé dans Google Contacts et créer vos groupes WhatsApp.")
+                    
+                    df_wa = pd.DataFrame()
+                    df_wa["Name"] = df_ec["Identité"]
+                    df_wa["Given Name"] = df_ec["Prénom"]
+                    df_wa["Family Name"] = df_ec["Nom"]
+                    df_wa["Group Membership"] = ecole_choisie
+                    df_wa["Phone 1 - Type"] = "Mobile"
+                    df_wa["Phone 1 - Value"] = df_ec["N° Portable"]
+                    if "Nom payeur" in df_ec.columns: df_wa["Notes"] = "Parent: " + df_ec["Nom payeur"].astype(str) + " " + df_ec["Prénom payeur"].astype(str)
+                    
+                    df_wa = df_wa[df_wa["Phone 1 - Value"] != ""] # Enlever les numéros vides
+                    nom_fich_wa = f"WhatsApp_{ecole_choisie}_{formule_choisie}".replace(" ", "_").replace("/", "-")
+                    csv_wa = df_wa.to_csv(index=False).encode('utf-8-sig')
+                    st.download_button(f"📥 Télécharger Contacts ({len(df_wa)} numéros valides)", data=csv_wa, file_name=f"{nom_fich_wa}.csv", mime="text/csv")
+
         with tab_cartes:
             st.markdown("### 🎟️ Suivi des Cartes de Centres (Cassis & Carnoux)")
             ville_carte = st.radio("Sélectionner la commune à vérifier :", ["Cassis (Carte Centre Culturel)", "Carnoux (Carte du Coq)"])
@@ -1002,7 +1047,6 @@ else:
         except ImportError:
             pdf_ready = False
             
-        # UTILITAIRE POUR CALCULER LE RANG DES DIVISIONS (Pour la règle des Brûlés)
         def get_rank_division(div_str):
             d = str(div_str).lower()
             if 'top' in d: return 1
@@ -1014,7 +1058,6 @@ else:
             if 'dep' in d or 'dép' in d: return 7
             return 99
 
-        # RECUPERATION DES JOUEURS FFE (Pré-aspirés via le Pont Local)
         joueurs_ffe = st.session_state['db'].get('ffe_joueurs', [])
         if joueurs_ffe:
             liste_totale_joueurs = [j["Nom"] for j in joueurs_ffe]
@@ -1022,29 +1065,30 @@ else:
         else:
             liste_totale_joueurs = sorted(df["Identité"].unique().tolist())
             dict_elo_global = {j: get_elo_actif(j, df, st.session_state['db'])[0] for j in liste_totale_joueurs}
-            st.warning("⚠️ Base FFE vide. Utilisez le Pont Local sur votre PC pour charger les Licences A.")
 
         tab_adultes, tab_jeunes = st.tabs(["🏅 Interclubs Adultes", "👦👧 Interclubs Jeunes"])
         
         def afficher_gestion_equipes(categorie):
             with st.expander(f"⚙️ Paramétrer une équipe {categorie} (Roster & Division)", expanded=False):
                 with st.form(f"form_{categorie}"):
-                    c1, c2, c3 = st.columns([2, 1, 1])
+                    c1, c2, c3, c4 = st.columns([2, 1, 1, 2])
                     nv_nom = c1.text_input("Nom de l'équipe (ex: Cassis 1)")
                     nv_div = c2.text_input("Division (ex: N2, N3...)")
                     nb_ech_defaut = 8 if categorie == "Adultes" else 4
                     nv_nb_ech = c3.number_input("Nb d'échiquiers", min_value=2, max_value=16, value=nb_ech_defaut)
+                    nv_lien = c4.text_input("Lien FFE (Optionnel)")
                     
                     if st.form_submit_button("Sauvegarder l'équipe"):
                         if nv_nom:
                             if nv_nom not in st.session_state['db']['equipes_interclubs']:
                                 st.session_state['db']['equipes_interclubs'][nv_nom] = {
-                                    "Categorie": categorie, "Division": nv_div, "Nb_Echiquiers": int(nv_nb_ech),
+                                    "Categorie": categorie, "Division": nv_div, "Nb_Echiquiers": int(nv_nb_ech), "Lien": nv_lien,
                                     "roster": [], "compo": {}, "couleurs": {}
                                 }
                             else:
                                 st.session_state['db']['equipes_interclubs'][nv_nom]["Division"] = nv_div
                                 st.session_state['db']['equipes_interclubs'][nv_nom]["Nb_Echiquiers"] = int(nv_nb_ech)
+                                st.session_state['db']['equipes_interclubs'][nv_nom]["Lien"] = nv_lien
                             sauvegarder_base_cloud(st.session_state['db'])
                             st.rerun()
 
@@ -1070,11 +1114,42 @@ else:
                 eq_data = equipes_db[equipe_choisie]
                 nb_ech_equipe = eq_data.get("Nb_Echiquiers", 8 if categorie == "Adultes" else 4)
                 current_team_rank = get_rank_division(eq_data.get("Division", ""))
+                url_equipe = eq_data.get("Lien", "")
+                if url_equipe and not url_equipe.startswith("http"): url_equipe = f"https://www.echecs.asso.fr/{url_equipe}"
                 
                 st.markdown(f"""<div class="match-card">
                             <h3 style="margin-bottom:0; color:#005b96;">🛡️ {equipe_choisie}</h3>
                             <span style='font-size:16px; color:#FF8C00; font-weight:bold;'>{eq_data.get('Division', 'Division non précisée')} — {nb_ech_equipe} Échiquiers</span>
                             </div>""", unsafe_allow_html=True)
+
+                # --- TELECHARGEMENT EN DIRECT CALENDRIER FFE ---
+                df_classement = pd.DataFrame()
+                df_calendrier = pd.DataFrame()
+                if url_equipe:
+                    with st.spinner("Recherche du calendrier FFE en direct..."):
+                        try:
+                            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+                            r_html = requests.get(url_equipe, headers=headers, timeout=10).text
+                            dfs = pd.read_html(io.StringIO(r_html))
+                            for t in dfs:
+                                cols = [str(c).lower() for c in t.columns]
+                                if any('pl' in c for c in cols) and any('pts' in c for c in cols): df_classement = t
+                                if any('date' in c for c in cols) and any('score' in c for c in cols): df_calendrier = t
+                        except Exception: pass
+                        
+                        # Plan B ultra robuste si pandas read_html échoue
+                        if df_calendrier.empty:
+                            cal_fallback = fetch_ffe_team_calendar(url_equipe)
+                            if cal_fallback: df_calendrier = pd.DataFrame(cal_fallback)
+
+                if not df_classement.empty or not df_calendrier.empty:
+                    c_c1, c_c2 = st.columns([1, 1.5])
+                    with c_c1:
+                        with st.expander("🏆 Voir le Classement FFE"):
+                            if not df_classement.empty: st.dataframe(df_classement, hide_index=True)
+                    with c_c2:
+                        with st.expander("📅 Voir le Calendrier FFE"):
+                            if not df_calendrier.empty: st.dataframe(df_calendrier, hide_index=True)
 
                 # --- 1. BASSIN DE JOUEURS ---
                 st.markdown("#### 👥 1. Bassin de joueurs (Roster prévu)")
@@ -1092,25 +1167,45 @@ else:
                 st.markdown("---")
                 st.markdown(f"#### ⚔️ 2. Établir la Composition")
                 
-                rondes_dispos = [f"Ronde {i}" for i in range(1, 12)]
+                rondes_dispos = []
+                idx_prochaine = 0
+                if not df_calendrier.empty:
+                    col_ronde = next((c for c in df_calendrier.columns if 'ronde' in str(c).lower() or 'match' in str(c).lower()), None)
+                    col_score = next((c for c in df_calendrier.columns if 'score' in str(c).lower()), None)
+                    if col_ronde:
+                        mots_equipe = equipe_choisie.split(" ")[0].lower() # Ex: "Cassis"
+                        matchs_eq = df_calendrier[df_calendrier.apply(lambda r: mots_equipe in str(r.values).lower(), axis=1)]
+                        if not matchs_eq.empty:
+                            rondes_dispos = matchs_eq[col_ronde].astype(str).tolist()
+                            for i, r in matchs_eq.iterrows():
+                                sc = str(r.get(col_score, "")).strip()
+                                if sc in ["", "nan", "None"] or " - " not in sc or "X" in sc:
+                                    idx_prochaine = rondes_dispos.index(str(r[col_ronde]))
+                                    break
+                
+                if not rondes_dispos: rondes_dispos = [f"Ronde {i}" for i in range(1, 12)]
+
                 c_r1, c_r2 = st.columns([1, 2])
-                ronde_choisie = c_r1.selectbox("Sélectionnez la ronde :", rondes_dispos, key=f"sel_r_{equipe_choisie}")
+                ronde_choisie = c_r1.selectbox("Sélectionnez la ronde :", rondes_dispos, index=idx_prochaine if idx_prochaine < len(rondes_dispos) else 0, key=f"sel_r_{equipe_choisie}")
                 
                 if "couleurs" not in st.session_state['db']['equipes_interclubs'][equipe_choisie]: st.session_state['db']['equipes_interclubs'][equipe_choisie]["couleurs"] = {}
                 couleur_saved = st.session_state['db']['equipes_interclubs'][equipe_choisie]["couleurs"].get(ronde_choisie, "⚪ Blancs")
                 couleur_ech1 = c_r2.radio("Couleur au 1er échiquier :", ["⚪ Blancs", "⚫ Noirs"], index=0 if couleur_saved == "⚪ Blancs" else 1, horizontal=True, key=f"coul_{equipe_choisie}")
 
+                date_match = "Inconnue"
+                if not df_calendrier.empty and col_ronde and 'Date' in df_calendrier.columns:
+                    try: date_match = df_calendrier[df_calendrier[col_ronde] == ronde_choisie]['Date'].values[0]
+                    except: pass
+
                 # CALCUL DES DISPONIBILITÉS FFE (Intelligence)
                 joueurs_etats = {}
                 for p in liste_totale_joueurs: joueurs_etats[p] = {"statut": "✅", "raison": "Disponible"}
 
-                # Règle 1 : Déjà Occupé ce jour-là
                 for other_eq_name, other_eq_data in equipes_db.items():
                     if other_eq_name != equipe_choisie:
                         for p in other_eq_data.get("compo", {}).get(ronde_choisie, []):
                             if p in joueurs_etats: joueurs_etats[p] = {"statut": "⛔", "raison": f"Joue en {other_eq_name}"}
 
-                # Règle 2 : Brûlé (4 matchs joués en div. sup.)
                 for p in liste_totale_joueurs:
                     if joueurs_etats[p]["statut"] == "✅":
                         matches_higher = 0
@@ -1121,7 +1216,6 @@ else:
                         if matches_higher >= 4:
                             joueurs_etats[p] = {"statut": "🚫", "raison": f"Brûlé ({matches_higher} matchs en div. sup.)"}
 
-                # Construction du menu déroulant intelligent
                 options_affichees = [""]
                 map_options_vers_nom = {"": ""}
                 
@@ -1150,7 +1244,7 @@ else:
                 st.markdown("""<div style='background-color:#f8f9fa; padding:20px; border-radius:10px; border:1px solid #e0e0e0;'>""", unsafe_allow_html=True)
                 
                 if categorie == "Jeunes":
-                    st.info("RAPPEL FFE : Échiquiers ordonnés par âge strict (1er: U16, 2e: U14...). L'Elo ne sert qu'à départager un même âge.")
+                    st.info("RAPPEL FFE : Échiquiers ordonnés par âge strict (1er: Minime, 2e: Benjamin, 3e: Pupille, 4e: Poussin). L'Elo ne sert qu'à départager un même âge.")
                 
                 c_echs = st.columns(2)
                 for i in range(nb_ech_equipe):
@@ -1191,7 +1285,6 @@ else:
                 elif any(nouvelle_compo): 
                     st.success("✅ Équipe réglementaire. Vous pouvez sauvegarder.")
 
-                # Le bouton est désactivé visuellement si blocage
                 if st.button("💾 Enregistrer la Composition", use_container_width=True, disabled=blocage_sauvegarde):
                     st.session_state['db']['equipes_interclubs'][equipe_choisie]["compo"][ronde_choisie] = nouvelle_compo[:nb_ech_equipe]
                     st.session_state['db']['equipes_interclubs'][equipe_choisie]["couleurs"][ronde_choisie] = couleur_ech1
@@ -1204,7 +1297,7 @@ else:
                     st.markdown("---")
                     with st.expander("📄 3. Générer la Feuille de Match (PDF)"):
                         c_p1, c_p2 = st.columns(2)
-                        date_pdf = c_p1.text_input("Date du match", value=datetime.now().strftime("%d/%m/%Y"), key=f"date_{equipe_choisie}")
+                        date_pdf = c_p1.text_input("Date du match", value=date_match, key=f"date_{equipe_choisie}")
                         lieu_pdf = c_p2.text_input("Lieu de rencontre", value="Domicile" if "cassis" in equipe_choisie.lower() else "", key=f"lieu_{equipe_choisie}")
                         
                         pdf_vierge = st.file_uploader("Importer la feuille FFE vierge (PDF)", type=['pdf'], key=f"up_{equipe_choisie}")
@@ -1250,6 +1343,39 @@ else:
         with tab_jeunes: afficher_gestion_equipes("Jeunes")
 
     elif module_choisi == "♟️ Module Entraîneur":
+        
+        # --- ECRAN GEANT (Doit être affiché en priorité absolue pour cacher le reste) ---
+        if st.session_state.get('plein_ecran_ronde'):
+            st.markdown("""
+                <style>
+                [data-testid="stSidebar"] {display: none;}
+                header {display: none;}
+                .block-container {padding-top: 1rem; max-width: 100%;}
+                table {font-size: 3rem !important; width: 100%; text-align: center; border-collapse: collapse; margin-top: 20px;}
+                th {background-color: #005b96; color: white; padding: 20px; border: 3px solid #005b96;}
+                td {padding: 20px; border: 2px solid #ddd; font-weight: bold;}
+                tr:nth-child(even) {background-color: #f2f2f2;}
+                </style>
+            """, unsafe_allow_html=True)
+            
+            st.markdown(f"<h1 style='text-align:center; font-size:5rem; color:#FF8C00; margin-bottom: 30px;'>🏆 Appariements - Ronde {st.session_state.get('ronde_actuelle', 1)}</h1>", unsafe_allow_html=True)
+            
+            html_table = "<table><tr><th>Table</th><th>⚪ Blancs</th><th>⚫ Noirs</th></tr>"
+            for i, (j1, j2) in enumerate(st.session_state.get('appariements_ronde', []), 1):
+                html_table += f"<tr><td>{i}</td><td>{j1}</td><td>{j2}</td></tr>"
+            if st.session_state.get('exempt_ronde'):
+                html_table += f"<tr><td colspan='3' style='background-color:#ffe4b5;'>👑 <b>Exempt :</b> {st.session_state['exempt_ronde']}</td></tr>"
+            html_table += "</table>"
+            
+            st.markdown(html_table, unsafe_allow_html=True)
+            
+            st.write("")
+            st.write("")
+            if st.button("🔙 Retour à l'écran de gestion", use_container_width=True):
+                st.session_state['plein_ecran_ronde'] = False
+                st.rerun()
+            st.stop() # Bloque l'affichage du reste de l'application
+            
         st.subheader("♟️ Espace Entraîneur")
         tab_appel, tab_tournoi, tab_classement, tab_affectations = st.tabs(["📋 Faire l'Appel", "⚔️ Tournoi & Elo", "🏆 Classement", "⚙️ Affecter Élèves"])
 
@@ -1340,14 +1466,38 @@ else:
                     e_val, e_type = get_elo_actif(j, df, st.session_state['db'])
                     elos_actifs[j], types_elos[j] = e_val, e_type
 
+                # Initialisation propre du tournoi
                 if 'scores_tournoi' not in st.session_state or st.session_state.get('tournoi_en_cours') != creneau_tournoi:
                     st.session_state['scores_tournoi'] = {j: 0.0 for j in joueurs_presents}
+                    st.session_state['adversaires_tournoi'] = {j: [] for j in joueurs_presents}
                     st.session_state['historique_rencontres'] = set()
                     st.session_state['ronde_actuelle'] = 1
                     st.session_state['appariements_ronde'] = []
                     st.session_state['tournoi_en_cours'] = creneau_tournoi
+                
+                # S'assurer que les nouveaux présents en cours de route ont bien un score à 0
                 for j in joueurs_presents:
                     if j not in st.session_state['scores_tournoi']: st.session_state['scores_tournoi'][j] = 0.0
+                    if j not in st.session_state['adversaires_tournoi']: st.session_state['adversaires_tournoi'][j] = []
+
+                # --- GRILLE AMÉRICAINE ---
+                if st.session_state.get('tournoi_en_cours'):
+                    with st.expander("📊 Voir la Grille Américaine (Classement en direct)"):
+                        data_grille = []
+                        for j in joueurs_presents:
+                            pts = st.session_state['scores_tournoi'].get(j, 0.0)
+                            advs = st.session_state['adversaires_tournoi'].get(j, [])
+                            buchholz = sum(st.session_state['scores_tournoi'].get(adv, 0.0) for adv in advs)
+                            data_grille.append({
+                                "Élève": j,
+                                "Points": pts,
+                                "Buchholz": buchholz,
+                                "Matchs Joués": len(advs) + (1 if j == st.session_state.get('exempt_ronde') else 0)
+                            })
+                        if data_grille:
+                            df_grille = pd.DataFrame(data_grille).sort_values(by=["Points", "Buchholz"], ascending=[False, False]).reset_index(drop=True)
+                            df_grille.index += 1
+                            st.dataframe(df_grille, use_container_width=True)
 
                 st.markdown("---")
                 col_t1, col_t2 = st.columns(2)
@@ -1355,6 +1505,7 @@ else:
                 with col_t2:
                     if st.button("🔄 Réinitialiser le tournoi"):
                         st.session_state['scores_tournoi'] = {}
+                        st.session_state['adversaires_tournoi'] = {}
                         st.session_state['historique_rencontres'] = set()
                         st.session_state['ronde_actuelle'] = 1
                         st.session_state['appariements_ronde'] = []
@@ -1368,6 +1519,11 @@ else:
 
                 if st.session_state.get('appariements_ronde'):
                     st.subheader(f"♟️ Matchs — Ronde {st.session_state['ronde_actuelle']}")
+                    
+                    if st.button("📺 Afficher en Plein Écran (Pour vidéoprojecteur)"):
+                        st.session_state['plein_ecran_ronde'] = True
+                        st.rerun()
+                        
                     resultats_saisis = []
                     for i, (j1, j2) in enumerate(st.session_state['appariements_ronde'], 1):
                         sym1, sym2 = "⚡" if "FIDE" in types_elos[j1] else "🦐", "⚡" if "FIDE" in types_elos[j2] else "🦐"
@@ -1383,6 +1539,10 @@ else:
                         if any(r[2] == "Sélectionner..." for r in resultats_saisis): st.error("⚠️ Saisissez tous les résultats.")
                         else:
                             for j1, j2, res in resultats_saisis:
+                                # Suivi des adversaires pour la Grille Américaine (Buchholz)
+                                st.session_state['adversaires_tournoi'][j1].append(j2)
+                                st.session_state['adversaires_tournoi'][j2].append(j1)
+                                
                                 elo1, elo2 = elos_actifs[j1], elos_actifs[j2]
                                 if res == "1 - 0 (Blancs)":
                                     st.session_state['scores_tournoi'][j1] += 1.0
