@@ -9,6 +9,7 @@ import io
 import hashlib
 import re
 from datetime import datetime
+import urllib.parse
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -202,31 +203,41 @@ def generer_appariements_suisses(joueurs_scores, elos_dict, historique_rencontre
             appariements.append((j1, j2_trouve))
     return appariements, exempt, historique_rencontres
 
+# --- MOTEUR DE SCRAPING FFE ---
 @st.cache_data(ttl=3600)
 def fetch_ffe_team_calendar(team_url):
     if not team_url: return []
     if not team_url.startswith("http"): team_url = f"https://www.echecs.asso.fr/{team_url}"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     rondes = []
+    
+    html_content = ""
     try:
-        r = requests.get(team_url, headers=headers, timeout=15)
-        r.encoding = 'utf-8'
-        lignes = re.findall(r'<tr[^>]*>(.*?)</tr>', r.text, re.IGNORECASE | re.DOTALL)
-        for ligne in lignes:
-            cols = re.findall(r'<td[^>]*>(.*?)</td>', ligne, re.IGNORECASE | re.DOTALL)
-            if len(cols) >= 5:
-                textes = [re.sub(r'<[^>]+>', '', c).replace("&nbsp;", " ").strip() for c in cols]
-                if re.search(r'\d{2}/\d{2}/\d{4}', textes[0]): # C'est une ligne de match avec date
-                    date = textes[0]
-                    eq1 = textes[2]
-                    score = textes[3]
-                    eq2 = textes[4]
-                    lieu = textes[5] if len(textes) > 5 else ""
-                    ronde = f"Ronde {len(rondes) + 1}"
-                    rondes.append({
-                        "Ronde": ronde, "Date": date, "Equipe domicile": eq1, "Score": score, "Equipe extérieur": eq2, "Lieu": lieu
-                    })
-    except: pass
+        r = requests.get(team_url, headers=headers, timeout=5)
+        html_content = r.text
+    except:
+        try: # Contournement de Cloudflare via AllOrigins
+            url_proxy = f"https://api.allorigins.win/get?url={urllib.parse.quote(team_url)}"
+            r = requests.get(url_proxy, timeout=10)
+            html_content = r.json()['contents']
+        except: pass
+
+    if html_content:
+        try:
+            lignes = re.findall(r'<tr[^>]*>(.*?)</tr>', html_content, re.IGNORECASE | re.DOTALL)
+            for ligne in lignes:
+                cols = re.findall(r'<td[^>]*>(.*?)</td>', ligne, re.IGNORECASE | re.DOTALL)
+                if len(cols) >= 5:
+                    textes = [re.sub(r'<[^>]+>', '', c).replace("&nbsp;", " ").strip() for c in cols]
+                    if re.search(r'\d{2}/\d{2}/\d{4}', textes[0]):
+                        date = textes[0]
+                        eq1 = textes[2]
+                        score = textes[3]
+                        eq2 = textes[4]
+                        lieu = textes[5] if len(textes) > 5 else ""
+                        ronde = f"Ronde {len(rondes) + 1}"
+                        rondes.append({"Ronde": ronde, "Date": date, "Equipe domicile": eq1, "Score": score, "Equipe extérieur": eq2, "Lieu": lieu})
+        except: pass
     return rondes
 
 def analyser_fichier_ffe(fichier):
@@ -494,6 +505,39 @@ structure_creneaux = {
     "Vendredi": ["Vendredi - Saint-Augustin (CE2-CM2)", "Vendredi - Sainte-Trinité (CE2-CM2)", "Vendredi - Cassis"]
 }
 
+# --- ECRAN GEANT (Doit être affiché en priorité absolue pour cacher le reste) ---
+if st.session_state.get('plein_ecran_ronde'):
+    st.markdown("""
+        <style>
+        [data-testid="stSidebar"] {display: none;}
+        header {display: none;}
+        .block-container {padding-top: 1rem; max-width: 100%;}
+        table {font-size: 3rem !important; width: 100%; text-align: center; border-collapse: collapse; margin-top: 20px;}
+        th {background-color: #005b96; color: white; padding: 20px; border: 3px solid #005b96;}
+        td {padding: 20px; border: 2px solid #ddd; font-weight: bold;}
+        tr:nth-child(even) {background-color: #f2f2f2;}
+        </style>
+    """, unsafe_allow_html=True)
+    
+    st.markdown(f"<h1 style='text-align:center; font-size:5rem; color:#FF8C00; margin-bottom: 30px;'>🏆 Appariements - Ronde {st.session_state.get('ronde_actuelle', 1)}</h1>", unsafe_allow_html=True)
+    
+    html_table = "<table><tr><th>Table</th><th>⚪ Blancs</th><th>⚫ Noirs</th></tr>"
+    for i, (j1, j2) in enumerate(st.session_state.get('appariements_ronde', []), 1):
+        html_table += f"<tr><td>{i}</td><td>{j1}</td><td>{j2}</td></tr>"
+    if st.session_state.get('exempt_ronde'):
+        html_table += f"<tr><td colspan='3' style='background-color:#ffe4b5;'>👑 <b>Exempt :</b> {st.session_state['exempt_ronde']}</td></tr>"
+    html_table += "</table>"
+    
+    st.markdown(html_table, unsafe_allow_html=True)
+    
+    st.write("")
+    st.write("")
+    if st.button("🔙 Retour à l'écran de gestion", use_container_width=True):
+        st.session_state['plein_ecran_ronde'] = False
+        st.rerun()
+    st.stop() # Bloque l'affichage du reste de l'application
+
+
 st.sidebar.header("🔑 Espace de Travail")
 module_choisi = st.sidebar.radio("", ["🛠️ Module Administration", "♟️ Module Entraîneur", "🛒 Module Boutique", "🏆 Module Interclubs"])
 
@@ -550,6 +594,8 @@ if 'df_ffe' in st.session_state:
                 sauvegarder_adherents_cloud(df_base)
                 st.sidebar.success("✅ Licences et Elos recroisés avec succès !")
                 st.rerun()
+        else:
+            st.sidebar.warning("Aucun adhérent dans la base.")
 
 st.sidebar.markdown("---")
 st.sidebar.header("2️⃣ HelloAsso (Nouveaux Inscrits)")
@@ -1122,22 +1168,34 @@ else:
                             <span style='font-size:16px; color:#FF8C00; font-weight:bold;'>{eq_data.get('Division', 'Division non précisée')} — {nb_ech_equipe} Échiquiers</span>
                             </div>""", unsafe_allow_html=True)
 
-                # --- TELECHARGEMENT EN DIRECT CALENDRIER FFE ---
+                # --- TELECHARGEMENT EN DIRECT (AVEC PROXY ALLORIGINS ANTI-BLOCAGE) ---
                 df_classement = pd.DataFrame()
                 df_calendrier = pd.DataFrame()
                 if url_equipe:
-                    with st.spinner("Recherche du calendrier FFE en direct..."):
-                        try:
-                            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-                            r_html = requests.get(url_equipe, headers=headers, timeout=10).text
-                            dfs = pd.read_html(io.StringIO(r_html))
+                    with st.spinner("Recherche du calendrier FFE en direct (Contournement Proxy activé)..."):
+                        def extraire_donnees(html_content):
+                            dfs = pd.read_html(io.StringIO(html_content))
+                            df_cla, df_cal = pd.DataFrame(), pd.DataFrame()
                             for t in dfs:
                                 cols = [str(c).lower() for c in t.columns]
-                                if any('pl' in c for c in cols) and any('pts' in c for c in cols): df_classement = t
-                                if any('date' in c for c in cols) and any('score' in c for c in cols): df_calendrier = t
-                        except Exception: pass
+                                if any('pl' in c for c in cols) and any('pts' in c for c in cols): df_cla = t
+                                if any('date' in c for c in cols) and any('score' in c for c in cols): df_cal = t
+                            return df_cla, df_cal
+
+                        try:
+                            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+                            r_html = requests.get(url_equipe, headers=headers, timeout=5)
+                            df_classement, df_calendrier = extraire_donnees(r_html.text)
+                        except: pass
                         
-                        # Plan B ultra robuste si pandas read_html échoue
+                        if df_calendrier.empty:
+                            try:
+                                url_proxy = f"https://api.allorigins.win/get?url={urllib.parse.quote(url_equipe)}"
+                                r_proxy = requests.get(url_proxy, timeout=10)
+                                html_proxy = r_proxy.json()['contents']
+                                df_classement, df_calendrier = extraire_donnees(html_proxy)
+                            except: pass
+
                         if df_calendrier.empty:
                             cal_fallback = fetch_ffe_team_calendar(url_equipe)
                             if cal_fallback: df_calendrier = pd.DataFrame(cal_fallback)
@@ -1244,7 +1302,7 @@ else:
                 st.markdown("""<div style='background-color:#f8f9fa; padding:20px; border-radius:10px; border:1px solid #e0e0e0;'>""", unsafe_allow_html=True)
                 
                 if categorie == "Jeunes":
-                    st.info("RAPPEL FFE : Échiquiers ordonnés par âge strict (1er: Minime, 2e: Benjamin, 3e: Pupille, 4e: Poussin). L'Elo ne sert qu'à départager un même âge.")
+                    st.info("RAPPEL FFE : Échiquiers ordonnés par âge strict (1er: U16, 2e: U14...). L'Elo ne sert qu'à départager un même âge.")
                 
                 c_echs = st.columns(2)
                 for i in range(nb_ech_equipe):
@@ -1367,14 +1425,12 @@ else:
                 html_table += f"<tr><td colspan='3' style='background-color:#ffe4b5;'>👑 <b>Exempt :</b> {st.session_state['exempt_ronde']}</td></tr>"
             html_table += "</table>"
             
-            st.markdown(html_table, unsafe_allow_html=True)
-            
             st.write("")
             st.write("")
             if st.button("🔙 Retour à l'écran de gestion", use_container_width=True):
                 st.session_state['plein_ecran_ronde'] = False
                 st.rerun()
-            st.stop() # Bloque l'affichage du reste de l'application
+            st.stop()
             
         st.subheader("♟️ Espace Entraîneur")
         tab_appel, tab_tournoi, tab_classement, tab_affectations = st.tabs(["📋 Faire l'Appel", "⚔️ Tournoi & Elo", "🏆 Classement", "⚙️ Affecter Élèves"])
@@ -1413,11 +1469,8 @@ else:
                 for idx, row in df_groupe.iterrows():
                     c1, c2 = st.columns([4, 1])
                     sortie_act = st.session_state['db']['sorties_manuelles'].get(row['Identité'], row.get('Sortie Seul', '-'))
-                    
                     nom_aff = row['Nom'] + " " + row['Prénom']
-                    if len(df_groupe[df_groupe['Identité'] == row['Identité']]) > 1:
-                        nom_aff += f" ({idx})"
-                        
+                    if len(df_groupe[df_groupe['Identité'] == row['Identité']]) > 1: nom_aff += f" ({idx})"
                     c1.write(f"👤 **{nom_aff}** *(Sortie: {sortie_act})*")
                     presences[idx] = c2.checkbox("Présent", value=True, key=f"pres_{idx}")
 
@@ -1466,7 +1519,6 @@ else:
                     e_val, e_type = get_elo_actif(j, df, st.session_state['db'])
                     elos_actifs[j], types_elos[j] = e_val, e_type
 
-                # Initialisation propre du tournoi
                 if 'scores_tournoi' not in st.session_state or st.session_state.get('tournoi_en_cours') != creneau_tournoi:
                     st.session_state['scores_tournoi'] = {j: 0.0 for j in joueurs_presents}
                     st.session_state['adversaires_tournoi'] = {j: [] for j in joueurs_presents}
@@ -1475,12 +1527,11 @@ else:
                     st.session_state['appariements_ronde'] = []
                     st.session_state['tournoi_en_cours'] = creneau_tournoi
                 
-                # S'assurer que les nouveaux présents en cours de route ont bien un score à 0
+                if 'adversaires_tournoi' not in st.session_state: st.session_state['adversaires_tournoi'] = {}
                 for j in joueurs_presents:
                     if j not in st.session_state['scores_tournoi']: st.session_state['scores_tournoi'][j] = 0.0
                     if j not in st.session_state['adversaires_tournoi']: st.session_state['adversaires_tournoi'][j] = []
 
-                # --- GRILLE AMÉRICAINE ---
                 if st.session_state.get('tournoi_en_cours'):
                     with st.expander("📊 Voir la Grille Américaine (Classement en direct)"):
                         data_grille = []
@@ -1488,12 +1539,7 @@ else:
                             pts = st.session_state['scores_tournoi'].get(j, 0.0)
                             advs = st.session_state['adversaires_tournoi'].get(j, [])
                             buchholz = sum(st.session_state['scores_tournoi'].get(adv, 0.0) for adv in advs)
-                            data_grille.append({
-                                "Élève": j,
-                                "Points": pts,
-                                "Buchholz": buchholz,
-                                "Matchs Joués": len(advs) + (1 if j == st.session_state.get('exempt_ronde') else 0)
-                            })
+                            data_grille.append({"Élève": j, "Points": pts, "Buchholz": buchholz, "Matchs Joués": len(advs) + (1 if j == st.session_state.get('exempt_ronde') else 0)})
                         if data_grille:
                             df_grille = pd.DataFrame(data_grille).sort_values(by=["Points", "Buchholz"], ascending=[False, False]).reset_index(drop=True)
                             df_grille.index += 1
@@ -1539,10 +1585,8 @@ else:
                         if any(r[2] == "Sélectionner..." for r in resultats_saisis): st.error("⚠️ Saisissez tous les résultats.")
                         else:
                             for j1, j2, res in resultats_saisis:
-                                # Suivi des adversaires pour la Grille Américaine (Buchholz)
                                 st.session_state['adversaires_tournoi'][j1].append(j2)
                                 st.session_state['adversaires_tournoi'][j2].append(j1)
-                                
                                 elo1, elo2 = elos_actifs[j1], elos_actifs[j2]
                                 if res == "1 - 0 (Blancs)":
                                     st.session_state['scores_tournoi'][j1] += 1.0
@@ -1569,9 +1613,7 @@ else:
             st.markdown("### 🏆 Classement Général (FIDE & Crevette)")
             creneaux_remplis_classement = [k for k, v in st.session_state['db']['affectations_creneaux'].items() if len(v) > 0]
             filtre_c = st.selectbox("Filtrer par liste / créneau :", ["Tous les élèves"] + sorted(creneaux_remplis_classement))
-            
             joueurs_a_afficher = list(df["Identité"].unique()) if filtre_c == "Tous les élèves" else list(set(st.session_state['db']['affectations_creneaux'][filtre_c]))
-            
             data_classement = [{"Élève": j, "Catégorie": get_elo_actif(j, df, st.session_state['db'])[1], "Elo ⚡🦐": get_elo_actif(j, df, st.session_state['db'])[0]} for j in joueurs_a_afficher]
             
             if data_classement:
