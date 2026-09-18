@@ -37,7 +37,7 @@ def get_gsheets_client():
     return gspread.authorize(creds)
 
 def initialiser_memoire_vierge():
-    return {"elos_crevette": {}, "historique_appels": {}, "eleves_essai": [], "affectations_creneaux": {}, "cartes_membres": {}, "validations_promo": {}, "sorties_manuelles": {}, "eleves_deja_affectes": [], "identites_helloasso_connues": [], "dossiers_supprimes": [], "tshirts_donnes": {}, "boutique_donnees": {}, "equipes_interclubs": {}, "ffe_joueurs": []}
+    return {"elos_crevette": {}, "historique_appels": {}, "eleves_essai": [], "affectations_creneaux": {}, "cartes_membres": {}, "validations_promo": {}, "sorties_manuelles": {}, "eleves_deja_affectes": [], "identites_helloasso_connues": [], "dossiers_supprimes": [], "tshirts_donnes": {}, "boutique_donnees": {}, "equipes_interclubs": {}, "ffe_joueurs": [], "tournois": {}}
 
 def charger_base_cloud():
     try:
@@ -138,7 +138,6 @@ def get_elo_actif(identite, df_adherents, db):
         if r_n and r_val > 0: return r_val, "🇫🇷 Rapide National"
         if l_n and l_val > 0: return l_val, "🇫🇷 Lent National"
         if b_n and b_val > 0: return b_val, "🇫🇷 Blitz National"
-        
         if r_val > 0: return r_val, "🇫🇷 Rapide National"
         if l_val > 0: return l_val, "🇫🇷 Lent National"
         if b_val > 0: return b_val, "🇫🇷 Blitz National"
@@ -264,22 +263,31 @@ if st.session_state.get('plein_ecran_ronde'):
         .pts {font-size: 1.5rem; color: #555; font-weight: normal;}
         </style>
     """, unsafe_allow_html=True)
-    st.markdown(f"<h1 style='text-align:center; font-size:4rem; color:#FF8C00; margin-bottom: 30px;'>🏆 Appariements - Ronde {st.session_state.get('ronde_actuelle', 1)}</h1>", unsafe_allow_html=True)
+    
+    t_data = st.session_state.get('plein_ecran_ronde_data', {})
+    
+    st.markdown(f"<h1 style='text-align:center; font-size:4rem; color:#FF8C00; margin-bottom: 30px;'>🏆 Appariements - Ronde {t_data.get('ronde', 1)}</h1>", unsafe_allow_html=True)
     
     html_table = "<table><tr><th>Table</th><th>⚪ Blancs</th><th>Score</th><th>⚫ Noirs</th></tr>"
-    for i, (j1, j2) in enumerate(st.session_state.get('appariements_ronde', []), 1):
-        pts1, pts2 = st.session_state['scores_tournoi'].get(j1, 0), st.session_state['scores_tournoi'].get(j2, 0)
+    for i, pair in enumerate(t_data.get('appariements', []), 1):
+        j1, j2 = pair[0], pair[1]
+        pts1, pts2 = t_data.get('scores', {}).get(j1, 0), t_data.get('scores', {}).get(j2, 0)
         html_table += f"<tr><td>{i}</td><td>{j1} <br><span class='pts'>({pts1} pts)</span></td><td>... - ...</td><td>{j2} <br><span class='pts'>({pts2} pts)</span></td></tr>"
-    if st.session_state.get('exempt_ronde'):
-        ex = st.session_state['exempt_ronde']
-        html_table += f"<tr><td colspan='4' style='background-color:#ffe4b5;'>👑 <b>Exempt :</b> {ex} <span class='pts'>({st.session_state['scores_tournoi'].get(ex, 0)} pts)</span></td></tr>"
+        
+    if t_data.get('exempt'):
+        ex = t_data['exempt']
+        html_table += f"<tr><td colspan='4' style='background-color:#ffe4b5;'>👑 <b>Exempt :</b> {ex} <span class='pts'>({t_data.get('scores', {}).get(ex, 0)} pts)</span></td></tr>"
     html_table += "</table>"
+    
     st.markdown(html_table, unsafe_allow_html=True)
+    
+    st.write("")
     st.write("")
     if st.button("🔙 Retour à l'écran de gestion", use_container_width=True):
         st.session_state['plein_ecran_ronde'] = False
         st.rerun()
     st.stop()
+
 
 if 'db' not in st.session_state:
     with st.spinner("Connexion sécurisée au Cloud Google..."):
@@ -601,63 +609,75 @@ else:
             st.markdown("### ⚔️ Tournoi Suisse")
             creneaux_remplis = [k for k, v in st.session_state['db']['affectations_creneaux'].items() if len(v) > 0]
             if creneaux_remplis:
+                if 'tournois' not in st.session_state['db']: st.session_state['db']['tournois'] = {}
                 creneau_tournoi = st.selectbox("Lancer le tournoi pour :", options=creneaux_remplis)
-                joueurs_presents = st.multiselect("Joueurs présents :", options=st.session_state['db']['affectations_creneaux'][creneau_tournoi], default=st.session_state['db']['affectations_creneaux'][creneau_tournoi])
                 
+                if creneau_tournoi not in st.session_state['db']['tournois']:
+                    st.session_state['db']['tournois'][creneau_tournoi] = {"scores": {}, "adversaires": {}, "historique": [], "ronde": 1, "appariements": [], "exempt": None}
+                t_data = st.session_state['db']['tournois'][creneau_tournoi]
+
+                joueurs_inscrits = list(set(st.session_state['db']['affectations_creneaux'][creneau_tournoi]))
+                joueurs_presents = st.multiselect("Joueurs présents :", options=joueurs_inscrits, default=joueurs_inscrits)
                 elos_actifs = {j: get_elo_actif(j, df, st.session_state['db'])[0] for j in joueurs_presents}
 
-                if st.session_state.get('tournoi_en_cours') != creneau_tournoi:
-                    st.session_state['scores_tournoi'] = {j: 0.0 for j in joueurs_presents}
-                    st.session_state['adversaires_tournoi'] = {j: [] for j in joueurs_presents}
-                    st.session_state['historique_rencontres'] = set()
-                    st.session_state['ronde_actuelle'] = 1
-                    st.session_state['appariements_ronde'] = []
-                    st.session_state['tournoi_en_cours'] = creneau_tournoi
-
                 for j in joueurs_presents:
-                    if j not in st.session_state['scores_tournoi']: st.session_state['scores_tournoi'][j] = 0.0
-                    if j not in st.session_state.get('adversaires_tournoi', {}): st.session_state.setdefault('adversaires_tournoi', {})[j] = []
+                    if j not in t_data["scores"]: t_data["scores"][j] = 0.0
+                    if j not in t_data["adversaires"]: t_data["adversaires"][j] = []
 
                 if st.button("📊 Voir la Grille Américaine"):
-                    data_grille = [{"Élève": j, "Points": st.session_state['scores_tournoi'].get(j, 0.0), "Buchholz": sum(st.session_state['scores_tournoi'].get(adv, 0.0) for adv in st.session_state['adversaires_tournoi'].get(j, []))} for j in joueurs_presents]
+                    data_grille = [{"Élève": j, "Points": t_data["scores"].get(j, 0.0), "Buchholz": sum(t_data["scores"].get(adv, 0.0) for adv in t_data["adversaires"].get(j, []))} for j in joueurs_presents]
                     st.dataframe(pd.DataFrame(data_grille).sort_values(by=["Points", "Buchholz"], ascending=[False, False]).reset_index(drop=True).rename_axis("Place"))
 
-                if st.button("🎲 Générer la Ronde"):
-                    scores_actifs = {j: st.session_state['scores_tournoi'][j] for j in joueurs_presents}
-                    pairs, exempt, st.session_state['historique_rencontres'] = generer_appariements_suisses(scores_actifs, elos_actifs, st.session_state['historique_rencontres'])
-                    st.session_state['appariements_ronde'], st.session_state['exempt_ronde'] = pairs, exempt
+                col_t1, col_t2 = st.columns(2)
+                with col_t1: st.metric("Ronde actuelle", t_data["ronde"])
+                with col_t2:
+                    if st.button("🔄 Réinitialiser le tournoi"):
+                        st.session_state['db']['tournois'][creneau_tournoi] = {"scores": {}, "adversaires": {}, "historique": [], "ronde": 1, "appariements": [], "exempt": None}
+                        sauvegarder_base_cloud(st.session_state['db'])
+                        st.rerun()
 
-                if st.session_state.get('appariements_ronde'):
-                    st.subheader(f"♟️ Matchs — Ronde {st.session_state['ronde_actuelle']}")
-                    if st.button("📺 Afficher en Plein Écran"): st.session_state['plein_ecran_ronde'] = True; st.rerun()
+                if st.button("🎲 Générer la Ronde"):
+                    scores_actifs = {j: t_data["scores"][j] for j in joueurs_presents}
+                    hist_set = set(tuple(x) for x in t_data["historique"])
+                    pairs, exempt, new_hist = generer_appariements_suisses(scores_actifs, elos_actifs, hist_set)
+                    t_data["appariements"] = pairs; t_data["exempt"] = exempt; t_data["historique"] = [list(x) for x in new_hist]
+                    sauvegarder_base_cloud(st.session_state['db'])
+                    st.rerun()
+
+                if t_data.get("appariements"):
+                    st.subheader(f"♟️ Matchs — Ronde {t_data['ronde']}")
+                    if st.button("📺 Afficher en Plein Écran"): 
+                        st.session_state['plein_ecran_ronde_data'] = t_data
+                        st.session_state['plein_ecran_ronde'] = True
+                        st.rerun()
                         
                     resultats = []
-                    for i, (j1, j2) in enumerate(st.session_state['appariements_ronde'], 1):
+                    for i, pair in enumerate(t_data["appariements"], 1):
+                        j1, j2 = pair[0], pair[1]
                         c1, c2 = st.columns([3, 1])
-                        c1.markdown(f"**Table {i}:** ⚪ {j1} ({elos_actifs[j1]}) 🆚 ⚫ {j2} ({elos_actifs[j2]})")
+                        c1.markdown(f"**Table {i}:** ⚪ {j1} ({elos_actifs.get(j1, '?')}) 🆚 ⚫ {j2} ({elos_actifs.get(j2, '?')})")
                         resultats.append((j1, j2, c2.selectbox("Résultat", ["...", "1 - 0 (Blancs)", "0 - 1 (Noirs)", "0.5 - 0.5 (Nulle)"], key=f"r_{i}", label_visibility="collapsed")))
                         
-                    if st.session_state.get('exempt_ronde'): st.warning(f"👑 Exempt : {st.session_state['exempt_ronde']}")
+                    if t_data.get("exempt"): st.warning(f"👑 Exempt : {t_data['exempt']}")
 
                     if st.button("💾 Valider les résultats"):
                         if any(r[2] == "..." for r in resultats): st.error("Saisissez tous les résultats.")
                         else:
                             for j1, j2, res in resultats:
-                                st.session_state['adversaires_tournoi'][j1].append(j2)
-                                st.session_state['adversaires_tournoi'][j2].append(j1)
+                                t_data["adversaires"][j1].append(j2); t_data["adversaires"][j2].append(j1)
                                 if res == "1 - 0 (Blancs)":
-                                    st.session_state['scores_tournoi'][j1] += 1.0
-                                    st.session_state['db']['elos_crevette'][j1], st.session_state['db']['elos_crevette'][j2] = calculer_nouveau_elo(elos_actifs[j1], elos_actifs[j2], 1.0), calculer_nouveau_elo(elos_actifs[j2], elos_actifs[j1], 0.0)
+                                    t_data["scores"][j1] += 1.0
+                                    st.session_state['db']['elos_crevette'][j1], st.session_state['db']['elos_crevette'][j2] = calculer_nouveau_elo(elos_actifs.get(j1,400), elos_actifs.get(j2,400), 1.0), calculer_nouveau_elo(elos_actifs.get(j2,400), elos_actifs.get(j1,400), 0.0)
                                 elif res == "0 - 1 (Noirs)":
-                                    st.session_state['scores_tournoi'][j2] += 1.0
-                                    st.session_state['db']['elos_crevette'][j1], st.session_state['db']['elos_crevette'][j2] = calculer_nouveau_elo(elos_actifs[j1], elos_actifs[j2], 0.0), calculer_nouveau_elo(elos_actifs[j2], elos_actifs[j1], 1.0)
+                                    t_data["scores"][j2] += 1.0
+                                    st.session_state['db']['elos_crevette'][j1], st.session_state['db']['elos_crevette'][j2] = calculer_nouveau_elo(elos_actifs.get(j1,400), elos_actifs.get(j2,400), 0.0), calculer_nouveau_elo(elos_actifs.get(j2,400), elos_actifs.get(j1,400), 1.0)
                                 else:
-                                    st.session_state['scores_tournoi'][j1] += 0.5; st.session_state['scores_tournoi'][j2] += 0.5
-                                    st.session_state['db']['elos_crevette'][j1], st.session_state['db']['elos_crevette'][j2] = calculer_nouveau_elo(elos_actifs[j1], elos_actifs[j2], 0.5), calculer_nouveau_elo(elos_actifs[j2], elos_actifs[j1], 0.5)
+                                    t_data["scores"][j1] += 0.5; t_data["scores"][j2] += 0.5
+                                    st.session_state['db']['elos_crevette'][j1], st.session_state['db']['elos_crevette'][j2] = calculer_nouveau_elo(elos_actifs.get(j1,400), elos_actifs.get(j2,400), 0.5), calculer_nouveau_elo(elos_actifs.get(j2,400), elos_actifs.get(j1,400), 0.5)
 
-                            if st.session_state.get('exempt_ronde'): st.session_state['scores_tournoi'][st.session_state['exempt_ronde']] += 1.0
-                            sauvegarder_base_cloud(st.session_state['db'])
-                            st.session_state['ronde_actuelle'] += 1; st.session_state['appariements_ronde'] = []; st.rerun()
+                            if t_data.get("exempt"): t_data["scores"][t_data["exempt"]] += 1.0
+                            t_data["ronde"] += 1; t_data["appariements"] = []
+                            sauvegarder_base_cloud(st.session_state['db']); st.success("Résultats et Elos sauvegardés !"); st.rerun()
 
         with tab_classement:
             st.markdown("### 🏆 Classement Interne")
