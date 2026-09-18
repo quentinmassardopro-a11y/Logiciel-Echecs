@@ -170,30 +170,20 @@ def estimer_sexe(prenom):
 
 # --- MOTEUR ELO INTELLIGENT (HIÉRARCHIE FFE) ---
 def extract_elo_val(val):
-    """Extrait le score et détermine s'il est FIDE ou National."""
     val_str = str(val).upper().strip()
+    if val_str == "NAN" or val_str == "NONE" or val_str == "":
+        return 0, False, False
     match = re.search(r'(\d{3,4})', val_str)
     if match:
         score = int(match.group(1))
         is_fide = 'F' in val_str
         is_nat = 'N' in val_str
-        # S'il n'y a ni F ni N mais qu'on a un score, on le considère National par défaut (système FFE)
         if not is_fide and not is_nat:
             is_nat = True
         return score, is_fide, is_nat
     return 0, False, False
 
 def get_elo_actif(identite, df_adherents, db):
-    """
-    Hiérarchie stricte demandée :
-    1. Rapide FIDE
-    2. Lent FIDE
-    3. Blitz FIDE
-    4. Rapide National
-    5. Lent National
-    6. Blitz National
-    7. Crevette
-    """
     try:
         row = df_adherents[df_adherents["Identité"] == identite].iloc[0]
         
@@ -211,10 +201,19 @@ def get_elo_actif(identite, df_adherents, db):
         if l_n and l_val > 0: return l_val, "🇫🇷 Lent National"
         if b_n and b_val > 0: return b_val, "🇫🇷 Blitz National"
         
-        # Sécurité si les lettres ont sauté dans l'import
+        # Sécurité format brut
         if r_val > 0: return r_val, "🇫🇷 Rapide National"
         if l_val > 0: return l_val, "🇫🇷 Lent National"
         if b_val > 0: return b_val, "🇫🇷 Blitz National"
+        
+        # 3. Sécurité Rétrocompatibilité (Si l'utilisateur n'a pas encore "Recroisé" avec le nouveau code)
+        old_elo = row.get("Elo_FFE", 0)
+        if str(old_elo).lower() not in ["nan", "none", ""]:
+            try:
+                old_elo = int(float(old_elo))
+                if old_elo > 0 and old_elo not in [799, 899, 999, 1099, 1199, 1299, 1399, 1499]:
+                    return old_elo, "⚡ FFE (Ancien format)"
+            except: pass
             
     except Exception: pass
     return db['elos_crevette'].get(identite, 400), "🦐 Crevette"
@@ -225,24 +224,21 @@ def calculer_nouveau_elo(r_a, r_b, score_a, k=40):
 
 # --- LE VRAI SYSTÈME SUISSE (Moitié Haute VS Moitié Basse) ---
 def generer_appariements_suisses(joueurs_scores, elos_dict, historique_rencontres):
-    # Tri général: D'abord par le nombre de points, puis par le Elo
     joueurs = sorted(joueurs_scores.keys(), key=lambda j: (joueurs_scores[j], elos_dict.get(j, 400)), reverse=True)
     appariements = []
     exempt = None
 
     if len(joueurs) % 2 != 0:
-        exempt = joueurs.pop() # Le dernier joueur (le plus faible en pts/elo) est exempt
+        exempt = joueurs.pop()
 
     while len(joueurs) >= 2:
-        # On regroupe les joueurs ayant le même score
         current_score = joueurs_scores[joueurs[0]]
         groupe_idx = 0
         while groupe_idx < len(joueurs) and joueurs_scores[joueurs[groupe_idx]] == current_score:
             groupe_idx += 1
 
-        # Il faut un nombre pair de joueurs pour couper le groupe proprement en deux
         if groupe_idx % 2 != 0:
-            groupe_idx += 1 # On "aspire" le meilleur joueur du groupe de points inférieur
+            groupe_idx += 1 
             
         if groupe_idx > len(joueurs):
             groupe_idx = len(joueurs)
@@ -251,14 +247,13 @@ def generer_appariements_suisses(joueurs_scores, elos_dict, historique_rencontre
         groupe = sorted(groupe, key=lambda j: elos_dict.get(j, 400), reverse=True)
 
         demi = len(groupe) // 2
-        s1 = groupe[:demi] # Moitié Haute
-        s2 = groupe[demi:] # Moitié Basse
+        s1 = groupe[:demi] 
+        s2 = groupe[demi:] 
 
         paired_this_round = set()
 
         for j1 in s1:
             paired = False
-            # Tentative de match avec la Moitié Basse
             for j2 in s2:
                 if j2 not in paired_this_round:
                     pair = (min(j1, j2), max(j1, j2))
@@ -270,7 +265,6 @@ def generer_appariements_suisses(joueurs_scores, elos_dict, historique_rencontre
                         paired = True
                         break
                         
-            # Si échec (ils ont déjà tous joué ensemble), on cherche dans la Moitié Haute
             if not paired:
                 for j2 in s1:
                     if j1 != j2 and j2 not in paired_this_round:
@@ -283,7 +277,6 @@ def generer_appariements_suisses(joueurs_scores, elos_dict, historique_rencontre
                             paired = True
                             break
                             
-            # En dernier recours absolu (fin de tournoi), on prend le premier disponible
             if not paired:
                 for j2 in joueurs:
                     if j1 != j2 and j2 not in paired_this_round:
@@ -295,7 +288,6 @@ def generer_appariements_suisses(joueurs_scores, elos_dict, historique_rencontre
                         paired = True
                         break
 
-        # On enlève ceux qui viennent de matcher pour passer au groupe de score suivant
         joueurs = [j for j in joueurs if j not in paired_this_round]
 
     return appariements, exempt, historique_rencontres
@@ -313,7 +305,7 @@ def fetch_ffe_team_calendar(team_url):
         r = requests.get(team_url, headers=headers, timeout=5)
         html_content = r.text
     except:
-        try: # Contournement de Cloudflare via AllOrigins
+        try:
             url_proxy = f"https://api.allorigins.win/get?url={urllib.parse.quote(team_url)}"
             r = requests.get(url_proxy, timeout=10)
             html_content = r.json()['contents']
@@ -326,7 +318,7 @@ def fetch_ffe_team_calendar(team_url):
                 cols = re.findall(r'<td[^>]*>(.*?)</td>', ligne, re.IGNORECASE | re.DOTALL)
                 if len(cols) >= 5:
                     textes = [re.sub(r'<[^>]+>', '', c).replace("&nbsp;", " ").strip() for c in cols]
-                    if re.search(r'\d{2}/\d{2}/\d{4}', textes[0]): # Ligne de date
+                    if re.search(r'\d{2}/\d{2}/\d{4}', textes[0]):
                         date = textes[0]
                         eq1 = textes[2]
                         score = textes[3]
@@ -338,7 +330,6 @@ def fetch_ffe_team_calendar(team_url):
     return rondes
 
 def analyser_fichier_ffe(fichier):
-    """ Analyse le CSV de la FFE et extrait les 3 colonnes d'Elos. """
     try:
         if not isinstance(fichier, str):
             with open("base_ffe_locale_tmp.csv", "wb") as f: f.write(fichier.getbuffer())
@@ -350,7 +341,6 @@ def analyser_fichier_ffe(fichier):
             
         col_nom = next((c for c in df_ffe.columns if "nom" in str(c).lower() and "prenom" not in str(c).lower() and "prénom" not in str(c).lower()), None)
         col_prenom = next((c for c in df_ffe.columns if "prenom" in str(c).lower() or "prénom" in str(c).lower()), None)
-        
         col_lent = next((c for c in df_ffe.columns if "elo" in str(c).lower() and "rapide" not in str(c).lower() and "blitz" not in str(c).lower()), None)
         col_rapide = next((c for c in df_ffe.columns if "rapide" in str(c).lower()), None)
         col_blitz = next((c for c in df_ffe.columns if "blitz" in str(c).lower()), None)
@@ -369,7 +359,6 @@ def analyser_fichier_ffe(fichier):
             df_ffe['Elo_Rapide'] = df_ffe[col_rapide].astype(str) if col_rapide else ""
             df_ffe['Elo_Blitz'] = df_ffe[col_blitz].astype(str) if col_blitz else ""
             df_ffe['Licence_FFE'] = df_ffe[col_licence].astype(str) if col_licence else "Non croisé"
-            
             return df_ffe[['Cle_Forte', 'Cle_Souple', 'Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE']]
     except Exception as e: 
         st.sidebar.error(f"Erreur d'analyse FFE: {e}")
@@ -913,7 +902,6 @@ else:
                 s_actuelle = st.session_state['db']['sorties_manuelles'].get(contact["Identité"], contact.get("Sortie Seul", "-"))
                 contact["Sortie Seul (Temps Réel)"] = s_actuelle
                 
-                # Récupération de l'Elo Intelligent
                 elo_val, elo_type = get_elo_actif(contact["Identité"], df_sans_boutique, st.session_state['db'])
                 contact["Niveau Échiquéen"] = f"{elo_val} ({elo_type})"
                 
@@ -965,16 +953,13 @@ else:
                     return False
                 df_admin = df_admin[df_admin.apply(is_carte_manquante, axis=1)]
             
-            # Affichage correct de l'Elo dans le tableau
             df_admin['Elo Actif ⚡'] = df_admin['Identité'].apply(lambda x: get_elo_actif(x, df_admin, st.session_state['db'])[0])
             df_admin['Catégorie Elo'] = df_admin['Identité'].apply(lambda x: get_elo_actif(x, df_admin, st.session_state['db'])[1])
-            
             df_admin['Promo Validée ✅'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['validations_promo'].get(x, False))
             df_admin['Sortie Seul'] = df_admin.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Identité'], r['Sortie Seul']), axis=1)
             df_admin['T-shirt donné 👕'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['tshirts_donnes'].get(x, False))
             
             df_admin["_orig_index"] = df_admin.index 
-            
             noms_bruts = df_admin["Nom"].fillna("Inconnu").astype(str) + " " + df_admin["Prénom"].fillna("").astype(str)
             s_counts = df_admin.groupby(noms_bruts, dropna=False).cumcount()
             index_names = noms_bruts.astype(str) + s_counts.apply(lambda x: f" ({x})" if x > 0 else "").astype(str)
@@ -1123,8 +1108,8 @@ else:
                     st.dataframe(df_ec_display[colonnes_ecole], use_container_width=True)
 
                     st.markdown("---")
-                    st.markdown("#### 📱 Exporter pour WhatsApp / Téléphone")
-                    st.write("Ce fichier CSV est spécialement formaté pour être importé dans Google Contacts et créer vos groupes WhatsApp.")
+                    st.markdown("#### 📱 Exporter pour WhatsApp / Google Contacts")
+                    st.write("Ce fichier CSV est prêt à être importé dans vos Contacts Google pour créer le groupe WhatsApp de l'école.")
                     
                     df_wa = pd.DataFrame()
                     df_wa["Name"] = df_ec["Identité"]
@@ -1135,7 +1120,6 @@ else:
                     df_wa["Phone 1 - Value"] = df_ec["N° Portable"]
                     if "Nom payeur" in df_ec.columns: df_wa["Notes"] = "Parent: " + df_ec["Nom payeur"].astype(str) + " " + df_ec["Prénom payeur"].astype(str)
                     
-                    # Nettoyage des numéros vides
                     df_wa = df_wa[df_wa["Phone 1 - Value"].astype(str).str.strip() != ""] 
                     df_wa = df_wa[df_wa["Phone 1 - Value"].astype(str).str.strip() != "nan"]
                     
@@ -1522,195 +1506,3 @@ else:
 
         with tab_adultes: afficher_gestion_equipes("Adultes")
         with tab_jeunes: afficher_gestion_equipes("Jeunes")
-
-    elif module_choisi == "♟️ Module Entraîneur":
-        st.subheader("♟️ Espace Entraîneur")
-        tab_appel, tab_tournoi, tab_classement, tab_affectations = st.tabs(["📋 Faire l'Appel", "⚔️ Tournoi & Elo", "🏆 Classement", "⚙️ Affecter Élèves"])
-
-        with tab_affectations:
-            st.markdown("### ⚙️ Création Manuelle des listes de Créneaux")
-            c_jour, c_lieu = st.columns(2)
-            with c_jour: jour_aff = st.selectbox("Jour :", options=list(structure_creneaux.keys()), key="jour_aff")
-            with c_lieu: lieu_aff = st.selectbox("Créneau :", options=structure_creneaux[jour_aff], key="lieu_aff")
-            
-            if lieu_aff not in st.session_state['db']['affectations_creneaux']: st.session_state['db']['affectations_creneaux'][lieu_aff] = []
-            options_eleves = sorted(df["Identité"].tolist())
-            eleves_sauvegardes = st.session_state['db']['affectations_creneaux'][lieu_aff]
-            eleves_valides = [e for e in eleves_sauvegardes if e in options_eleves]
-            nouveaux_eleves = st.multiselect(f"Élèves assignés à {lieu_aff} :", options=options_eleves, default=eleves_valides)
-            
-            if st.button("💾 Sauvegarder cette liste"):
-                st.session_state['db']['affectations_creneaux'][lieu_aff] = nouveaux_eleves
-                sauvegarder_base_cloud(st.session_state['db'])
-                st.success(f"Liste de {lieu_aff} mise à jour dans le Cloud !")
-
-        with tab_appel:
-            st.markdown(f"### 📋 Appel du jour : **{date_jour}**")
-            entraineur_appel = st.selectbox("Entraîneur responsable :", ["Quentin Massardo", "Alexandre Merenciano"])
-            c_jour_ap, c_lieu_ap = st.columns(2)
-            with c_jour_ap: jour_appel = st.selectbox("Sélectionner le Jour :", options=list(structure_creneaux.keys()), key="jour_ap")
-            with c_lieu_ap: lieu_appel = st.selectbox("Créneau :", options=structure_creneaux[jour_appel], key="lieu_ap")
-            
-            liste_identites = st.session_state['db']['affectations_creneaux'].get(lieu_appel, [])
-            if not liste_identites: st.info("Aucun élève assigné à ce créneau.")
-            else:
-                df_groupe = df[df["Identité"].isin(liste_identites)].drop_duplicates(subset=["ID_Dossier"])
-                total_appel = len(df_groupe)
-                st.markdown("---")
-                presences = {}
-                for idx, row in df_groupe.iterrows():
-                    c1, c2 = st.columns([4, 1])
-                    sortie_act = st.session_state['db']['sorties_manuelles'].get(row['Identité'], row.get('Sortie Seul', '-'))
-                    nom_aff = row['Nom'] + " " + row['Prénom']
-                    if len(df_groupe[df_groupe['Identité'] == row['Identité']]) > 1: nom_aff += f" ({idx})"
-                    c1.write(f"👤 **{nom_aff}** *(Sortie: {sortie_act})*")
-                    presences[idx] = c2.checkbox("Présent", value=True, key=f"pres_{idx}")
-
-                presents_count = sum(presences.values())
-                absents_count = total_appel - presents_count
-                
-                st.markdown("---")
-                c_m1, c_m2, c_m3 = st.columns(3)
-                c_m1.metric("👥 Total Liste", total_appel)
-                c_m2.metric("✅ Présents", presents_count)
-                c_m3.metric("❌ Absents", absents_count)
-
-                if st.button(f"💾 Enregistrer l'appel pour {lieu_appel}"):
-                    liste_presents = [df_groupe.loc[idx_app, 'Identité'] for idx_app, est_present in presences.items() if est_present]
-                    if date_jour not in st.session_state['db']['historique_appels']: st.session_state['db']['historique_appels'][date_jour] = {}
-                    st.session_state['db']['historique_appels'][date_jour][lieu_appel] = {"entraineur": entraineur_appel, "presents": liste_presents}
-                    sauvegarder_base_cloud(st.session_state['db'])
-                    st.success("Appel enregistré dans le Cloud !")
-
-                st.markdown("---")
-                st.markdown("#### 📥 Exporter la liste d'appel")
-                col_ap1, col_ap2 = st.columns(2)
-                nom_fich_ap = f"Appel_{lieu_appel}".replace(" ", "_").replace("/", "-")
-                df_appel_export = df_groupe[["Nom", "Prénom", "N° Portable", "N° Portable 2 (en cas d'urgence)", "Campagne"]].copy()
-                df_appel_export['Sortie Seul'] = df_appel_export.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Nom']+" "+r['Prénom'], "-"), axis=1)
-                
-                col_ap1.download_button("📄 Exporter en CSV", data=df_appel_export.to_csv(index=False).encode('utf-8'), file_name=f"{nom_fich_ap}.csv", mime="text/csv")
-                try:
-                    buffer_ap = io.BytesIO()
-                    with pd.ExcelWriter(buffer_ap, engine='xlsxwriter') as writer: df_appel_export.to_excel(writer, index=False, sheet_name='Appel')
-                    col_ap2.download_button("📊 Exporter en Excel", data=buffer_ap.getvalue(), file_name=f"{nom_fich_ap}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-                except: pass
-
-        with tab_tournoi:
-            st.markdown("### ⚔️ Tournoi Suisse & Elos")
-            creneaux_remplis = [k for k, v in st.session_state['db']['affectations_creneaux'].items() if len(v) > 0]
-            if not creneaux_remplis: st.info("Aucun créneau disponible.")
-            else:
-                creneau_tournoi = st.selectbox("Lancer le tournoi pour le créneau :", options=creneaux_remplis)
-                joueurs_inscrits = list(set(st.session_state['db']['affectations_creneaux'][creneau_tournoi]))
-                st.markdown("**Retirez les élèves absents :**")
-                joueurs_presents = st.multiselect("", options=joueurs_inscrits, default=joueurs_inscrits)
-                
-                elos_actifs, types_elos = {}, {}
-                for j in joueurs_presents:
-                    e_val, e_type = get_elo_actif(j, df, st.session_state['db'])
-                    elos_actifs[j], types_elos[j] = e_val, e_type
-
-                if 'scores_tournoi' not in st.session_state or st.session_state.get('tournoi_en_cours') != creneau_tournoi:
-                    st.session_state['scores_tournoi'] = {j: 0.0 for j in joueurs_presents}
-                    st.session_state['adversaires_tournoi'] = {j: [] for j in joueurs_presents}
-                    st.session_state['historique_rencontres'] = set()
-                    st.session_state['ronde_actuelle'] = 1
-                    st.session_state['appariements_ronde'] = []
-                    st.session_state['tournoi_en_cours'] = creneau_tournoi
-                
-                if 'adversaires_tournoi' not in st.session_state: st.session_state['adversaires_tournoi'] = {}
-                for j in joueurs_presents:
-                    if j not in st.session_state['scores_tournoi']: st.session_state['scores_tournoi'][j] = 0.0
-                    if j not in st.session_state['adversaires_tournoi']: st.session_state['adversaires_tournoi'][j] = []
-
-                if st.session_state.get('tournoi_en_cours'):
-                    with st.expander("📊 Voir la Grille Américaine (Classement en direct)"):
-                        data_grille = []
-                        for j in joueurs_presents:
-                            pts = st.session_state['scores_tournoi'].get(j, 0.0)
-                            advs = st.session_state['adversaires_tournoi'].get(j, [])
-                            buchholz = sum(st.session_state['scores_tournoi'].get(adv, 0.0) for adv in advs)
-                            data_grille.append({"Élève": j, "Points": pts, "Buchholz": buchholz, "Matchs Joués": len(advs) + (1 if j == st.session_state.get('exempt_ronde') else 0)})
-                        if data_grille:
-                            df_grille = pd.DataFrame(data_grille).sort_values(by=["Points", "Buchholz"], ascending=[False, False]).reset_index(drop=True)
-                            df_grille.index += 1
-                            st.dataframe(df_grille, use_container_width=True)
-
-                st.markdown("---")
-                col_t1, col_t2 = st.columns(2)
-                with col_t1: st.metric("Ronde actuelle", st.session_state['ronde_actuelle'])
-                with col_t2:
-                    if st.button("🔄 Réinitialiser le tournoi"):
-                        st.session_state['scores_tournoi'] = {}
-                        st.session_state['adversaires_tournoi'] = {}
-                        st.session_state['historique_rencontres'] = set()
-                        st.session_state['ronde_actuelle'] = 1
-                        st.session_state['appariements_ronde'] = []
-                        st.rerun()
-
-                st.markdown("---")
-                if st.button("🎲 Générer la Ronde (Système Suisse)"):
-                    scores_actifs = {j: st.session_state['scores_tournoi'][j] for j in joueurs_presents}
-                    pairs, exempt, st.session_state['historique_rencontres'] = generer_appariements_suisses(scores_actifs, elos_actifs, st.session_state['historique_rencontres'])
-                    st.session_state['appariements_ronde'], st.session_state['exempt_ronde'] = pairs, exempt
-
-                if st.session_state.get('appariements_ronde'):
-                    st.subheader(f"♟️ Matchs — Ronde {st.session_state['ronde_actuelle']}")
-                    
-                    if st.button("📺 Afficher en Plein Écran (Pour vidéoprojecteur)"):
-                        st.session_state['plein_ecran_ronde'] = True
-                        st.rerun()
-                        
-                    resultats_saisis = []
-                    for i, (j1, j2) in enumerate(st.session_state['appariements_ronde'], 1):
-                        sym1, sym2 = "⚡" if "FIDE" in types_elos[j1] else "🦐", "⚡" if "FIDE" in types_elos[j2] else "🦐"
-                        c_ech, c_res = st.columns([3, 2])
-                        c_ech.markdown(f"**Échiquier {i} :** ⚪ **{j1}** ({elos_actifs[j1]} {sym1})  🆚  ⚫ **{j2}** ({elos_actifs[j2]} {sym2})")
-                        res = c_res.selectbox(f"Résultat", ["Sélectionner...", "1 - 0 (Blancs)", "0 - 1 (Noirs)", "0.5 - 0.5 (Nulle)"], key=f"res_{i}", label_visibility="collapsed")
-                        resultats_saisis.append((j1, j2, res))
-                        
-                    if st.session_state.get('exempt_ronde'): st.warning(f"👑 **Exempt (1 pt) :** {st.session_state['exempt_ronde']} ({elos_actifs[st.session_state['exempt_ronde']]} {types_elos[st.session_state['exempt_ronde']][:2]})")
-
-                    st.markdown("---")
-                    if st.button("💾 Valider les résultats"):
-                        if any(r[2] == "Sélectionner..." for r in resultats_saisis): st.error("⚠️ Saisissez tous les résultats.")
-                        else:
-                            for j1, j2, res in resultats_saisis:
-                                st.session_state['adversaires_tournoi'][j1].append(j2)
-                                st.session_state['adversaires_tournoi'][j2].append(j1)
-                                elo1, elo2 = elos_actifs[j1], elos_actifs[j2]
-                                if res == "1 - 0 (Blancs)":
-                                    st.session_state['scores_tournoi'][j1] += 1.0
-                                    new_e1, new_e2 = calculer_nouveau_elo(elo1, elo2, 1.0), calculer_nouveau_elo(elo2, elo1, 0.0)
-                                elif res == "0 - 1 (Noirs)":
-                                    st.session_state['scores_tournoi'][j2] += 1.0
-                                    new_e1, new_e2 = calculer_nouveau_elo(elo1, elo2, 0.0), calculer_nouveau_elo(elo2, elo1, 1.0)
-                                else:
-                                    st.session_state['scores_tournoi'][j1] += 0.5
-                                    st.session_state['scores_tournoi'][j2] += 0.5
-                                    new_e1, new_e2 = calculer_nouveau_elo(elo1, elo2, 0.5), calculer_nouveau_elo(elo2, elo1, 0.5)
-                                    
-                                if "Crevette" in types_elos[j1]: st.session_state['db']['elos_crevette'][j1] = new_e1
-                                if "Crevette" in types_elos[j2]: st.session_state['db']['elos_crevette'][j2] = new_e2
-
-                            if st.session_state.get('exempt_ronde'): st.session_state['scores_tournoi'][st.session_state['exempt_ronde']] += 1.0
-                            sauvegarder_base_cloud(st.session_state['db'])
-                            st.session_state['ronde_actuelle'] += 1
-                            st.session_state['appariements_ronde'] = []
-                            st.success("Résultats et Elos sauvegardés dans le Cloud !")
-                            st.rerun()
-                            
-        with tab_classement:
-            st.markdown("### 🏆 Classement Général (FIDE & Crevette)")
-            creneaux_remplis_classement = [k for k, v in st.session_state['db']['affectations_creneaux'].items() if len(v) > 0]
-            filtre_c = st.selectbox("Filtrer par liste / créneau :", ["Tous les élèves"] + sorted(creneaux_remplis_classement))
-            joueurs_a_afficher = list(df["Identité"].unique()) if filtre_c == "Tous les élèves" else list(set(st.session_state['db']['affectations_creneaux'][filtre_c]))
-            data_classement = [{"Élève": j, "Catégorie": get_elo_actif(j, df, st.session_state['db'])[1], "Elo ⚡🦐": get_elo_actif(j, df, st.session_state['db'])[0]} for j in joueurs_a_afficher]
-            
-            if data_classement:
-                df_classement = pd.DataFrame(data_classement).sort_values(by="Elo ⚡🦐", ascending=False).reset_index(drop=True)
-                df_classement.index += 1
-                max_elo = max(1000, df_classement["Elo ⚡🦐"].max())
-                st.dataframe(df_classement, use_container_width=True, column_config={"Elo ⚡🦐": st.column_config.ProgressColumn("Niveau de puissance", format="%d", min_value=100, max_value=int(max_elo))})
-            else: st.info("Aucun élève à afficher.")
