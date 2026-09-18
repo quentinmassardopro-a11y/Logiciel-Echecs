@@ -453,15 +453,6 @@ else:
             import PyPDF2; from reportlab.pdfgen import canvas; from reportlab.lib.pagesizes import A4
         except: pdf_ready = False
             
-        def get_rank_division(div_str):
-            d = str(div_str).lower()
-            if 'top' in d: return 1
-            if '1' in d: return 2
-            if '2' in d: return 3
-            if '3' in d: return 4
-            if '4' in d: return 5
-            return 99
-
         liste_totale_joueurs = sorted(df["Identité"].unique().tolist())
         dict_elo_global = {j: get_elo_actif(j, df, st.session_state['db'])[0] for j in liste_totale_joueurs}
 
@@ -558,6 +549,7 @@ else:
                     else:
                         if st.button("💾 Enregistrer la Composition", use_container_width=True):
                             st.session_state['db']['equipes_interclubs'][equipe_choisie].setdefault("compo", {})[ronde_choisie] = nouvelle_compo
+                            st.session_state['db']['equipes_interclubs'][equipe_choisie].setdefault("couleurs", {})[ronde_choisie] = couleur_ech1
                             sauvegarder_base_cloud(st.session_state['db']); st.success("Enregistré !"); st.rerun()
 
                     if pdf_ready:
@@ -599,7 +591,7 @@ else:
             if not liste_identites: st.info("Aucun élève.")
             else:
                 df_groupe = df[df["Identité"].isin(liste_identites)]
-                presences = {idx: st.checkbox(row['Identité'], value=True) for idx, row in df_groupe.iterrows()}
+                presences = {idx: st.checkbox(row['Identité'], value=True, key=f"appel_{idx}_{row['Identité']}") for idx, row in df_groupe.iterrows()}
                 if st.button("💾 Enregistrer l'appel"):
                     if date_jour not in st.session_state['db']['historique_appels']: st.session_state['db']['historique_appels'][date_jour] = {}
                     st.session_state['db']['historique_appels'][date_jour][lieu_appel] = {"presents": [df_groupe.loc[i, 'Identité'] for i, p in presences.items() if p]}
