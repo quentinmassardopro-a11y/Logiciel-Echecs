@@ -168,39 +168,136 @@ def estimer_sexe(prenom):
     if p in femmes or p.endswith(('a', 'e', 'ine', 'elle', 'ette', 'ie', 'ia')): return "F"
     return "M"
 
+# --- MOTEUR ELO INTELLIGENT (HIÉRARCHIE FFE) ---
+def extract_elo_val(val):
+    """Extrait le score et détermine s'il est FIDE ou National."""
+    val_str = str(val).upper().strip()
+    match = re.search(r'(\d{3,4})', val_str)
+    if match:
+        score = int(match.group(1))
+        is_fide = 'F' in val_str
+        is_nat = 'N' in val_str
+        # S'il n'y a ni F ni N mais qu'on a un score, on le considère National par défaut (système FFE)
+        if not is_fide and not is_nat:
+            is_nat = True
+        return score, is_fide, is_nat
+    return 0, False, False
+
+def get_elo_actif(identite, df_adherents, db):
+    """
+    Hiérarchie stricte demandée :
+    1. Rapide FIDE
+    2. Lent FIDE
+    3. Blitz FIDE
+    4. Rapide National
+    5. Lent National
+    6. Blitz National
+    7. Crevette
+    """
+    try:
+        row = df_adherents[df_adherents["Identité"] == identite].iloc[0]
+        
+        r_val, r_f, r_n = extract_elo_val(row.get("Elo_Rapide", ""))
+        l_val, l_f, l_n = extract_elo_val(row.get("Elo_Lent", ""))
+        b_val, b_f, b_n = extract_elo_val(row.get("Elo_Blitz", ""))
+        
+        # 1. Priorité FIDE
+        if r_f and r_val > 0: return r_val, "⚡ Rapide FIDE"
+        if l_f and l_val > 0: return l_val, "⚡ Lent FIDE"
+        if b_f and b_val > 0: return b_val, "⚡ Blitz FIDE"
+        
+        # 2. Priorité National
+        if r_n and r_val > 0: return r_val, "🇫🇷 Rapide National"
+        if l_n and l_val > 0: return l_val, "🇫🇷 Lent National"
+        if b_n and b_val > 0: return b_val, "🇫🇷 Blitz National"
+        
+        # Sécurité si les lettres ont sauté dans l'import
+        if r_val > 0: return r_val, "🇫🇷 Rapide National"
+        if l_val > 0: return l_val, "🇫🇷 Lent National"
+        if b_val > 0: return b_val, "🇫🇷 Blitz National"
+            
+    except Exception: pass
+    return db['elos_crevette'].get(identite, 400), "🦐 Crevette"
+
 def calculer_nouveau_elo(r_a, r_b, score_a, k=40):
     e_a = 1.0 / (1.0 + 10.0 ** ((r_b - r_a) / 400.0))
     return max(100, round(r_a + k * (score_a - e_a)))
 
-def get_elo_actif(identite, df_adherents, db):
-    try:
-        row = df_adherents[df_adherents["Identité"] == identite].iloc[0]
-        elo_ffe = int(float(row.get("Elo_FFE", 0)))
-        licence = str(row.get("Licence_FFE", "Non croisé"))
-        elos_virtuels_ffe = [799, 899, 999, 1099, 1199, 1299, 1399, 1499]
-        if licence != "Non croisé" and elo_ffe > 0 and elo_ffe not in elos_virtuels_ffe: 
-            return elo_ffe, "⚡ FFE/FIDE"
-    except: pass
-    return db['elos_crevette'].get(identite, 400), "🦐 Crevette"
-
+# --- LE VRAI SYSTÈME SUISSE (Moitié Haute VS Moitié Basse) ---
 def generer_appariements_suisses(joueurs_scores, elos_dict, historique_rencontres):
-    joueurs_tries = sorted(joueurs_scores.keys(), key=lambda j: (joueurs_scores[j], elos_dict.get(j, 400), random.random()), reverse=True)
-    appariements, non_apparies, exempt = [], list(joueurs_tries), None
-    if len(non_apparies) % 2 != 0: exempt = non_apparies.pop()
-    while len(non_apparies) > 1:
-        j1 = non_apparies.pop(0)
-        j2_trouve = None
-        for idx, j2 in enumerate(non_apparies):
-            pair = (min(j1, j2), max(j1, j2))
-            if pair not in historique_rencontres:
-                j2_trouve = non_apparies.pop(idx)
-                historique_rencontres.add(pair)
-                appariements.append((j1, j2_trouve))
-                break
-        if not j2_trouve and non_apparies:
-            j2_trouve = non_apparies.pop(0)
-            historique_rencontres.add((min(j1, j2_trouve), max(j1, j2_trouve)))
-            appariements.append((j1, j2_trouve))
+    # Tri général: D'abord par le nombre de points, puis par le Elo
+    joueurs = sorted(joueurs_scores.keys(), key=lambda j: (joueurs_scores[j], elos_dict.get(j, 400)), reverse=True)
+    appariements = []
+    exempt = None
+
+    if len(joueurs) % 2 != 0:
+        exempt = joueurs.pop() # Le dernier joueur (le plus faible en pts/elo) est exempt
+
+    while len(joueurs) >= 2:
+        # On regroupe les joueurs ayant le même score
+        current_score = joueurs_scores[joueurs[0]]
+        groupe_idx = 0
+        while groupe_idx < len(joueurs) and joueurs_scores[joueurs[groupe_idx]] == current_score:
+            groupe_idx += 1
+
+        # Il faut un nombre pair de joueurs pour couper le groupe proprement en deux
+        if groupe_idx % 2 != 0:
+            groupe_idx += 1 # On "aspire" le meilleur joueur du groupe de points inférieur
+            
+        if groupe_idx > len(joueurs):
+            groupe_idx = len(joueurs)
+
+        groupe = joueurs[:groupe_idx]
+        groupe = sorted(groupe, key=lambda j: elos_dict.get(j, 400), reverse=True)
+
+        demi = len(groupe) // 2
+        s1 = groupe[:demi] # Moitié Haute
+        s2 = groupe[demi:] # Moitié Basse
+
+        paired_this_round = set()
+
+        for j1 in s1:
+            paired = False
+            # Tentative de match avec la Moitié Basse
+            for j2 in s2:
+                if j2 not in paired_this_round:
+                    pair = (min(j1, j2), max(j1, j2))
+                    if pair not in historique_rencontres:
+                        appariements.append((j1, j2))
+                        historique_rencontres.add(pair)
+                        paired_this_round.add(j1)
+                        paired_this_round.add(j2)
+                        paired = True
+                        break
+                        
+            # Si échec (ils ont déjà tous joué ensemble), on cherche dans la Moitié Haute
+            if not paired:
+                for j2 in s1:
+                    if j1 != j2 and j2 not in paired_this_round:
+                        pair = (min(j1, j2), max(j1, j2))
+                        if pair not in historique_rencontres:
+                            appariements.append((j1, j2))
+                            historique_rencontres.add(pair)
+                            paired_this_round.add(j1)
+                            paired_this_round.add(j2)
+                            paired = True
+                            break
+                            
+            # En dernier recours absolu (fin de tournoi), on prend le premier disponible
+            if not paired:
+                for j2 in joueurs:
+                    if j1 != j2 and j2 not in paired_this_round:
+                        pair = (min(j1, j2), max(j1, j2))
+                        appariements.append((j1, j2))
+                        historique_rencontres.add(pair)
+                        paired_this_round.add(j1)
+                        paired_this_round.add(j2)
+                        paired = True
+                        break
+
+        # On enlève ceux qui viennent de matcher pour passer au groupe de score suivant
+        joueurs = [j for j in joueurs if j not in paired_this_round]
+
     return appariements, exempt, historique_rencontres
 
 # --- MOTEUR DE SCRAPING FFE ---
@@ -229,7 +326,7 @@ def fetch_ffe_team_calendar(team_url):
                 cols = re.findall(r'<td[^>]*>(.*?)</td>', ligne, re.IGNORECASE | re.DOTALL)
                 if len(cols) >= 5:
                     textes = [re.sub(r'<[^>]+>', '', c).replace("&nbsp;", " ").strip() for c in cols]
-                    if re.search(r'\d{2}/\d{2}/\d{4}', textes[0]):
+                    if re.search(r'\d{2}/\d{2}/\d{4}', textes[0]): # Ligne de date
                         date = textes[0]
                         eq1 = textes[2]
                         score = textes[3]
@@ -241,6 +338,7 @@ def fetch_ffe_team_calendar(team_url):
     return rondes
 
 def analyser_fichier_ffe(fichier):
+    """ Analyse le CSV de la FFE et extrait les 3 colonnes d'Elos. """
     try:
         if not isinstance(fichier, str):
             with open("base_ffe_locale_tmp.csv", "wb") as f: f.write(fichier.getbuffer())
@@ -252,8 +350,10 @@ def analyser_fichier_ffe(fichier):
             
         col_nom = next((c for c in df_ffe.columns if "nom" in str(c).lower() and "prenom" not in str(c).lower() and "prénom" not in str(c).lower()), None)
         col_prenom = next((c for c in df_ffe.columns if "prenom" in str(c).lower() or "prénom" in str(c).lower()), None)
-        col_elo = next((c for c in df_ffe.columns if "rapide" in str(c).lower()), None)
-        if not col_elo: col_elo = next((c for c in df_ffe.columns if "elo" in str(c).lower()), None)
+        
+        col_lent = next((c for c in df_ffe.columns if "elo" in str(c).lower() and "rapide" not in str(c).lower() and "blitz" not in str(c).lower()), None)
+        col_rapide = next((c for c in df_ffe.columns if "rapide" in str(c).lower()), None)
+        col_blitz = next((c for c in df_ffe.columns if "blitz" in str(c).lower()), None)
         col_licence = next((c for c in df_ffe.columns if any(m in str(c).lower() for m in ["n° ffe", "licence", "code", "ref", "identifiant"])), None)
         col_dna = next((c for c in df_ffe.columns if any(m in str(c).lower() for m in ["dna", "né", "naissance"])), None)
 
@@ -264,9 +364,13 @@ def analyser_fichier_ffe(fichier):
             else: df_ffe['Annee_FFE'] = ""
             df_ffe['Cle_Forte'] = df_ffe['Nom_Norm'].astype(str) + df_ffe['Prenom_Norm'].astype(str) + df_ffe['Annee_FFE'].astype(str)
             df_ffe['Cle_Souple'] = df_ffe['Nom_Norm'].astype(str) + df_ffe['Prenom_Norm'].astype(str)
-            df_ffe['Elo_FFE'] = df_ffe[col_elo] if col_elo else 0
+            
+            df_ffe['Elo_Lent'] = df_ffe[col_lent].astype(str) if col_lent else ""
+            df_ffe['Elo_Rapide'] = df_ffe[col_rapide].astype(str) if col_rapide else ""
+            df_ffe['Elo_Blitz'] = df_ffe[col_blitz].astype(str) if col_blitz else ""
             df_ffe['Licence_FFE'] = df_ffe[col_licence].astype(str) if col_licence else "Non croisé"
-            return df_ffe[['Cle_Forte', 'Cle_Souple', 'Elo_FFE', 'Licence_FFE']]
+            
+            return df_ffe[['Cle_Forte', 'Cle_Souple', 'Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE']]
     except Exception as e: 
         st.sidebar.error(f"Erreur d'analyse FFE: {e}")
         return pd.DataFrame()
@@ -505,27 +609,35 @@ structure_creneaux = {
     "Vendredi": ["Vendredi - Saint-Augustin (CE2-CM2)", "Vendredi - Sainte-Trinité (CE2-CM2)", "Vendredi - Cassis"]
 }
 
-# --- ECRAN GEANT (Doit être affiché en priorité absolue pour cacher le reste) ---
+# =========================================================================================
+# ECRAN GEANT D'APPARIEMENTS (Doit bloquer l'affichage du reste)
+# =========================================================================================
 if st.session_state.get('plein_ecran_ronde'):
     st.markdown("""
         <style>
         [data-testid="stSidebar"] {display: none;}
         header {display: none;}
         .block-container {padding-top: 1rem; max-width: 100%;}
-        table {font-size: 3rem !important; width: 100%; text-align: center; border-collapse: collapse; margin-top: 20px;}
+        table {font-size: 2.5rem !important; width: 100%; text-align: center; border-collapse: collapse; margin-top: 20px;}
         th {background-color: #005b96; color: white; padding: 20px; border: 3px solid #005b96;}
         td {padding: 20px; border: 2px solid #ddd; font-weight: bold;}
         tr:nth-child(even) {background-color: #f2f2f2;}
+        .pts {font-size: 1.5rem; color: #555; font-weight: normal;}
         </style>
     """, unsafe_allow_html=True)
     
-    st.markdown(f"<h1 style='text-align:center; font-size:5rem; color:#FF8C00; margin-bottom: 30px;'>🏆 Appariements - Ronde {st.session_state.get('ronde_actuelle', 1)}</h1>", unsafe_allow_html=True)
+    st.markdown(f"<h1 style='text-align:center; font-size:4rem; color:#FF8C00; margin-bottom: 30px;'>🏆 Appariements - Ronde {st.session_state.get('ronde_actuelle', 1)}</h1>", unsafe_allow_html=True)
     
-    html_table = "<table><tr><th>Table</th><th>⚪ Blancs</th><th>⚫ Noirs</th></tr>"
+    html_table = "<table><tr><th>Table</th><th>⚪ Blancs</th><th>Score</th><th>⚫ Noirs</th></tr>"
     for i, (j1, j2) in enumerate(st.session_state.get('appariements_ronde', []), 1):
-        html_table += f"<tr><td>{i}</td><td>{j1}</td><td>{j2}</td></tr>"
+        pts1 = st.session_state['scores_tournoi'].get(j1, 0)
+        pts2 = st.session_state['scores_tournoi'].get(j2, 0)
+        html_table += f"<tr><td>{i}</td><td>{j1} <br><span class='pts'>({pts1} pts)</span></td><td>... - ...</td><td>{j2} <br><span class='pts'>({pts2} pts)</span></td></tr>"
+        
     if st.session_state.get('exempt_ronde'):
-        html_table += f"<tr><td colspan='3' style='background-color:#ffe4b5;'>👑 <b>Exempt :</b> {st.session_state['exempt_ronde']}</td></tr>"
+        ex = st.session_state['exempt_ronde']
+        pts_ex = st.session_state['scores_tournoi'].get(ex, 0)
+        html_table += f"<tr><td colspan='4' style='background-color:#ffe4b5;'>👑 <b>Exempt :</b> {ex} <span class='pts'>({pts_ex} pts)</span></td></tr>"
     html_table += "</table>"
     
     st.markdown(html_table, unsafe_allow_html=True)
@@ -535,9 +647,10 @@ if st.session_state.get('plein_ecran_ronde'):
     if st.button("🔙 Retour à l'écran de gestion", use_container_width=True):
         st.session_state['plein_ecran_ronde'] = False
         st.rerun()
-    st.stop() # Bloque l'affichage du reste de l'application
+    st.stop()
 
 
+# --- BARRE LATÉRALE ---
 st.sidebar.header("🔑 Espace de Travail")
 module_choisi = st.sidebar.radio("", ["🛠️ Module Administration", "♟️ Module Entraîneur", "🛒 Module Boutique", "🏆 Module Interclubs"])
 
@@ -554,7 +667,7 @@ if st.sidebar.button("🔄 Rafraîchir les données (Cloud)"):
 
 st.sidebar.markdown("---")
 st.sidebar.header("1️⃣ Base FFE (Licences)")
-fichier_ffe = st.sidebar.file_uploader("Fichier FFE (Glissez votre CSV ici)", type=['csv', 'xls', 'xlsx'])
+fichier_ffe = st.sidebar.file_uploader("Fichier FFE (Glissez CSV ici)", type=['csv', 'xls', 'xlsx'])
 if fichier_ffe:
     df_ffe = analyser_fichier_ffe(fichier_ffe)
     if not df_ffe.empty:
@@ -565,7 +678,7 @@ if 'df_ffe' in st.session_state:
     st.sidebar.info("✅ FFE en mémoire.")
     if st.sidebar.button("🔄 Recroiser les Licences FFE"):
         if 'df_adherents' in st.session_state and not st.session_state['df_adherents'].empty:
-            with st.spinner("Recherche des correspondances dans la base FFE..."):
+            with st.spinner("Recherche des correspondances dans la base FFE (3 Elos)..."):
                 df_base = st.session_state['df_adherents'].copy()
                 df_base['Nom_Norm'] = df_base['Nom'].astype(str).apply(normaliser_nom)
                 df_base['Prenom_Norm'] = df_base['Prénom'].astype(str).apply(normaliser_nom)
@@ -576,17 +689,20 @@ if 'df_ffe' in st.session_state:
                 df_ffe_strict = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Forte'])
                 df_ffe_souple = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Souple'])
                 
-                df_base = df_base.drop(columns=['Elo_FFE', 'Licence_FFE'], errors='ignore')
-                df_base = pd.merge(df_base, df_ffe_strict[['Cle_Forte', 'Elo_FFE', 'Licence_FFE']], on='Cle_Forte', how='left')
+                colonnes_a_supprimer = ['Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE', 'Elo_FFE']
+                df_base = df_base.drop(columns=[c for c in colonnes_a_supprimer if c in df_base.columns], errors='ignore')
+                
+                df_base = pd.merge(df_base, df_ffe_strict[['Cle_Forte', 'Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE']], on='Cle_Forte', how='left')
                 
                 manquants = df_base['Licence_FFE'].isna() | (df_base['Licence_FFE'] == "Non croisé")
                 if manquants.any():
-                    df_base_m = df_base[manquants].drop(columns=['Elo_FFE', 'Licence_FFE'], errors='ignore')
-                    df_base_m = pd.merge(df_base_m, df_ffe_souple[['Cle_Souple', 'Elo_FFE', 'Licence_FFE']], on='Cle_Souple', how='left')
-                    df_base.loc[manquants, 'Elo_FFE'] = df_base_m['Elo_FFE'].values
+                    df_base_m = df_base[manquants].drop(columns=['Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE'], errors='ignore')
+                    df_base_m = pd.merge(df_base_m, df_ffe_souple[['Cle_Souple', 'Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE']], on='Cle_Souple', how='left')
+                    df_base.loc[manquants, 'Elo_Lent'] = df_base_m['Elo_Lent'].values
+                    df_base.loc[manquants, 'Elo_Rapide'] = df_base_m['Elo_Rapide'].values
+                    df_base.loc[manquants, 'Elo_Blitz'] = df_base_m['Elo_Blitz'].values
                     df_base.loc[manquants, 'Licence_FFE'] = df_base_m['Licence_FFE'].values
 
-                df_base['Elo_FFE'] = df_base['Elo_FFE'].fillna(0).astype(int)
                 df_base['Licence_FFE'] = df_base['Licence_FFE'].fillna("Non croisé")
                 df_base = df_base.drop(columns=['Cle_Forte', 'Cle_Souple', 'Nom_Norm', 'Prenom_Norm', 'Annee_HA'])
                 
@@ -594,8 +710,6 @@ if 'df_ffe' in st.session_state:
                 sauvegarder_adherents_cloud(df_base)
                 st.sidebar.success("✅ Licences et Elos recroisés avec succès !")
                 st.rerun()
-        else:
-            st.sidebar.warning("Aucun adhérent dans la base.")
 
 st.sidebar.markdown("---")
 st.sidebar.header("2️⃣ HelloAsso (Nouveaux Inscrits)")
@@ -647,21 +761,21 @@ if st.sidebar.button("⬇️ Lancer la Synchronisation HelloAsso"):
                             df_ffe_strict = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Forte'])
                             df_ffe_souple = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Souple'])
                             
-                            nouveaux = nouveaux.drop(columns=['Elo_FFE', 'Licence_FFE'], errors='ignore')
-                            nouveaux = pd.merge(nouveaux, df_ffe_strict[['Cle_Forte', 'Elo_FFE', 'Licence_FFE']], on='Cle_Forte', how='left')
+                            nouveaux = nouveaux.drop(columns=['Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE', 'Elo_FFE'], errors='ignore')
+                            nouveaux = pd.merge(nouveaux, df_ffe_strict[['Cle_Forte', 'Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE']], on='Cle_Forte', how='left')
                             
                             manquants = nouveaux['Licence_FFE'].isna()
                             if manquants.any():
-                                df_base_m = nouveaux[manquants].drop(columns=['Elo_FFE', 'Licence_FFE'])
-                                df_base_m = pd.merge(df_base_m, df_ffe_souple[['Cle_Souple', 'Elo_FFE', 'Licence_FFE']], on='Cle_Souple', how='left')
-                                nouveaux.loc[manquants, 'Elo_FFE'] = df_base_m['Elo_FFE'].values
+                                df_base_m = nouveaux[manquants].drop(columns=['Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE'], errors='ignore')
+                                df_base_m = pd.merge(df_base_m, df_ffe_souple[['Cle_Souple', 'Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE']], on='Cle_Souple', how='left')
+                                nouveaux.loc[manquants, 'Elo_Lent'] = df_base_m['Elo_Lent'].values
+                                nouveaux.loc[manquants, 'Elo_Rapide'] = df_base_m['Elo_Rapide'].values
+                                nouveaux.loc[manquants, 'Elo_Blitz'] = df_base_m['Elo_Blitz'].values
                                 nouveaux.loc[manquants, 'Licence_FFE'] = df_base_m['Licence_FFE'].values
 
-                            nouveaux['Elo_FFE'] = nouveaux['Elo_FFE'].fillna(0).astype(int)
                             nouveaux['Licence_FFE'] = nouveaux['Licence_FFE'].fillna("Non croisé")
                             nouveaux = nouveaux.drop(columns=['Cle_Forte', 'Cle_Souple', 'Nom_Norm', 'Prenom_Norm', 'Annee_HA'])
                         else:
-                            nouveaux['Elo_FFE'] = 0
                             nouveaux['Licence_FFE'] = "Non croisé"
 
                         for _, row in nouveaux.iterrows():
@@ -798,13 +912,17 @@ else:
                 contact = df_sans_boutique[df_sans_boutique["Identité"] == recherche_nom].iloc[0].copy()
                 s_actuelle = st.session_state['db']['sorties_manuelles'].get(contact["Identité"], contact.get("Sortie Seul", "-"))
                 contact["Sortie Seul (Temps Réel)"] = s_actuelle
-                contact["Elo Crevette 🦐"] = st.session_state['db']['elos_crevette'].get(contact["Identité"], 400)
+                
+                # Récupération de l'Elo Intelligent
+                elo_val, elo_type = get_elo_actif(contact["Identité"], df_sans_boutique, st.session_state['db'])
+                contact["Niveau Échiquéen"] = f"{elo_val} ({elo_type})"
+                
                 contact["Promo Validée ✅"] = "Oui" if st.session_state['db']['validations_promo'].get(contact["Identité"], False) else "Non"
                 contact["T-shirt Offert Donné 👕"] = "Oui" if st.session_state['db']['tshirts_donnes'].get(contact["Identité"], False) else "Non"
                 
                 st.markdown("---")
                 c_info1, c_info2 = st.columns(2)
-                infos = {k: v for k, v in contact.items() if k not in ["_orig_index", "Identité"] and str(v).strip() and str(v) != "nan"}
+                infos = {k: v for k, v in contact.items() if k not in ["_orig_index", "Identité", "Elo_Lent", "Elo_Rapide", "Elo_Blitz", "Elo_FFE"] and str(v).strip() and str(v) != "nan"}
                 items = list(infos.items())
                 mid = (len(items) + 1) // 2
                 for i, (k, v) in enumerate(items):
@@ -847,7 +965,10 @@ else:
                     return False
                 df_admin = df_admin[df_admin.apply(is_carte_manquante, axis=1)]
             
-            df_admin['Elo Crevette 🦐'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['elos_crevette'].get(x, 400))
+            # Affichage correct de l'Elo dans le tableau
+            df_admin['Elo Actif ⚡'] = df_admin['Identité'].apply(lambda x: get_elo_actif(x, df_admin, st.session_state['db'])[0])
+            df_admin['Catégorie Elo'] = df_admin['Identité'].apply(lambda x: get_elo_actif(x, df_admin, st.session_state['db'])[1])
+            
             df_admin['Promo Validée ✅'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['validations_promo'].get(x, False))
             df_admin['Sortie Seul'] = df_admin.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Identité'], r['Sortie Seul']), axis=1)
             df_admin['T-shirt donné 👕'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['tshirts_donnes'].get(x, False))
@@ -861,11 +982,11 @@ else:
             df_admin.insert(0, "👤 Élève (Fige)", index_names)
             df_display = df_admin.set_index("_orig_index")
             
-            colonnes_a_cacher = ["Identité", "Nom payeur", "Prénom payeur", "Email payeur", "ID_Dossier", "_orig_index"]
+            colonnes_a_cacher = ["Identité", "Nom payeur", "Prénom payeur", "Email payeur", "ID_Dossier", "_orig_index", "Elo_Lent", "Elo_Rapide", "Elo_Blitz", "Elo_FFE"]
             colonnes_possibles = [c for c in df_display.columns if c not in colonnes_a_cacher]
-            ordre_prefere = ["👤 Élève (Fige)", "T-shirt donné 👕", "Promo Validée ✅", "Nom", "Prénom", "Licence_FFE", "Type", "Elo_FFE", "Elo Crevette 🦐", "Formule", "Campagne", "Sortie Seul", "N° Portable", "EMail"]
+            ordre_prefere = ["👤 Élève (Fige)", "T-shirt donné 👕", "Promo Validée ✅", "Nom", "Prénom", "Licence_FFE", "Type", "Elo Actif ⚡", "Catégorie Elo", "Formule", "Campagne", "Sortie Seul", "N° Portable", "EMail"]
             colonnes_possibles = sorted(colonnes_possibles, key=lambda x: ordre_prefere.index(x) if x in ordre_prefere else 999)
-            colonnes_par_defaut = [c for c in ["👤 Élève (Fige)", "T-shirt donné 👕", "Promo Validée ✅", "Licence_FFE", "Type", "Elo_FFE", "Elo Crevette 🦐", "Formule", "Campagne"] if c in colonnes_possibles]
+            colonnes_par_defaut = [c for c in ["👤 Élève (Fige)", "T-shirt donné 👕", "Promo Validée ✅", "Licence_FFE", "Type", "Elo Actif ⚡", "Catégorie Elo", "Formule", "Campagne"] if c in colonnes_possibles]
             
             st.markdown("##### ⚙️ Affichage sur mesure")
             colonnes_choisies = st.multiselect("Sélectionnez les colonnes à afficher :", options=[c for c in colonnes_possibles if c != "👤 Élève (Fige)"], default=[c for c in colonnes_par_defaut if c != "👤 Élève (Fige)"])
@@ -878,7 +999,9 @@ else:
                     "👤 Élève (Fige)": st.column_config.Column("👤 Élève (Bloqué)", disabled=True),
                     "Promo Validée ✅": st.column_config.CheckboxColumn("Promo Validée ✅"),
                     "T-shirt donné 👕": st.column_config.CheckboxColumn("T-shirt donné 👕"),
-                    "Sortie Seul": st.column_config.SelectboxColumn("Sortie Seul", options=["✅ OUI", "❌ NON", "N/A (École)", "-"])
+                    "Sortie Seul": st.column_config.SelectboxColumn("Sortie Seul", options=["✅ OUI", "❌ NON", "N/A (École)", "-"]),
+                    "Elo Actif ⚡": st.column_config.Column(disabled=True),
+                    "Catégorie Elo": st.column_config.Column(disabled=True)
                 }
             )
             
@@ -891,7 +1014,7 @@ else:
                         row_new = edited_df.loc[idx_main]
                         if isinstance(row_old, pd.DataFrame): row_old = row_old.iloc[0]
                         if isinstance(row_new, pd.DataFrame): row_new = row_new.iloc[0]
-                        changed_cols = [c for c in colonnes_finales if is_different(row_old[c], row_new[c]) and c != "👤 Élève (Fige)"]
+                        changed_cols = [c for c in colonnes_finales if is_different(row_old[c], row_new[c]) and c != "👤 Élève (Fige)" and "Elo" not in c]
                         
                         if changed_cols:
                             changement_detecte = True
@@ -903,9 +1026,6 @@ else:
                                 elif col == "Sortie Seul": st.session_state['db']['sorties_manuelles'][identite_actuelle] = new_val
                                 elif col == "T-shirt donné 👕": st.session_state['db']['tshirts_donnes'][identite_actuelle] = bool(new_val)
                                 elif col in ["N° Portable", "N° Portable 2 (en cas d'urgence)"]: st.session_state['df_adherents'].at[idx_main, col] = format_phone(new_val)
-                                elif col == "Elo Crevette 🦐": 
-                                    try: st.session_state['db']['elos_crevette'][identite_actuelle] = int(float(new_val))
-                                    except ValueError: st.session_state['db']['elos_crevette'][identite_actuelle] = 400
                                 else: st.session_state['df_adherents'].at[idx_main, col] = new_val
                                     
                             if any(c in changed_cols for c in ["Formule", "Campagne", "Dans quel ville sera votre créneaux principale", "Classe"]):
@@ -1015,7 +1135,10 @@ else:
                     df_wa["Phone 1 - Value"] = df_ec["N° Portable"]
                     if "Nom payeur" in df_ec.columns: df_wa["Notes"] = "Parent: " + df_ec["Nom payeur"].astype(str) + " " + df_ec["Prénom payeur"].astype(str)
                     
-                    df_wa = df_wa[df_wa["Phone 1 - Value"] != ""] # Enlever les numéros vides
+                    # Nettoyage des numéros vides
+                    df_wa = df_wa[df_wa["Phone 1 - Value"].astype(str).str.strip() != ""] 
+                    df_wa = df_wa[df_wa["Phone 1 - Value"].astype(str).str.strip() != "nan"]
+                    
                     nom_fich_wa = f"WhatsApp_{ecole_choisie}_{formule_choisie}".replace(" ", "_").replace("/", "-")
                     csv_wa = df_wa.to_csv(index=False).encode('utf-8-sig')
                     st.download_button(f"📥 Télécharger Contacts ({len(df_wa)} numéros valides)", data=csv_wa, file_name=f"{nom_fich_wa}.csv", mime="text/csv")
@@ -1122,7 +1245,7 @@ else:
                     nv_div = c2.text_input("Division (ex: N2, N3...)")
                     nb_ech_defaut = 8 if categorie == "Adultes" else 4
                     nv_nb_ech = c3.number_input("Nb d'échiquiers", min_value=2, max_value=16, value=nb_ech_defaut)
-                    nv_lien = c4.text_input("Lien FFE (Optionnel)")
+                    nv_lien = c4.text_input("Lien FFE (ex: Equipe.aspx?EquipeRef=21406)")
                     
                     if st.form_submit_button("Sauvegarder l'équipe"):
                         if nv_nom:
@@ -1401,37 +1524,6 @@ else:
         with tab_jeunes: afficher_gestion_equipes("Jeunes")
 
     elif module_choisi == "♟️ Module Entraîneur":
-        
-        # --- ECRAN GEANT (Doit être affiché en priorité absolue pour cacher le reste) ---
-        if st.session_state.get('plein_ecran_ronde'):
-            st.markdown("""
-                <style>
-                [data-testid="stSidebar"] {display: none;}
-                header {display: none;}
-                .block-container {padding-top: 1rem; max-width: 100%;}
-                table {font-size: 3rem !important; width: 100%; text-align: center; border-collapse: collapse; margin-top: 20px;}
-                th {background-color: #005b96; color: white; padding: 20px; border: 3px solid #005b96;}
-                td {padding: 20px; border: 2px solid #ddd; font-weight: bold;}
-                tr:nth-child(even) {background-color: #f2f2f2;}
-                </style>
-            """, unsafe_allow_html=True)
-            
-            st.markdown(f"<h1 style='text-align:center; font-size:5rem; color:#FF8C00; margin-bottom: 30px;'>🏆 Appariements - Ronde {st.session_state.get('ronde_actuelle', 1)}</h1>", unsafe_allow_html=True)
-            
-            html_table = "<table><tr><th>Table</th><th>⚪ Blancs</th><th>⚫ Noirs</th></tr>"
-            for i, (j1, j2) in enumerate(st.session_state.get('appariements_ronde', []), 1):
-                html_table += f"<tr><td>{i}</td><td>{j1}</td><td>{j2}</td></tr>"
-            if st.session_state.get('exempt_ronde'):
-                html_table += f"<tr><td colspan='3' style='background-color:#ffe4b5;'>👑 <b>Exempt :</b> {st.session_state['exempt_ronde']}</td></tr>"
-            html_table += "</table>"
-            
-            st.write("")
-            st.write("")
-            if st.button("🔙 Retour à l'écran de gestion", use_container_width=True):
-                st.session_state['plein_ecran_ronde'] = False
-                st.rerun()
-            st.stop()
-            
         st.subheader("♟️ Espace Entraîneur")
         tab_appel, tab_tournoi, tab_classement, tab_affectations = st.tabs(["📋 Faire l'Appel", "⚔️ Tournoi & Elo", "🏆 Classement", "⚙️ Affecter Élèves"])
 
@@ -1558,7 +1650,7 @@ else:
                         st.rerun()
 
                 st.markdown("---")
-                if st.button("🎲 Générer la Ronde"):
+                if st.button("🎲 Générer la Ronde (Système Suisse)"):
                     scores_actifs = {j: st.session_state['scores_tournoi'][j] for j in joueurs_presents}
                     pairs, exempt, st.session_state['historique_rencontres'] = generer_appariements_suisses(scores_actifs, elos_actifs, st.session_state['historique_rencontres'])
                     st.session_state['appariements_ronde'], st.session_state['exempt_ronde'] = pairs, exempt
