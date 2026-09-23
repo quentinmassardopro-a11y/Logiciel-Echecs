@@ -1274,13 +1274,25 @@ else:
             if 'dep' in d or 'dép' in d: return 7
             return 99
 
-        joueurs_ffe = st.session_state['db'].get('ffe_joueurs', [])
-        if joueurs_ffe:
-            liste_totale_joueurs = [j["Nom"] for j in joueurs_ffe]
-            dict_elo_global = {j["Nom"]: j["Elo"] for j in joueurs_ffe}
-        else:
-            liste_totale_joueurs = sorted(df["Identité"].unique().tolist())
-            dict_elo_global = {j: get_elo_actif(j, df, st.session_state['db'])[0] for j in liste_totale_joueurs}
+        def get_elo_lent_interclubs(identite, df_adh):
+            try:
+                row = df_adh[df_adh["Identité"] == identite]
+                if not row.empty:
+                    row = row.iloc[0]
+                    # 1. Lent (FIDE ou National)
+                    l_val, _, _ = extract_elo_val(row.get("Elo_Lent", ""))
+                    if l_val > 0: return l_val
+                    # 2. Rapide
+                    r_val, _, _ = extract_elo_val(row.get("Elo_Rapide", ""))
+                    if r_val > 0: return r_val
+                    # 3. Blitz
+                    b_val, _, _ = extract_elo_val(row.get("Elo_Blitz", ""))
+                    if b_val > 0: return b_val
+            except: pass
+            return 1000
+
+        liste_totale_joueurs = sorted(df["Identité"].unique().tolist())
+        dict_elo_global = {j: get_elo_lent_interclubs(j, df) for j in liste_totale_joueurs}
             
         with st.expander("🔄 Synchroniser les équipes depuis la FFE", expanded=False):
             st.write("Récupérez automatiquement toutes les équipes du club (Noms, Divisions, Liens de groupes).")
@@ -1465,24 +1477,36 @@ else:
                 
                 rondes_dispos = []
                 idx_prochaine = 0
+                dict_adversaires = {}
+                
                 if not df_calendrier.empty:
                     col_ronde = next((c for c in df_calendrier.columns if 'ronde' in str(c).lower() or 'match' in str(c).lower()), None)
                     col_score = next((c for c in df_calendrier.columns if 'score' in str(c).lower()), None)
                     if col_ronde:
                         mots_equipe = equipe_choisie.split(" ")[0].lower() # Ex: "Cassis"
-                        matchs_eq = df_calendrier[df_calendrier.apply(lambda r: mots_equipe in str(r.values).lower(), axis=1)]
+                        if 'Match' in df_calendrier.columns:
+                            matchs_eq = df_calendrier[df_calendrier["Match"].str.lower().str.contains(mots_equipe, na=False)]
+                        else:
+                            matchs_eq = df_calendrier[df_calendrier.apply(lambda r: mots_equipe in str(r.values).lower(), axis=1)]
+                            
                         if not matchs_eq.empty:
                             rondes_dispos = matchs_eq[col_ronde].astype(str).tolist()
                             for i, r in matchs_eq.iterrows():
+                                r_name = str(r[col_ronde])
                                 sc = str(r.get(col_score, "")).strip()
+                                
+                                # Extraire l'adversaire
+                                match_text = str(r.get("Match", ""))
+                                adv = match_text.lower().replace(equipe_choisie.lower(), "").replace("-", "").replace("vs", "").strip() if match_text else ""
+                                if adv: dict_adversaires[r_name] = f"{r_name} (vs {adv.title()})"
+                                
                                 if sc in ["", "nan", "None"] or " - " not in sc or "X" in sc:
-                                    idx_prochaine = rondes_dispos.index(str(r[col_ronde]))
-                                    break
+                                    if idx_prochaine == 0: idx_prochaine = rondes_dispos.index(str(r[col_ronde]))
                 
                 if not rondes_dispos: rondes_dispos = [f"Ronde {i}" for i in range(1, 12)]
 
                 c_r1, c_r2 = st.columns([1, 2])
-                ronde_choisie = c_r1.selectbox("Sélectionnez la ronde :", rondes_dispos, index=idx_prochaine if idx_prochaine < len(rondes_dispos) else 0, key=f"sel_r_{equipe_choisie}")
+                ronde_choisie = c_r1.selectbox("Sélectionnez la ronde :", rondes_dispos, index=idx_prochaine if idx_prochaine < len(rondes_dispos) else 0, key=f"sel_r_{equipe_choisie}", format_func=lambda x: dict_adversaires.get(x, x))
                 
                 if "couleurs" not in st.session_state['db']['equipes_interclubs'][equipe_choisie]: st.session_state['db']['equipes_interclubs'][equipe_choisie]["couleurs"] = {}
                 couleur_saved = st.session_state['db']['equipes_interclubs'][equipe_choisie]["couleurs"].get(ronde_choisie, "⚪ Blancs")
@@ -1495,12 +1519,21 @@ else:
 
                 # CALCUL DES DISPONIBILITÉS FFE (Intelligence)
                 joueurs_etats = {}
-                for p in liste_totale_joueurs: joueurs_etats[p] = {"statut": "✅", "raison": "Disponible"}
+                for p in liste_totale_joueurs: 
+                    joueurs_etats[p] = {"statut": "✅", "raison": "Disponible"}
+
+                    # Vérification Licence FFE valide
+                    row_j = df[df["Identité"] == p]
+                    if not row_j.empty:
+                        lic = str(row_j.iloc[0].get("Licence_FFE", "")).strip()
+                        if not lic or lic.lower() in ["nan", "non croisé"] or len(lic) < 4:
+                            joueurs_etats[p] = {"statut": "🚫", "raison": "Non licencié / Licence invalide"}
 
                 for other_eq_name, other_eq_data in equipes_db.items():
                     if other_eq_name != equipe_choisie:
                         for p in other_eq_data.get("compo", {}).get(ronde_choisie, []):
-                            if p in joueurs_etats: joueurs_etats[p] = {"statut": "⛔", "raison": f"Joue en {other_eq_name}"}
+                            if p in joueurs_etats and joueurs_etats[p]["statut"] != "🚫":
+                                joueurs_etats[p] = {"statut": "⛔", "raison": f"Joue en {other_eq_name}"}
 
                 for p in liste_totale_joueurs:
                     if joueurs_etats[p]["statut"] == "✅":
@@ -1510,7 +1543,7 @@ else:
                                 for r_n, comp in eq_d.get("compo", {}).items():
                                     if p in comp: matches_higher += 1
                         if matches_higher >= 4:
-                            joueurs_etats[p] = {"statut": "🚫", "raison": f"Brûlé ({matches_higher} matchs en div. sup.)"}
+                            joueurs_etats[p] = {"statut": "🚫", "raison": f"Brûlé (a joué {matches_higher} matchs en div. sup.)"}
 
                 options_affichees = [""]
                 map_options_vers_nom = {"": ""}
@@ -1522,7 +1555,7 @@ else:
                     
                     if etat == "✅":
                         if p in nouveau_roster: label = f"✅ {p} ({elo})"
-                        else: label = f"⚠️ {p} ({elo}) - Hors bassin"
+                        else: label = f"{p} ({elo}) - Hors bassin" # Retrait du panneau attention pour le hors bassin
                     else:
                         label = f"{etat} {p} ({elo}) - {raison}"
                         
