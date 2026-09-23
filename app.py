@@ -7,6 +7,7 @@ import json
 import os
 import io
 import hashlib
+import zipfile
 import re
 from datetime import datetime
 import urllib.parse
@@ -109,11 +110,14 @@ def charger_adherents_cloud():
 
 def sauvegarder_adherents_cloud(df):
     try:
-        if df is None or df.empty: return
+        if df is None: return
         client = get_gsheets_client()
         sh = client.open("Base_Calanques_DB")
         ws = get_or_create_worksheet(sh, "Adherents")
-        data = [df.columns.values.tolist()] + df.fillna("").astype(str).values.tolist()
+        if df.empty:
+            data = [df.columns.values.tolist()]
+        else:
+            data = [df.columns.values.tolist()] + df.fillna("").astype(str).values.tolist()
         ws.clear() 
         try: ws.update(values=data, range_name="A1")
         except TypeError: ws.update("A1", data)
@@ -798,6 +802,30 @@ if st.sidebar.button("⬇️ Lancer la Synchronisation HelloAsso"):
                 else: st.sidebar.warning("Aucune donnée trouvée sur HelloAsso.")
             else: st.sidebar.error("Erreur API HelloAsso.")
 
+st.sidebar.markdown("---")
+st.sidebar.header("3️⃣ Sauvegarde Locale")
+st.sidebar.info("Téléchargez une copie complète du logiciel et de vos données (en cas de pépin).")
+
+buffer_zip = io.BytesIO()
+with zipfile.ZipFile(buffer_zip, "w", zipfile.ZIP_DEFLATED) as zip_file:
+    for f_name in ["app.py", "requirements.txt", "logo.png"]:
+        if os.path.exists(f_name):
+            with open(f_name, "rb") as f: zip_file.writestr(f_name, f.read())
+    
+    if 'db' in st.session_state:
+        zip_file.writestr("base_calanques_db.json", json.dumps(st.session_state['db'], ensure_ascii=False, indent=2))
+        
+    if 'df_adherents' in st.session_state and not st.session_state['df_adherents'].empty:
+        zip_file.writestr("adherents_db.csv", st.session_state['df_adherents'].to_csv(index=False).encode('utf-8'))
+
+st.sidebar.download_button(
+    label="📦 Télécharger Sauvegarde Complète",
+    data=buffer_zip.getvalue(),
+    file_name=f"Sauvegarde_Echecs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
+    mime="application/zip",
+    use_container_width=True
+)
+
 if df.empty:
     st.info("👋 **Bienvenue !** Cliquez sur **Lancer la Synchronisation HelloAsso** pour importer vos premiers élèves.")
 else:
@@ -1057,7 +1085,15 @@ else:
                     row_to_delete = df.loc[idx_to_delete]
                     id_doss = nettoyer_id_dossier(row_to_delete.get('ID_Dossier'))
                     if id_doss and str(id_doss) != "nan":
-                        if str(id_doss) not in st.session_state['db']['dossiers_supprimes']: st.session_state['db']['dossiers_supprimes'].append(str(id_doss))
+                        db_remote = charger_base_cloud()
+                        if db_remote and 'dossiers_supprimes' in db_remote:
+                            remote_suppr = db_remote['dossiers_supprimes']
+                            if str(id_doss) not in remote_suppr:
+                                remote_suppr.append(str(id_doss))
+                            st.session_state['db']['dossiers_supprimes'] = remote_suppr
+                        else:
+                            if str(id_doss) not in st.session_state['db']['dossiers_supprimes']: 
+                                st.session_state['db']['dossiers_supprimes'].append(str(id_doss))
                             
                     identite = row_to_delete['Identité']
                     st.session_state['df_adherents'] = df.drop(idx_to_delete).reset_index(drop=True)
