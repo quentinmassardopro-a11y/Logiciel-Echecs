@@ -1291,8 +1291,9 @@ else:
             except: pass
             return 1000
 
-        liste_totale_joueurs = sorted(df["Identité"].unique().tolist())
+        liste_totale_joueurs = df["Identité"].unique().tolist()
         dict_elo_global = {j: get_elo_lent_interclubs(j, df) for j in liste_totale_joueurs}
+        liste_totale_joueurs.sort(key=lambda j: dict_elo_global.get(j, 1000), reverse=True)
             
         with st.expander("🔄 Synchroniser les équipes depuis la FFE", expanded=False):
             st.write("Récupérez automatiquement toutes les équipes du club (Noms, Divisions, Liens de groupes).")
@@ -1322,9 +1323,9 @@ else:
                                         a_group = tds[3].find('a')
                                         group_link = a_group['href'] if a_group else ''
                                         
-                                        cat = 'Jeunes' if 'jeune' in comp.lower() else 'Adultes'
+                                        cat = 'Jeunes' if 'jeune' in comp.lower() or ' j ' in f" {comp.lower()} " or 'jeune' in div.lower() else 'Adultes'
                                         nb_ech = 4 if cat == 'Jeunes' else 8
-                                        if "duo" in div.lower(): nb_ech = 2
+                                        if "duo" in div.lower(): nb_ech = 4
                                         elif "provence" in div.lower() and "i" in div.lower(): nb_ech = 6
                                         
                                         lien_complet = f"https://www.echecs.asso.fr/{group_link}" if group_link else ""
@@ -1337,8 +1338,7 @@ else:
                                         else:
                                             st.session_state['db']['equipes_interclubs'][name]["Division"] = div
                                             st.session_state['db']['equipes_interclubs'][name]["Lien"] = lien_complet
-                                            if "Nb_Echiquiers" not in st.session_state['db']['equipes_interclubs'][name]:
-                                                st.session_state['db']['equipes_interclubs'][name]["Nb_Echiquiers"] = nb_ech
+                                            st.session_state['db']['equipes_interclubs'][name]["Nb_Echiquiers"] = nb_ech
                                             st.session_state['db']['equipes_interclubs'][name]["Categorie"] = cat
                                         count += 1
                                         
