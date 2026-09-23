@@ -326,6 +326,7 @@ def fetch_ffe_team_calendar(team_url):
     if html_content:
         try:
             lignes = re.findall(r'<tr[^>]*>(.*?)</tr>', html_content, re.IGNORECASE | re.DOTALL)
+            current_ronde = "Ronde inconnue"
             for ligne in lignes:
                 cols = re.findall(r'<td[^>]*>(.*?)</td>', ligne, re.IGNORECASE | re.DOTALL)
                 if len(cols) >= 5:
@@ -338,6 +339,16 @@ def fetch_ffe_team_calendar(team_url):
                         lieu = textes[5] if len(textes) > 5 else ""
                         ronde = f"Ronde {len(rondes) + 1}"
                         rondes.append({"Ronde": ronde, "Date": date, "Equipe domicile": eq1, "Score": score, "Equipe extérieur": eq2, "Lieu": lieu})
+                
+                # Format page Groupe
+                elif len(cols) >= 1 and "Ronde" in cols[0] and len(cols) < 5:
+                    current_ronde = re.sub(r'<[^>]+>', '', cols[0]).strip().replace(" ", " ")
+                elif len(cols) >= 3 and current_ronde != "Ronde inconnue":
+                    eq1 = re.sub(r'<[^>]+>', '', cols[0]).strip()
+                    score = re.sub(r'<[^>]+>', '', cols[1]).strip()
+                    eq2 = re.sub(r'<[^>]+>', '', cols[2]).strip()
+                    if eq1 and eq2 and "-" in score:
+                        rondes.append({"Ronde": current_ronde, "Date": "-", "Match": f"{eq1} - {eq2}", "Score": score})
         except: pass
     return rondes
 
@@ -1270,6 +1281,61 @@ else:
         else:
             liste_totale_joueurs = sorted(df["Identité"].unique().tolist())
             dict_elo_global = {j: get_elo_actif(j, df, st.session_state['db'])[0] for j in liste_totale_joueurs}
+            
+        with st.expander("🔄 Synchroniser les équipes depuis la FFE", expanded=False):
+            st.write("Récupérez automatiquement toutes les équipes du club (Noms, Divisions, Liens de groupes).")
+            lien_club = st.text_input("Lien FFE du club (ListeEquipes.aspx)", value="https://www.echecs.asso.fr/ListeEquipes.aspx?ClubRef=2705")
+            if st.button("Lancer la synchronisation FFE", use_container_width=True):
+                with st.spinner("Récupération des équipes..."):
+                    try:
+                        from bs4 import BeautifulSoup
+                        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+                        r = requests.get(lien_club, headers=headers, timeout=10)
+                        soup = BeautifulSoup(r.text, 'html.parser')
+                        table = soup.find('table')
+                        
+                        count = 0
+                        if table:
+                            if 'equipes_interclubs' not in st.session_state['db']: st.session_state['db']['equipes_interclubs'] = {}
+                            
+                            for tr in table.find_all('tr'):
+                                if 'liste_clair' in tr.get('class', []) or 'liste_fonce' in tr.get('class', []):
+                                    tds = tr.find_all('td')
+                                    if len(tds) >= 4:
+                                        a_name = tds[0].find('a')
+                                        if not a_name: continue
+                                        name = a_name.text.strip()
+                                        comp = tds[1].text.strip()
+                                        div = tds[2].text.strip()
+                                        a_group = tds[3].find('a')
+                                        group_link = a_group['href'] if a_group else ''
+                                        
+                                        cat = 'Jeunes' if 'jeune' in comp.lower() else 'Adultes'
+                                        nb_ech = 4 if cat == 'Jeunes' else 8
+                                        if "duo" in div.lower(): nb_ech = 2
+                                        elif "provence" in div.lower() and "i" in div.lower(): nb_ech = 6
+                                        
+                                        lien_complet = f"https://www.echecs.asso.fr/{group_link}" if group_link else ""
+                                        
+                                        if name not in st.session_state['db']['equipes_interclubs']:
+                                            st.session_state['db']['equipes_interclubs'][name] = {
+                                                "Categorie": cat, "Division": div, "Nb_Echiquiers": nb_ech, "Lien": lien_complet,
+                                                "roster": [], "compo": {}, "couleurs": {}
+                                            }
+                                        else:
+                                            st.session_state['db']['equipes_interclubs'][name]["Division"] = div
+                                            st.session_state['db']['equipes_interclubs'][name]["Lien"] = lien_complet
+                                            if "Nb_Echiquiers" not in st.session_state['db']['equipes_interclubs'][name]:
+                                                st.session_state['db']['equipes_interclubs'][name]["Nb_Echiquiers"] = nb_ech
+                                            st.session_state['db']['equipes_interclubs'][name]["Categorie"] = cat
+                                        count += 1
+                                        
+                            sauvegarder_base_cloud(st.session_state['db'])
+                            st.success(f"✅ {count} équipes synchronisées avec succès !")
+                        else:
+                            st.error("Aucune table trouvée. Vérifiez le lien.")
+                    except Exception as e:
+                        st.error(f"Erreur lors de la synchronisation : {e}")
 
         tab_adultes, tab_jeunes = st.tabs(["🏅 Interclubs Adultes", "👦👧 Interclubs Jeunes"])
         
@@ -1336,6 +1402,13 @@ else:
                             dfs = pd.read_html(io.StringIO(html_content))
                             df_cla, df_cal = pd.DataFrame(), pd.DataFrame()
                             for t in dfs:
+                                if t.empty: continue
+                                first_row = [str(c).lower() for c in t.iloc[0].values]
+                                if any('pl' in str(c) for c in first_row) and any('pts' in str(c) for c in first_row):
+                                    t.columns = t.iloc[0]
+                                    df_cla = t[1:].reset_index(drop=True)
+                                    continue
+                                
                                 cols = [str(c).lower() for c in t.columns]
                                 if any('pl' in c for c in cols) and any('pts' in c for c in cols): df_cla = t
                                 if any('date' in c for c in cols) and any('score' in c for c in cols): df_cal = t
@@ -1357,7 +1430,13 @@ else:
 
                         if df_calendrier.empty:
                             cal_fallback = fetch_ffe_team_calendar(url_equipe)
-                            if cal_fallback: df_calendrier = pd.DataFrame(cal_fallback)
+                            if cal_fallback: 
+                                df_calendrier = pd.DataFrame(cal_fallback)
+                                # Filter calendar to only show current team matches if possible
+                                if not df_calendrier.empty:
+                                    mots_equipe = equipe_choisie.split(" ")[0].lower()
+                                    mask = df_calendrier["Match"].str.lower().str.contains(mots_equipe)
+                                    if mask.any(): df_calendrier = df_calendrier[mask]
 
                 if not df_classement.empty or not df_calendrier.empty:
                     c_c1, c_c2 = st.columns([1, 1.5])
