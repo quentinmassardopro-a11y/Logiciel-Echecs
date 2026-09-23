@@ -342,12 +342,12 @@ def fetch_ffe_team_calendar(team_url):
                 
                 # Format page Groupe
                 elif len(cols) >= 1 and "Ronde" in cols[0] and len(cols) < 5:
-                    current_ronde = re.sub(r'<[^>]+>', '', cols[0]).strip().replace(" ", " ")
-                elif len(cols) >= 3 and current_ronde != "Ronde inconnue":
-                    eq1 = re.sub(r'<[^>]+>', '', cols[0]).strip()
-                    score = re.sub(r'<[^>]+>', '', cols[1]).strip()
-                    eq2 = re.sub(r'<[^>]+>', '', cols[2]).strip()
-                    if eq1 and eq2 and "-" in score:
+                    current_ronde = re.sub(r'<[^>]+>', '', cols[0]).replace("&nbsp;", " ").strip()
+                elif len(cols) >= 5 and current_ronde != "Ronde inconnue":
+                    eq1 = re.sub(r'<[^>]+>', '', cols[0]).replace("&nbsp;", " ").strip()
+                    score = re.sub(r'<[^>]+>', '', cols[2]).replace("&nbsp;", " ").strip()
+                    eq2 = re.sub(r'<[^>]+>', '', cols[4]).replace("&nbsp;", " ").strip()
+                    if eq1 and eq2:
                         rondes.append({"Ronde": current_ronde, "Date": "-", "Match": f"{eq1} - {eq2}", "Score": score})
         except: pass
     return rondes
@@ -1483,7 +1483,12 @@ else:
                     col_ronde = next((c for c in df_calendrier.columns if 'ronde' in str(c).lower() or 'match' in str(c).lower()), None)
                     col_score = next((c for c in df_calendrier.columns if 'score' in str(c).lower()), None)
                     if col_ronde:
-                        mots_equipe = equipe_choisie.split(" ")[0].lower() # Ex: "Cassis"
+                        def get_team_keywords(name):
+                            nl = name.lower()
+                            if "cassis" in nl: return "cassis"
+                            return name.split(" ")[0].lower()
+                        
+                        mots_equipe = get_team_keywords(equipe_choisie)
                         if 'Match' in df_calendrier.columns:
                             matchs_eq = df_calendrier[df_calendrier["Match"].str.lower().str.contains(mots_equipe, na=False)]
                         else:
@@ -1495,9 +1500,14 @@ else:
                                 r_name = str(r[col_ronde])
                                 sc = str(r.get(col_score, "")).strip()
                                 
-                                # Extraire l'adversaire
+                                # Extraire l'adversaire de façon robuste
                                 match_text = str(r.get("Match", ""))
-                                adv = match_text.lower().replace(equipe_choisie.lower(), "").replace("-", "").replace("vs", "").strip() if match_text else ""
+                                adv = match_text.lower()
+                                for t_name in match_text.split("-"):
+                                    if mots_equipe in t_name.lower():
+                                        adv = adv.replace(t_name.lower().strip(), "")
+                                adv = adv.replace("-", "").replace("vs", "").strip()
+                                
                                 if adv: dict_adversaires[r_name] = f"{r_name} (vs {adv.title()})"
                                 
                                 if sc in ["", "nan", "None"] or " - " not in sc or "X" in sc:
