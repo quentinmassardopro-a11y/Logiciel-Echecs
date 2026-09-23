@@ -1518,7 +1518,7 @@ else:
                         lieu_pdf = c_p2.text_input("Lieu de rencontre", value="Domicile" if "cassis" in equipe_choisie.lower() else "", key=f"lieu_{equipe_choisie}")
                         
                         pdf_vierge = st.file_uploader("Importer la feuille FFE vierge (PDF)", type=['pdf'], key=f"up_{equipe_choisie}")
-                        if pdf_vierge and st.button("🖨️ Télécharger le PDF complété", key=f"gen_{equipe_choisie}"):
+                        if pdf_vierge:
                             try:
                                 packet = io.BytesIO()
                                 c = canvas.Canvas(packet, pagesize=A4)
@@ -1544,7 +1544,11 @@ else:
                                 c.save()
                                 packet.seek(0)
                                 new_pdf = PyPDF2.PdfReader(packet)
+                                
+                                # Reset file pointer for the uploaded file just in case
+                                pdf_vierge.seek(0)
                                 existing_pdf = PyPDF2.PdfReader(pdf_vierge)
+                                
                                 output = PyPDF2.PdfWriter()
                                 page = existing_pdf.pages[0]
                                 page.merge_page(new_pdf.pages[0])
@@ -1552,7 +1556,7 @@ else:
                                 
                                 output_stream = io.BytesIO()
                                 output.write(output_stream)
-                                st.download_button("⬇️ Télécharger le PDF de match", data=output_stream.getvalue(), file_name=f"Feuille_{equipe_choisie}_{ronde_choisie}.pdf", mime="application/pdf")
+                                st.download_button("🖨️ Télécharger le PDF complété", data=output_stream.getvalue(), file_name=f"Feuille_{equipe_choisie}_{ronde_choisie}.pdf", mime="application/pdf", key=f"dl_pdf_{equipe_choisie}")
                             except Exception as e:
                                 st.error(f"Impossible de dessiner sur le PDF : {e}")
 
