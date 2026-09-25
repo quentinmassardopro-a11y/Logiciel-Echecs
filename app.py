@@ -261,10 +261,9 @@ def get_elo_actif(identite, df_adherents, db):
     if identite in db['elos_crevette']:
         return db['elos_crevette'][identite], "🦐 Crevette"
     else:
-        # Initialisation : si un élo estimé était présent, on l'utilise comme point de départ
-        base_elo = elo_estime_trouve if elo_estime_trouve else 400
-        db['elos_crevette'][identite] = base_elo
-        return base_elo, "🦐 Crevette"
+        # Initialisation : on utilise toujours 400 comme base pour l'élo crevette
+        db['elos_crevette'][identite] = 400
+        return 400, "🦐 Crevette"
 
 def calculer_nouveau_elo(r_a, r_b, score_a, k=40):
     """Calcul du nouveau Elo FIDE officiel (K=40 pour les jeunes/scolaires)."""
@@ -730,6 +729,27 @@ if 'db' not in st.session_state:
     with st.spinner("Connexion sécurisée au Cloud Google..."):
         db_loaded = charger_base_cloud()
         if db_loaded is None: st.stop() 
+        
+        # --- FIX ELO CREVETTE (Migration) ---
+        modified = False
+        for identite, elo in list(db_loaded.get('elos_crevette', {}).items()):
+            if elo in [799, 999, 1099, 1199, 1299, 1399]:
+                db_loaded['elos_crevette'][identite] = 400
+                modified = True
+                
+        for creneau, state in db_loaded.get('etats_tournois', {}).items():
+            if 'elos' in state:
+                for j, e in state['elos'].items():
+                    if e in [799, 999, 1099, 1199, 1299, 1399]:
+                        state['elos'][j] = db_loaded['elos_crevette'].get(j, 400)
+                        modified = True
+                        if 'elos_type' in state:
+                            state['elos_type'][j] = "🦐 Crevette"
+                            
+        if modified:
+            sauvegarder_base_cloud(db_loaded)
+        # ------------------------------------
+        
         st.session_state['db'] = db_loaded
 
 if 'df_adherents' not in st.session_state:
