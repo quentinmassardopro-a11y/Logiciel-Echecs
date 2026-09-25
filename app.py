@@ -203,12 +203,12 @@ def est_elo_estime(score, chaine_brute=""):
 
 def get_elo_actif(identite, df_adherents, db):
     """
-    Hiérarchie stricte FFE / FIDE / Crevette :
+    Hiérarchie stricte avec priorité aux Élos RAPIDES pour les appariements :
     1. Rapide FIDE (si réel et non estimé)
-    2. Lent FIDE (si réel et non estimé)
-    3. Blitz FIDE (si réel et non estimé)
-    4. Rapide National (si réel et non estimé)
-    5. Lent National (si réel et non estimé)
+    2. Rapide National (si réel et non estimé)
+    3. Lent FIDE (si réel et non estimé)
+    4. Lent National (si réel et non estimé)
+    5. Blitz FIDE (si réel et non estimé)
     6. Blitz National (si réel et non estimé)
     7. Si Élo estimé (799, 999, 1099, 1199, 1299, 1399) ou aucun Élo officiel :
        -> Utiliser l'Élo Crevette (initialisé à la valeur estimée ou 400).
@@ -234,33 +234,27 @@ def get_elo_actif(identite, df_adherents, db):
                         if elo_estime_trouve is None:
                             elo_estime_trouve = val
 
-                # 1. Priorité FIDE (non estimé)
+                # 1. Priorité absolue aux Élos RAPIDES (cadence du tournoi)
                 if r_f and r_val > 0 and not est_elo_estime(r_val, raw_r):
                     return r_val, "⚡ Rapide FIDE"
+                if (r_n or r_val > 0) and r_val > 0 and not est_elo_estime(r_val, raw_r):
+                    return r_val, "🇫🇷 Rapide National"
+
+                # 2. Puis les Élos LENTS (Standard)
                 if l_f and l_val > 0 and not est_elo_estime(l_val, raw_l):
                     return l_val, "⚡ Lent FIDE"
+                if (l_n or l_val > 0) and l_val > 0 and not est_elo_estime(l_val, raw_l):
+                    return l_val, "🇫🇷 Lent National"
+
+                # 3. Puis les Élos BLITZ
                 if b_f and b_val > 0 and not est_elo_estime(b_val, raw_b):
                     return b_val, "⚡ Blitz FIDE"
-                
-                # 2. Priorité National (non estimé)
-                if r_n and r_val > 0 and not est_elo_estime(r_val, raw_r):
-                    return r_val, "🇫🇷 Rapide National"
-                if l_n and l_val > 0 and not est_elo_estime(l_val, raw_l):
-                    return l_val, "🇫🇷 Lent National"
-                if b_n and b_val > 0 and not est_elo_estime(b_val, raw_b):
-                    return b_val, "🇫🇷 Blitz National"
-                    
-                # Sécurité si les lettres ont sauté dans l'import mais valeur > 0 et non estimé
-                if r_val > 0 and not est_elo_estime(r_val, raw_r):
-                    return r_val, "🇫🇷 Rapide National"
-                if l_val > 0 and not est_elo_estime(l_val, raw_l):
-                    return l_val, "🇫🇷 Lent National"
-                if b_val > 0 and not est_elo_estime(b_val, raw_b):
+                if (b_n or b_val > 0) and b_val > 0 and not est_elo_estime(b_val, raw_b):
                     return b_val, "🇫🇷 Blitz National"
     except Exception:
         pass
 
-    # 3. Élo Crevette (pour les estimés 799/999/1099/1199/1299/1399 ou sans licence/élo)
+    # 4. Élo Crevette (pour les estimés 799/999/1099/1199/1299/1399 ou sans licence/élo)
     if 'elos_crevette' not in db:
         db['elos_crevette'] = {}
 
