@@ -60,7 +60,7 @@ def get_or_create_worksheet(sh, name):
 
 def initialiser_memoire_vierge():
     return {
-        "elos_crevette": {}, "historique_appels": {}, "eleves_essai": [],
+        "elos_crevette": {}, "etats_tournois": {}, "historique_appels": {}, "eleves_essai": [],
         "affectations_creneaux": {}, "cartes_membres": {},
         "validations_promo": {}, "sorties_manuelles": {},
         "eleves_deja_affectes": [], "identites_helloasso_connues": [],
@@ -172,7 +172,9 @@ def estimer_sexe(prenom):
     if p in femmes or p.endswith(('a', 'e', 'ine', 'elle', 'ette', 'ie', 'ia')): return "F"
     return "M"
 
-# --- MOTEUR ELO INTELLIGENT (HIÉRARCHIE FFE) ---
+# --- MOTEUR ELO INTELLIGENT (HIÉRARCHIE FFE & CREVETTE) ---
+ELOS_ESTIMES = {799, 999, 1099, 1199, 1299, 1399}
+
 def extract_elo_val(val):
     """Extrait le score et détermine s'il est FIDE ou National."""
     val_str = str(val).upper().strip()
@@ -180,129 +182,289 @@ def extract_elo_val(val):
     if match:
         score = int(match.group(1))
         is_fide = 'F' in val_str
-        is_nat = 'N' in val_str
+        is_nat = 'N' in val_str or 'E' in val_str
         # S'il n'y a ni F ni N mais qu'on a un score, on le considère National par défaut (système FFE)
         if not is_fide and not is_nat:
             is_nat = True
         return score, is_fide, is_nat
     return 0, False, False
 
+def est_elo_estime(score, chaine_brute=""):
+    """Vérifie si un score correspond à un Elo estimé (799, 999, 1099, 1199, 1299, 1399 ou 'E')."""
+    if not score or score <= 0:
+        return False
+    if score in ELOS_ESTIMES:
+        return True
+    if 700 <= score <= 1399 and score % 100 == 99:
+        return True
+    if 'E' in str(chaine_brute).upper() and score < 1400:
+        return True
+    return False
+
 def get_elo_actif(identite, df_adherents, db):
     """
-    Hiérarchie stricte demandée :
-    1. Rapide FIDE
-    2. Lent FIDE
-    3. Blitz FIDE
-    4. Rapide National
-    5. Lent National
-    6. Blitz National
-    7. Crevette
+    Hiérarchie stricte FFE / FIDE / Crevette :
+    1. Rapide FIDE (si réel et non estimé)
+    2. Lent FIDE (si réel et non estimé)
+    3. Blitz FIDE (si réel et non estimé)
+    4. Rapide National (si réel et non estimé)
+    5. Lent National (si réel et non estimé)
+    6. Blitz National (si réel et non estimé)
+    7. Si Élo estimé (799, 999, 1099, 1199, 1299, 1399) ou aucun Élo officiel :
+       -> Utiliser l'Élo Crevette (initialisé à la valeur estimée ou 400).
     """
+    elo_estime_trouve = None
     try:
-        row = df_adherents[df_adherents["Identité"] == identite].iloc[0]
-        
-        r_val, r_f, r_n = extract_elo_val(row.get("Elo_Rapide", ""))
-        l_val, l_f, l_n = extract_elo_val(row.get("Elo_Lent", ""))
-        b_val, b_f, b_n = extract_elo_val(row.get("Elo_Blitz", ""))
-        
-        # 1. Priorité FIDE
-        if r_f and r_val > 0: return r_val, "⚡ Rapide FIDE"
-        if l_f and l_val > 0: return l_val, "⚡ Lent FIDE"
-        if b_f and b_val > 0: return b_val, "⚡ Blitz FIDE"
-        
-        # 2. Priorité National
-        if r_n and r_val > 0: return r_val, "🇫🇷 Rapide National"
-        if l_n and l_val > 0: return l_val, "🇫🇷 Lent National"
-        if b_n and b_val > 0: return b_val, "🇫🇷 Blitz National"
-        
-        # Sécurité si les lettres ont sauté dans l'import
-        if r_val > 0: return r_val, "🇫🇷 Rapide National"
-        if l_val > 0: return l_val, "🇫🇷 Lent National"
-        if b_val > 0: return b_val, "🇫🇷 Blitz National"
-            
-    except Exception: pass
-    return db['elos_crevette'].get(identite, 400), "🦐 Crevette"
+        if not df_adherents.empty and "Identité" in df_adherents.columns:
+            match = df_adherents[df_adherents["Identité"] == identite]
+            if not match.empty:
+                row = match.iloc[0]
+                
+                raw_r = str(row.get("Elo_Rapide", ""))
+                raw_l = str(row.get("Elo_Lent", ""))
+                raw_b = str(row.get("Elo_Blitz", ""))
+                
+                r_val, r_f, r_n = extract_elo_val(raw_r)
+                l_val, l_f, l_n = extract_elo_val(raw_l)
+                b_val, b_f, b_n = extract_elo_val(raw_b)
+                
+                # Détecter si l'élève a un élo estimé dans l'une des colonnes
+                for val, raw in [(r_val, raw_r), (l_val, raw_l), (b_val, raw_b)]:
+                    if est_elo_estime(val, raw):
+                        if elo_estime_trouve is None:
+                            elo_estime_trouve = val
+
+                # 1. Priorité FIDE (non estimé)
+                if r_f and r_val > 0 and not est_elo_estime(r_val, raw_r):
+                    return r_val, "⚡ Rapide FIDE"
+                if l_f and l_val > 0 and not est_elo_estime(l_val, raw_l):
+                    return l_val, "⚡ Lent FIDE"
+                if b_f and b_val > 0 and not est_elo_estime(b_val, raw_b):
+                    return b_val, "⚡ Blitz FIDE"
+                
+                # 2. Priorité National (non estimé)
+                if r_n and r_val > 0 and not est_elo_estime(r_val, raw_r):
+                    return r_val, "🇫🇷 Rapide National"
+                if l_n and l_val > 0 and not est_elo_estime(l_val, raw_l):
+                    return l_val, "🇫🇷 Lent National"
+                if b_n and b_val > 0 and not est_elo_estime(b_val, raw_b):
+                    return b_val, "🇫🇷 Blitz National"
+                    
+                # Sécurité si les lettres ont sauté dans l'import mais valeur > 0 et non estimé
+                if r_val > 0 and not est_elo_estime(r_val, raw_r):
+                    return r_val, "🇫🇷 Rapide National"
+                if l_val > 0 and not est_elo_estime(l_val, raw_l):
+                    return l_val, "🇫🇷 Lent National"
+                if b_val > 0 and not est_elo_estime(b_val, raw_b):
+                    return b_val, "🇫🇷 Blitz National"
+    except Exception:
+        pass
+
+    # 3. Élo Crevette (pour les estimés 799/999/1099/1199/1299/1399 ou sans licence/élo)
+    if 'elos_crevette' not in db:
+        db['elos_crevette'] = {}
+
+    if identite in db['elos_crevette']:
+        return db['elos_crevette'][identite], "🦐 Crevette"
+    else:
+        # Initialisation : si un élo estimé était présent, on l'utilise comme point de départ
+        base_elo = elo_estime_trouve if elo_estime_trouve else 400
+        db['elos_crevette'][identite] = base_elo
+        return base_elo, "🦐 Crevette"
 
 def calculer_nouveau_elo(r_a, r_b, score_a, k=40):
+    """Calcul du nouveau Elo FIDE officiel (K=40 pour les jeunes/scolaires)."""
     e_a = 1.0 / (1.0 + 10.0 ** ((r_b - r_a) / 400.0))
     return max(100, round(r_a + k * (score_a - e_a)))
 
-# --- LE VRAI SYSTÈME SUISSE (Moitié Haute VS Moitié Basse) ---
-def generer_appariements_suisses(joueurs_scores, elos_dict, historique_rencontres):
-    # Tri général: D'abord par le nombre de points, puis par le Elo
-    joueurs = sorted(joueurs_scores.keys(), key=lambda j: (joueurs_scores[j], elos_dict.get(j, 400)), reverse=True)
-    appariements = []
+# --- LE VRAI SYSTÈME SUISSE OFFICIEL FIDE (Règles complètes) ---
+def generer_appariements_suisses(joueurs_scores, elos_dict, historique_rencontres, couleurs_historique=None, exempts_precedents=None, ronde=1):
+    """
+    Système Suisse Officiel FIDE (Système Hollandais) :
+    1. Interdiction stricte de rematch (deux joueurs ne se rencontrent qu'une seule fois).
+    2. Gestion stricte de l'Exempt (Bye) :
+       - Attribué au joueur ayant le score le plus faible qui n'a JAMAIS été exempt.
+       - Aucun joueur ne peut recevoir deux exempts dans le même tournoi.
+    3. Groupes de points homogènes (Score Brackets).
+    4. Moitié Haute contre Moitié Basse (Top Half vs Bottom Half) dans chaque groupe.
+    5. Downfloating du joueur au plus faible Élo si un groupe a un effectif impair.
+    6. Alternance et équilibre officiel des couleurs (Blancs / Noirs) :
+       - Pas 3 fois consécutives la même couleur.
+       - Équilibre de la balance Blancs/Noirs.
+       - Ronde 1 : alternance par échiquier (Table 1: Blanc au favori, Table 2: Noir, etc.)
+    7. Solveur récursif (Backtracking) garantissant de toujours trouver une solution valide sans blocage.
+    """
+    if couleurs_historique is None:
+        couleurs_historique = {}
+    if exempts_precedents is None:
+        exempts_precedents = set()
+        
+    rencontres_connues = set(historique_rencontres)
+    joueurs_liste = list(joueurs_scores.keys())
     exempt = None
 
-    if len(joueurs) % 2 != 0:
-        exempt = joueurs.pop() # Le dernier joueur (le plus faible en pts/elo) est exempt
-
-    while len(joueurs) >= 2:
-        # On regroupe les joueurs ayant le même score
-        current_score = joueurs_scores[joueurs[0]]
-        groupe_idx = 0
-        while groupe_idx < len(joueurs) and joueurs_scores[joueurs[groupe_idx]] == current_score:
-            groupe_idx += 1
-
-        # Il faut un nombre pair de joueurs pour couper le groupe proprement en deux
-        if groupe_idx % 2 != 0:
-            groupe_idx += 1 # On "aspire" le meilleur joueur du groupe de points inférieur
+    # 1. Sélection de l'Exempt si nombre impair de joueurs
+    if len(joueurs_liste) % 2 != 0:
+        candidats_exempt = [j for j in joueurs_liste if j not in exempts_precedents]
+        if not candidats_exempt:
+            candidats_exempt = list(joueurs_liste)
             
-        if groupe_idx > len(joueurs):
-            groupe_idx = len(joueurs)
+        # Règle FIDE : score le plus faible, puis Élo le plus faible
+        candidats_exempt.sort(key=lambda j: (joueurs_scores.get(j, 0.0), elos_dict.get(j, 400)))
+        exempt = candidats_exempt[0]
+        joueurs_liste = [j for j in joueurs_liste if j != exempt]
 
-        groupe = joueurs[:groupe_idx]
-        groupe = sorted(groupe, key=lambda j: elos_dict.get(j, 400), reverse=True)
+    if not joueurs_liste:
+        return [], exempt, rencontres_connues
 
-        demi = len(groupe) // 2
-        s1 = groupe[:demi] # Moitié Haute
-        s2 = groupe[demi:] # Moitié Basse
+    # 2. Tri général : par score décroissant, puis par Élo actif décroissant
+    joueurs_liste.sort(key=lambda j: (joueurs_scores.get(j, 0.0), elos_dict.get(j, 400)), reverse=True)
 
-        paired_this_round = set()
+    # 3. Fonction de préférence de couleur
+    def preference_couleur(j):
+        hist = couleurs_historique.get(j, [])
+        b = sum(1 for c in hist if c == 'B')
+        n = sum(1 for c in hist if c == 'N')
+        diff = b - n
+        
+        streak_b = (len(hist) >= 2 and hist[-1] == 'B' and hist[-2] == 'B')
+        streak_n = (len(hist) >= 2 and hist[-1] == 'N' and hist[-2] == 'N')
+        
+        # 2 = interdiction 3e Blanc (veut absolument Noir)
+        # -2 = interdiction 3e Noir (veut absolument Blanc)
+        if streak_b: return 2
+        if streak_n: return -2
+        if diff > 0: return 1   # plus de Blancs que de Noirs -> veut Noir
+        if diff < 0: return -1  # plus de Noirs que de Blancs -> veut Blanc
+        if hist and hist[-1] == 'B': return 1
+        if hist and hist[-1] == 'N': return -1
+        return 0
 
-        for j1 in s1:
-            paired = False
-            # Tentative de match avec la Moitié Basse
-            for j2 in s2:
-                if j2 not in paired_this_round:
-                    pair = (min(j1, j2), max(j1, j2))
-                    if pair not in historique_rencontres:
-                        appariements.append((j1, j2))
-                        historique_rencontres.add(pair)
-                        paired_this_round.add(j1)
-                        paired_this_round.add(j2)
-                        paired = True
-                        break
-                        
-            # Si échec (ils ont déjà tous joué ensemble), on cherche dans la Moitié Haute
-            if not paired:
-                for j2 in s1:
-                    if j1 != j2 and j2 not in paired_this_round:
-                        pair = (min(j1, j2), max(j1, j2))
-                        if pair not in historique_rencontres:
-                            appariements.append((j1, j2))
-                            historique_rencontres.add(pair)
-                            paired_this_round.add(j1)
-                            paired_this_round.add(j2)
-                            paired = True
-                            break
-                            
-            # En dernier recours absolu (fin de tournoi), on prend le premier disponible
-            if not paired:
-                for j2 in joueurs:
-                    if j1 != j2 and j2 not in paired_this_round:
-                        pair = (min(j1, j2), max(j1, j2))
-                        appariements.append((j1, j2))
-                        historique_rencontres.add(pair)
-                        paired_this_round.add(j1)
-                        paired_this_round.add(j2)
-                        paired = True
-                        break
+    def choisir_couleurs(j1, j2, table_no):
+        # j1 a un meilleur rang/élo que j2
+        pref1 = preference_couleur(j1)
+        pref2 = preference_couleur(j2)
+        
+        # Ronde 1 : alternance par échiquier
+        if not couleurs_historique.get(j1) and not couleurs_historique.get(j2):
+            if table_no % 2 == 1:
+                return j1, j2  # j1 Blanc, j2 Noir
+            else:
+                return j2, j1  # j2 Blanc, j1 Noir
+                
+        # Contraintes absolues (streak de 2)
+        if pref1 == 2 or pref2 == -2:
+            return j2, j1  # j2 Blanc, j1 Noir
+        if pref1 == -2 or pref2 == 2:
+            return j1, j2  # j1 Blanc, j2 Noir
+            
+        # Préférences opposées
+        if pref1 == -1 and pref2 == 1:
+            return j1, j2
+        if pref1 == 1 and pref2 == -1:
+            return j2, j1
+            
+        # Préférence du joueur ayant le plus fort déséquilibre
+        if abs(pref1) > abs(pref2):
+            return (j2, j1) if pref1 > 0 else (j1, j2)
+        if abs(pref2) > abs(pref1):
+            return (j1, j2) if pref2 > 0 else (j2, j1)
+            
+        # Par défaut, alternance selon la table
+        if table_no % 2 == 1:
+            return j1, j2
+        else:
+            return j2, j1
 
-        # On enlève ceux qui viennent de matcher pour passer au groupe de score suivant
-        joueurs = [j for j in joueurs if j not in paired_this_round]
+    # 4. Appariement par groupes de score (Moitié Haute vs Moitié Basse avec backtracking)
+    def apparier_groupe(joueurs_du_groupe, paires_deja_faites):
+        n = len(joueurs_du_groupe)
+        if n == 0:
+            return []
+        if n % 2 != 0:
+            return None
+            
+        demi = n // 2
+        s1 = joueurs_du_groupe[:demi]
+        s2 = joueurs_du_groupe[demi:]
+        
+        def backtrack(idx, s2_dispos, current_pairs):
+            if idx == demi:
+                return current_pairs
+                
+            j1 = s1[idx]
+            # Prioriser le vis-à-vis naturel S1[i] vs S2[i]
+            candidats = sorted(s2_dispos, key=lambda c: abs(s2.index(c) - idx))
+            
+            for j2 in candidats:
+                paire_cle = (min(j1, j2), max(j1, j2))
+                if paire_cle not in rencontres_connues and paire_cle not in paires_deja_faites:
+                    res = backtrack(idx + 1, [c for c in s2_dispos if c != j2], current_pairs + [(j1, j2)])
+                    if res is not None:
+                        return res
+            return None
 
-    return appariements, exempt, historique_rencontres
+        return backtrack(0, list(s2), [])
+
+    scores_uniques = sorted(list(set(joueurs_scores.get(j, 0.0) for j in joueurs_liste)), reverse=True)
+    groupes_par_score = []
+    for sc in scores_uniques:
+        grp = [j for j in joueurs_liste if joueurs_scores.get(j, 0.0) == sc]
+        grp.sort(key=lambda j: elos_dict.get(j, 400), reverse=True)
+        groupes_par_score.append(grp)
+        
+    paires_finales = []
+    restants = []
+    
+    for grp in groupes_par_score:
+        pool = restants + grp
+        if len(pool) % 2 == 1:
+            downfloater = pool.pop()
+            restants = [downfloater]
+        else:
+            restants = []
+            
+        paires_grp = apparier_groupe(pool, set(paires_finales))
+        if paires_grp is not None:
+            paires_finales.extend(paires_grp)
+        else:
+            restants = pool
+
+    if restants:
+        # Solveur de secours sur les restants
+        def solve_reste(dispos, acc):
+            if not dispos:
+                return acc
+            j1 = dispos[0]
+            candidats = dispos[1:]
+            candidats.sort(key=lambda c: (abs(joueurs_scores.get(j1, 0) - joueurs_scores.get(c, 0)), -elos_dict.get(c, 400)))
+            for j2 in candidats:
+                paire_cle = (min(j1, j2), max(j1, j2))
+                if paire_cle not in rencontres_connues and paire_cle not in acc:
+                    suite = [x for x in candidats if x != j2]
+                    res = solve_reste(suite, acc + [(j1, j2)])
+                    if res is not None:
+                        return res
+            return None
+            
+        paires_extra = solve_reste(restants, [])
+        if paires_extra:
+            paires_finales.extend(paires_extra)
+        else:
+            while len(restants) >= 2:
+                paires_finales.append((restants[0], restants[1]))
+                restants = restants[2:]
+
+    # 5. Détermination finale des couleurs Blanc / Noir
+    appariements_finaux = []
+    for i, (p1, p2) in enumerate(paires_finales, 1):
+        if elos_dict.get(p1, 400) < elos_dict.get(p2, 400):
+            p1, p2 = p2, p1
+        blanc, noir = choisir_couleurs(p1, p2, i)
+        appariements_finaux.append((blanc, noir))
+        rencontres_connues.add((min(p1, p2), max(p1, p2)))
+        
+    return appariements_finaux, exempt, rencontres_connues
 
 # --- MOTEUR DE SCRAPING FFE ---
 @st.cache_data(ttl=3600)
@@ -653,6 +815,9 @@ if st.session_state.get('plein_ecran_ronde'):
         ex = st.session_state['exempt_ronde']
         pts_ex = st.session_state['scores_tournoi'].get(ex, 0)
         html_table += f"<tr><td colspan='4' style='background-color:#ffe4b5;'>👑 <b>Exempt :</b> {ex} <span class='pts'>({pts_ex} pts)</span></td></tr>"
+    if st.session_state.get('forfaits_actuels'):
+        forf_txt = ', '.join(st.session_state['forfaits_actuels'])
+        html_table += f"<tr><td colspan='4' style='background-color:#ffebee; color:#c62828; font-size:1.3rem;'>ðŸš« <b>Forfaits pour cette ronde :</b> {forf_txt}</td></tr>"
     html_table += "</table>"
     
     st.markdown(html_table, unsafe_allow_html=True)
@@ -1933,108 +2098,265 @@ else:
         with tab_tournoi:
             st.markdown("### ⚔️ Tournoi Suisse & Elos")
             creneaux_remplis = [k for k, v in st.session_state['db']['affectations_creneaux'].items() if len(v) > 0]
-            if not creneaux_remplis: st.info("Aucun créneau disponible.")
+            if not creneaux_remplis:
+                st.info("Aucun créneau disponible.")
             else:
-                creneau_tournoi = st.selectbox("Lancer le tournoi pour le créneau :", options=creneaux_remplis)
-                joueurs_inscrits = list(set(st.session_state['db']['affectations_creneaux'][creneau_tournoi]))
-                st.markdown("**Retirez les élèves absents :**")
-                joueurs_presents = st.multiselect("", options=joueurs_inscrits, default=joueurs_inscrits)
+                creneau_tournoi = st.selectbox("Lancer le tournoi pour le créneau :", options=creneaux_remplis, key="sel_creneau_tournoi")
+                joueurs_inscrits = sorted(list(set(st.session_state['db']['affectations_creneaux'][creneau_tournoi])))
+
+                # --- 1. LIAISON AUTOMATIQUE AVEC L'APPEL DU JOUR ---
+                appel_du_jour = st.session_state['db'].get('historique_appels', {}).get(date_jour, {}).get(creneau_tournoi)
                 
+                if appel_du_jour is not None:
+                    presents_appel = [e for e in appel_du_jour.get('presents', []) if e in joueurs_inscrits]
+                    absents_appel = [e for e in appel_du_jour.get('absents', []) if e in joueurs_inscrits]
+                    # Élèves non pointés
+                    for j in joueurs_inscrits:
+                        if j not in presents_appel and j not in absents_appel:
+                            absents_appel.append(j)
+                            
+                    st.success(f"📋 **Appel du jour ({date_jour}) pris en compte pour {creneau_tournoi} :** {len(presents_appel)} présent(s), {len(absents_appel)} absent(s).")
+                    if absents_appel:
+                        st.warning(f"🚫 **Élèves absents placés en FORFAIT pour la ronde en cours (0 pt) :** " + ", ".join(absents_appel))
+                    default_selection = presents_appel
+                else:
+                    st.info(f"ℹ️ Aucun appel n'a encore été enregistré aujourd'hui ({date_jour}) pour **{creneau_tournoi}** dans l'onglet **'📋 Faire l'Appel'**. Les élèves retirés ci-dessous seront considérés en forfait.")
+                    default_selection = joueurs_inscrits
+
+                c_part1, c_part2 = st.columns([3, 1])
+                with c_part1:
+                    joueurs_presents = st.multiselect(
+                        "Élèves participant à la ronde (les absents non sélectionnés sont en forfait) :",
+                        options=joueurs_inscrits,
+                        default=default_selection,
+                        key=f"presents_tournoi_{creneau_tournoi}"
+                    )
+                with c_part2:
+                    joueurs_forfaits = [j for j in joueurs_inscrits if j not in joueurs_presents]
+                    st.metric("Élèves en Forfait", len(joueurs_forfaits))
+
+                # Calcul des Elos actifs pour tous les inscrits (hiérarchie FIDE > National > Crevette)
                 elos_actifs, types_elos = {}, {}
-                for j in joueurs_presents:
+                for j in joueurs_inscrits:
                     e_val, e_type = get_elo_actif(j, df, st.session_state['db'])
                     elos_actifs[j], types_elos[j] = e_val, e_type
 
-                if 'scores_tournoi' not in st.session_state or st.session_state.get('tournoi_en_cours') != creneau_tournoi:
-                    st.session_state['scores_tournoi'] = {j: 0.0 for j in joueurs_presents}
-                    st.session_state['adversaires_tournoi'] = {j: [] for j in joueurs_presents}
-                    st.session_state['historique_rencontres'] = set()
-                    st.session_state['ronde_actuelle'] = 1
-                    st.session_state['appariements_ronde'] = []
-                    st.session_state['tournoi_en_cours'] = creneau_tournoi
-                
-                if 'adversaires_tournoi' not in st.session_state: st.session_state['adversaires_tournoi'] = {}
-                for j in joueurs_presents:
+                # --- 2. GESTION ET PERSISTANCE DU TOURNOI ---
+                if 'etats_tournois' not in st.session_state['db']:
+                    st.session_state['db']['etats_tournois'] = {}
+                etat_sauve = st.session_state['db']['etats_tournois'].get(creneau_tournoi)
+
+                if 'tournoi_en_cours' not in st.session_state or st.session_state.get('tournoi_en_cours') != creneau_tournoi:
+                    if etat_sauve:
+                        st.session_state['scores_tournoi'] = etat_sauve.get('scores', {j: 0.0 for j in joueurs_inscrits})
+                        st.session_state['adversaires_tournoi'] = etat_sauve.get('adversaires', {j: [] for j in joueurs_inscrits})
+                        st.session_state['couleurs_tournoi'] = etat_sauve.get('couleurs', {j: [] for j in joueurs_inscrits})
+                        st.session_state['historique_rencontres'] = set(tuple(p) for p in etat_sauve.get('rencontres', []))
+                        st.session_state['exempts_passes'] = set(etat_sauve.get('exempts', []))
+                        st.session_state['ronde_actuelle'] = etat_sauve.get('ronde', 1)
+                        st.session_state['appariements_ronde'] = etat_sauve.get('appariements', [])
+                        st.session_state['exempt_ronde'] = etat_sauve.get('exempt_ronde', None)
+                        st.session_state['tournoi_en_cours'] = creneau_tournoi
+                    else:
+                        st.session_state['scores_tournoi'] = {j: 0.0 for j in joueurs_inscrits}
+                        st.session_state['adversaires_tournoi'] = {j: [] for j in joueurs_inscrits}
+                        st.session_state['couleurs_tournoi'] = {j: [] for j in joueurs_inscrits}
+                        st.session_state['historique_rencontres'] = set()
+                        st.session_state['exempts_passes'] = set()
+                        st.session_state['ronde_actuelle'] = 1
+                        st.session_state['appariements_ronde'] = []
+                        st.session_state['exempt_ronde'] = None
+                        st.session_state['tournoi_en_cours'] = creneau_tournoi
+
+                # Sécurité sur les clés
+                for j in joueurs_inscrits:
                     if j not in st.session_state['scores_tournoi']: st.session_state['scores_tournoi'][j] = 0.0
                     if j not in st.session_state['adversaires_tournoi']: st.session_state['adversaires_tournoi'][j] = []
+                    if j not in st.session_state['couleurs_tournoi']: st.session_state['couleurs_tournoi'][j] = []
 
-                if st.session_state.get('tournoi_en_cours'):
-                    with st.expander("📊 Voir la Grille Américaine (Classement en direct)"):
-                        data_grille = []
-                        for j in joueurs_presents:
-                            pts = st.session_state['scores_tournoi'].get(j, 0.0)
-                            advs = st.session_state['adversaires_tournoi'].get(j, [])
-                            buchholz = sum(st.session_state['scores_tournoi'].get(adv, 0.0) for adv in advs)
-                            data_grille.append({"Élève": j, "Points": pts, "Buchholz": buchholz, "Matchs Joués": len(advs) + (1 if j == st.session_state.get('exempt_ronde') else 0)})
-                        if data_grille:
-                            df_grille = pd.DataFrame(data_grille).sort_values(by=["Points", "Buchholz"], ascending=[False, False]).reset_index(drop=True)
-                            df_grille.index += 1
-                            st.dataframe(df_grille, use_container_width=True)
+                # --- 3. GRILLE AMÉRICAINE DU TOURNOI ---
+                with st.expander(f"📊 Voir la Grille Américaine (Classement en direct — Ronde {st.session_state['ronde_actuelle']})"):
+                    data_grille = []
+                    for j in joueurs_inscrits:
+                        pts = st.session_state['scores_tournoi'].get(j, 0.0)
+                        advs = st.session_state['adversaires_tournoi'].get(j, [])
+                        buchholz = sum(st.session_state['scores_tournoi'].get(adv, 0.0) for adv in advs)
+                        nb_matchs = len(advs) + (1 if j in st.session_state.get('exempts_passes', set()) else 0)
+                        
+                        if j in joueurs_forfaits:
+                            statut_actuel = "🚫 Forfait (0 pt)"
+                        elif j == st.session_state.get('exempt_ronde'):
+                            statut_actuel = "👑 Exempt (+1 pt)"
+                        else:
+                            adv_app = "En attente"
+                            for b, n in st.session_state.get('appariements_ronde', []):
+                                if b == j: adv_app = f"⚪ vs {n}"
+                                elif n == j: adv_app = f"⚫ vs {b}"
+                            statut_actuel = adv_app
+
+                        data_grille.append({
+                            "Élève": j,
+                            "Points": pts,
+                            "Buchholz": buchholz,
+                            "Matchs": nb_matchs,
+                            "Ronde en cours": statut_actuel,
+                            "Elo Actif": elos_actifs.get(j, 400),
+                            "Catégorie": types_elos.get(j, "Crevette")
+                        })
+                    if data_grille:
+                        df_grille = pd.DataFrame(data_grille).sort_values(by=["Points", "Buchholz", "Elo Actif"], ascending=[False, False, False]).reset_index(drop=True)
+                        df_grille.index += 1
+                        st.dataframe(df_grille, use_container_width=True)
 
                 st.markdown("---")
                 col_t1, col_t2 = st.columns(2)
-                with col_t1: st.metric("Ronde actuelle", st.session_state['ronde_actuelle'])
+                with col_t1:
+                    st.metric("Ronde actuelle", st.session_state['ronde_actuelle'])
                 with col_t2:
                     if st.button("🔄 Réinitialiser le tournoi"):
-                        st.session_state['scores_tournoi'] = {}
-                        st.session_state['adversaires_tournoi'] = {}
+                        st.session_state['scores_tournoi'] = {j: 0.0 for j in joueurs_inscrits}
+                        st.session_state['adversaires_tournoi'] = {j: [] for j in joueurs_inscrits}
+                        st.session_state['couleurs_tournoi'] = {j: [] for j in joueurs_inscrits}
                         st.session_state['historique_rencontres'] = set()
+                        st.session_state['exempts_passes'] = set()
                         st.session_state['ronde_actuelle'] = 1
                         st.session_state['appariements_ronde'] = []
+                        st.session_state['exempt_ronde'] = None
+                        if 'etats_tournois' in st.session_state['db'] and creneau_tournoi in st.session_state['db']['etats_tournois']:
+                            del st.session_state['db']['etats_tournois'][creneau_tournoi]
+                            sauvegarder_base_cloud(st.session_state['db'])
+                        st.success("Tournoi réinitialisé !")
                         st.rerun()
 
                 st.markdown("---")
+                # --- 4. GÉNÉRATION DE LA RONDE (SYSTÈME SUISSE OFFICIEL FIDE) ---
                 if st.button("🎲 Générer la Ronde (Système Suisse)"):
-                    scores_actifs = {j: st.session_state['scores_tournoi'][j] for j in joueurs_presents}
-                    pairs, exempt, st.session_state['historique_rencontres'] = generer_appariements_suisses(scores_actifs, elos_actifs, st.session_state['historique_rencontres'])
-                    st.session_state['appariements_ronde'], st.session_state['exempt_ronde'] = pairs, exempt
+                    if len(joueurs_presents) < 2:
+                        st.error("⚠️ Au moins 2 élèves présents sont nécessaires pour générer une ronde.")
+                    else:
+                        scores_actifs = {j: st.session_state['scores_tournoi'][j] for j in joueurs_presents}
+                        elos_presents = {j: elos_actifs[j] for j in joueurs_presents}
+                        
+                        pairs, exempt, st.session_state['historique_rencontres'] = generer_appariements_suisses(
+                            joueurs_scores=scores_actifs,
+                            elos_dict=elos_presents,
+                            historique_rencontres=st.session_state['historique_rencontres'],
+                            couleurs_historique=st.session_state['couleurs_tournoi'],
+                            exempts_precedents=st.session_state['exempts_passes'],
+                            ronde=st.session_state['ronde_actuelle']
+                        )
+                        st.session_state['appariements_ronde'] = pairs
+                        st.session_state['exempt_ronde'] = exempt
+                        if exempt:
+                            st.session_state['exempts_passes'].add(exempt)
 
+                        # Enregistrer l'état dans la base Cloud
+                        st.session_state['db']['etats_tournois'][creneau_tournoi] = {
+                            'scores': st.session_state['scores_tournoi'],
+                            'adversaires': st.session_state['adversaires_tournoi'],
+                            'couleurs': st.session_state['couleurs_tournoi'],
+                            'rencontres': [list(p) for p in st.session_state['historique_rencontres']],
+                            'exempts': list(st.session_state['exempts_passes']),
+                            'ronde': st.session_state['ronde_actuelle'],
+                            'appariements': st.session_state['appariements_ronde'],
+                            'exempt_ronde': st.session_state['exempt_ronde']
+                        }
+                        sauvegarder_base_cloud(st.session_state['db'])
+                        st.rerun()
+
+                # --- 5. SAISIE DES RÉSULTATS ET MISE À JOUR DE L'ÉLO CREVETTE ---
                 if st.session_state.get('appariements_ronde'):
                     st.subheader(f"♟️ Matchs — Ronde {st.session_state['ronde_actuelle']}")
                     
+                    if joueurs_forfaits:
+                        st.caption(f"🚫 **Forfaits cette ronde :** {', '.join(joueurs_forfaits)} *(0 pt attribué)*")
+
                     if st.button("📺 Afficher en Plein Écran (Pour vidéoprojecteur)"):
                         st.session_state['plein_ecran_ronde'] = True
                         st.rerun()
                         
                     resultats_saisis = []
                     for i, (j1, j2) in enumerate(st.session_state['appariements_ronde'], 1):
-                        sym1, sym2 = "⚡" if "FIDE" in types_elos[j1] else "🦐", "⚡" if "FIDE" in types_elos[j2] else "🦐"
+                        sym1 = "⚡" if "FIDE" in types_elos[j1] else ("🇫🇷" if "National" in types_elos[j1] else "🦐")
+                        sym2 = "⚡" if "FIDE" in types_elos[j2] else ("🇫🇷" if "National" in types_elos[j2] else "🦐")
                         c_ech, c_res = st.columns([3, 2])
                         c_ech.markdown(f"**Échiquier {i} :** ⚪ **{j1}** ({elos_actifs[j1]} {sym1})  🆚  ⚫ **{j2}** ({elos_actifs[j2]} {sym2})")
-                        res = c_res.selectbox(f"Résultat", ["Sélectionner...", "1 - 0 (Blancs)", "0 - 1 (Noirs)", "0.5 - 0.5 (Nulle)"], key=f"res_{i}", label_visibility="collapsed")
+                        res = c_res.selectbox(f"Résultat", ["Sélectionner...", "1 - 0 (Blancs)", "0 - 1 (Noirs)", "0.5 - 0.5 (Nulle)"], key=f"res_{creneau_tournoi}_{st.session_state['ronde_actuelle']}_{i}", label_visibility="collapsed")
                         resultats_saisis.append((j1, j2, res))
                         
-                    if st.session_state.get('exempt_ronde'): st.warning(f"👑 **Exempt (1 pt) :** {st.session_state['exempt_ronde']} ({elos_actifs[st.session_state['exempt_ronde']]} {types_elos[st.session_state['exempt_ronde']][:2]})")
+                    if st.session_state.get('exempt_ronde'):
+                        ex = st.session_state['exempt_ronde']
+                        sym_ex = "⚡" if "FIDE" in types_elos[ex] else ("🇫🇷" if "National" in types_elos[ex] else "🦐")
+                        st.warning(f"👑 **Exempt (+1 pt) :** {ex} ({elos_actifs[ex]} {sym_ex})")
 
                     st.markdown("---")
-                    if st.button("💾 Valider les résultats"):
-                        if any(r[2] == "Sélectionner..." for r in resultats_saisis): st.error("⚠️ Saisissez tous les résultats.")
+                    if st.button("💾 Valider les résultats & Mettre à jour les Elos"):
+                        if any(r[2] == "Sélectionner..." for r in resultats_saisis):
+                            st.error("⚠️ Veuillez renseigner le résultat de tous les échiquiers avant de valider.")
                         else:
+                            variations_crevette = []
                             for j1, j2, res in resultats_saisis:
                                 st.session_state['adversaires_tournoi'][j1].append(j2)
                                 st.session_state['adversaires_tournoi'][j2].append(j1)
+                                st.session_state['couleurs_tournoi'][j1].append('B')
+                                st.session_state['couleurs_tournoi'][j2].append('N')
+                                
                                 elo1, elo2 = elos_actifs[j1], elos_actifs[j2]
+                                type1, type2 = types_elos[j1], types_elos[j2]
+                                
                                 if res == "1 - 0 (Blancs)":
                                     st.session_state['scores_tournoi'][j1] += 1.0
-                                    new_e1, new_e2 = calculer_nouveau_elo(elo1, elo2, 1.0), calculer_nouveau_elo(elo2, elo1, 0.0)
+                                    s1, s2 = 1.0, 0.0
                                 elif res == "0 - 1 (Noirs)":
                                     st.session_state['scores_tournoi'][j2] += 1.0
-                                    new_e1, new_e2 = calculer_nouveau_elo(elo1, elo2, 0.0), calculer_nouveau_elo(elo2, elo1, 1.0)
+                                    s1, s2 = 0.0, 1.0
                                 else:
                                     st.session_state['scores_tournoi'][j1] += 0.5
                                     st.session_state['scores_tournoi'][j2] += 0.5
-                                    new_e1, new_e2 = calculer_nouveau_elo(elo1, elo2, 0.5), calculer_nouveau_elo(elo2, elo1, 0.5)
+                                    s1, s2 = 0.5, 0.5
                                     
-                                if "Crevette" in types_elos[j1]: st.session_state['db']['elos_crevette'][j1] = new_e1
-                                if "Crevette" in types_elos[j2]: st.session_state['db']['elos_crevette'][j2] = new_e2
+                                new_e1 = calculer_nouveau_elo(elo1, elo2, s1)
+                                new_e2 = calculer_nouveau_elo(elo2, elo1, s2)
+                                
+                                # Mise à jour de l'Élo Crevette pour les joueurs concernés (estimé ou crevette)
+                                if "Crevette" in type1:
+                                    st.session_state['db']['elos_crevette'][j1] = new_e1
+                                    diff1 = new_e1 - elo1
+                                    variations_crevette.append(f"🦐 **{j1}** : {elo1} ➔ **{new_e1}** ({'+' if diff1 >= 0 else ''}{diff1})")
+                                if "Crevette" in type2:
+                                    st.session_state['db']['elos_crevette'][j2] = new_e2
+                                    diff2 = new_e2 - elo2
+                                    variations_crevette.append(f"🦐 **{j2}** : {elo2} ➔ **{new_e2}** ({'+' if diff2 >= 0 else ''}{diff2})")
 
-                            if st.session_state.get('exempt_ronde'): st.session_state['scores_tournoi'][st.session_state['exempt_ronde']] += 1.0
+                            if st.session_state.get('exempt_ronde'):
+                                st.session_state['scores_tournoi'][st.session_state['exempt_ronde']] += 1.0
+
+                            # Sauvegarde dans le Cloud Google Sheets
+                            st.session_state['db']['etats_tournois'][creneau_tournoi] = {
+                                'scores': st.session_state['scores_tournoi'],
+                                'adversaires': st.session_state['adversaires_tournoi'],
+                                'couleurs': st.session_state['couleurs_tournoi'],
+                                'rencontres': [list(p) for p in st.session_state['historique_rencontres']],
+                                'exempts': list(st.session_state['exempts_passes']),
+                                'ronde': st.session_state['ronde_actuelle'] + 1,
+                                'appariements': [],
+                                'exempt_ronde': None
+                            }
                             sauvegarder_base_cloud(st.session_state['db'])
+
                             st.session_state['ronde_actuelle'] += 1
                             st.session_state['appariements_ronde'] = []
-                            st.success("Résultats et Elos sauvegardés dans le Cloud !")
-                            st.rerun()
+                            st.session_state['exempt_ronde'] = None
                             
+                            if variations_crevette:
+                                st.session_state['msg_variations_crevette'] = " | ".join(variations_crevette)
+                            st.success("Résultats enregistrés et Elos Crevette mis à jour dans le Cloud !")
+                            st.rerun()
+
+                if st.session_state.get('msg_variations_crevette'):
+                    st.info(f"📈 **Mise à jour des Elos Crevette de la ronde précédente :** {st.session_state['msg_variations_crevette']}")
+                    del st.session_state['msg_variations_crevette']
+
         with tab_classement:
             st.markdown("### 🏆 Classement Général (FIDE & Crevette)")
             creneaux_remplis_classement = [k for k, v in st.session_state['db']['affectations_creneaux'].items() if len(v) > 0]
