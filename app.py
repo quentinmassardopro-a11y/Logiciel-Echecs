@@ -1209,12 +1209,180 @@ else:
                     st.success("Sauvegardé dans le Cloud !")
 
         with tab_historique:
-            st.markdown("### 📅 Registre des présences")
-            if not st.session_state['db']['historique_appels']: st.info("Aucun appel n'a été enregistré.")
+            st.markdown("### 📅 Registre des présences & Suivi des absents")
+            if not st.session_state['db']['historique_appels']:
+                st.info("Aucun appel n'a été enregistré.")
             else:
-                for date_appel, data_groupes in sorted(st.session_state['db']['historique_appels'].items(), reverse=True):
-                    with st.expander(f"📁 Présences du {date_appel}"):
-                        for groupe, infos in data_groupes.items(): st.write(f"**{groupe}** (par {infos.get('entraineur', 'Inconnu')}) : {len(infos.get('presents', []))} présents")
+                st.write("Consultez l'historique des présences par date et créneau, visualisez immédiatement les élèves absents et accédez à toutes les coordonnées pour contacter leurs parents.")
+                
+                col_f1, col_f2 = st.columns([2, 1])
+                with col_f1:
+                    filtre_absents_seuls = st.checkbox("🔍 Afficher uniquement les séances avec des élèves absents", value=False)
+                with col_f2:
+                    recherche_eleve = st.text_input("Rechercher un élève :", placeholder="Nom ou prénom...", key="rech_abs_hist").strip().lower()
+
+                dates_triees = sorted(st.session_state['db']['historique_appels'].items(), reverse=True)
+                appels_affiches = 0
+
+                for date_appel, data_groupes in dates_triees:
+                    lignes_groupes = []
+                    tot_presents_jour = 0
+                    tot_absents_jour = 0
+
+                    for groupe, infos in data_groupes.items():
+                        presents = infos.get('presents', [])
+                        if 'absents' in infos and infos['absents'] is not None:
+                            absents = infos['absents']
+                        else:
+                            inscrits = st.session_state['db'].get('affectations_creneaux', {}).get(groupe, [])
+                            absents = [e for e in inscrits if e not in presents]
+
+                        if filtre_absents_seuls and len(absents) == 0:
+                            continue
+                        if recherche_eleve:
+                            tous_eleves = [str(e).lower() for e in (presents + absents)]
+                            if not any(recherche_eleve in e for e in tous_eleves):
+                                continue
+
+                        tot_presents_jour += len(presents)
+                        tot_absents_jour += len(absents)
+                        lignes_groupes.append((groupe, infos, presents, absents))
+
+                    if not lignes_groupes:
+                        continue
+
+                    appels_affiches += 1
+                    statut_abs = f"❌ **{tot_absents_jour} absent(s)**" if tot_absents_jour > 0 else "✅ **0 absent**"
+                    titre_expander = f"📅 Appel du {date_appel} — {statut_abs} | ✅ {tot_presents_jour} présent(s)"
+
+                    with st.expander(titre_expander, expanded=(tot_absents_jour > 0 and appels_affiches <= 3)):
+                        for groupe, infos, presents, absents in lignes_groupes:
+                            st.markdown(f"#### 📍 {groupe}")
+                            st.caption(f"Entraîneur responsable : **{infos.get('entraineur', 'Inconnu')}**")
+
+                            c_met1, c_met2, c_met3 = st.columns(3)
+                            c_met1.metric("Effectif Total", len(presents) + len(absents))
+                            c_met2.metric("✅ Présents", len(presents))
+                            c_met3.metric("❌ Absents", len(absents))
+
+                            if absents:
+                                st.error(f"🚨 **{len(absents)} élève(s) absent(s)** — Coordonnées des parents à contacter :")
+
+                                liste_donnees_absents = []
+                                for eleve_abs in absents:
+                                    match = df[df["Identité"] == eleve_abs] if (not df.empty and "Identité" in df.columns) else pd.DataFrame()
+                                    if not match.empty:
+                                        row_abs = match.iloc[0]
+                                        nom_e = str(row_abs.get("Nom", "")).strip()
+                                        prenom_e = str(row_abs.get("Prénom", "")).strip()
+                                        parent_leg = str(row_abs.get("Nom et prénom du responsable légal", "")).strip()
+                                        if not parent_leg or parent_leg.lower() in ["nan", "none", "-", ""]:
+                                            payeur = f"{str(row_abs.get('Prénom payeur', '')).strip()} {str(row_abs.get('Nom payeur', '')).strip()}".strip()
+                                            parent_e = payeur if payeur else "Non renseigné"
+                                        else:
+                                            parent_e = parent_leg
+                                        tel1_e = str(row_abs.get("N° Portable", "")).strip()
+                                        if tel1_e.lower() in ["nan", "none", "-"]: tel1_e = ""
+                                        tel2_e = str(row_abs.get("N° Portable 2 (en cas d'urgence)", "")).strip()
+                                        if tel2_e.lower() in ["nan", "none", "-"]: tel2_e = ""
+                                        mail_e = str(row_abs.get("EMail", "")).strip()
+                                        if not mail_e or mail_e.lower() in ["nan", "none", "-"]:
+                                            mail_e = str(row_abs.get("Email payeur", "")).strip()
+                                        if mail_e.lower() in ["nan", "none", "-"]: mail_e = ""
+                                        sortie_e = st.session_state['db'].get('sorties_manuelles', {}).get(eleve_abs, str(row_abs.get("Sortie Seul", "-")).strip())
+                                        medical_e = str(row_abs.get("Allergies / Médical", "-")).strip()
+                                        if medical_e.lower() in ["nan", "none"]: medical_e = "-"
+                                        row_valide = row_abs
+                                    else:
+                                        nom_e, prenom_e = eleve_abs, ""
+                                        parent_e = "Non renseigné"
+                                        tel1_e, tel2_e, mail_e = "", "", ""
+                                        sortie_e = st.session_state['db'].get('sorties_manuelles', {}).get(eleve_abs, "-")
+                                        medical_e = "-"
+                                        row_valide = None
+
+                                    liste_donnees_absents.append({
+                                        "Identité": eleve_abs,
+                                        "Nom": nom_e,
+                                        "Prénom": prenom_e,
+                                        "Parent": parent_e,
+                                        "Portable": tel1_e,
+                                        "Urgence": tel2_e,
+                                        "Email": mail_e,
+                                        "Sortie": sortie_e,
+                                        "Medical": medical_e,
+                                        "row": row_valide
+                                    })
+
+                                for info_abs in liste_donnees_absents:
+                                    with st.container(border=True):
+                                        col_a, col_b, col_c, col_d = st.columns([3, 3, 3, 2])
+                                        with col_a:
+                                            st.markdown(f"👤 **{info_abs['Identité']}**")
+                                            if info_abs['Sortie'] != "-":
+                                                st.caption(f"Sortie seul : {info_abs['Sortie']}")
+                                            if info_abs['Medical'] != "-":
+                                                st.caption(f"⚠️ Médical : {info_abs['Medical']}")
+                                        with col_b:
+                                            st.markdown("👨‍👩‍👧 **Parent / Tuteur :**")
+                                            st.write(info_abs['Parent'])
+                                            if info_abs['Email']:
+                                                st.markdown(f"✉️ [{info_abs['Email']}](mailto:{info_abs['Email']})")
+                                        with col_c:
+                                            st.markdown("📞 **Téléphones :**")
+                                            if info_abs['Portable']:
+                                                t1_clean = info_abs['Portable'].replace(" ", "").replace(".", "").replace("-", "")
+                                                st.markdown(f"📱 [{info_abs['Portable']}](tel:{t1_clean}) · [💬 SMS](sms:{t1_clean})")
+                                            if info_abs['Urgence']:
+                                                t2_clean = info_abs['Urgence'].replace(" ", "").replace(".", "").replace("-", "")
+                                                st.markdown(f"🚨 Urgence : [{info_abs['Urgence']}](tel:{t2_clean})")
+                                            if not info_abs['Portable'] and not info_abs['Urgence']:
+                                                st.caption("Aucun numéro renseigné")
+                                        with col_d:
+                                            if info_abs['row'] is not None:
+                                                vcard_b = generer_vcard(info_abs['row'])
+                                                st.download_button(
+                                                    label="📇 vCard Parent",
+                                                    data=vcard_b,
+                                                    file_name=f"Parent_{info_abs['Identité']}.vcf".replace(" ", "_"),
+                                                    mime="text/vcard",
+                                                    key=f"vcf_{date_appel}_{groupe}_{info_abs['Identité']}",
+                                                    use_container_width=True
+                                                )
+
+                                df_exp_abs = pd.DataFrame([
+                                    {
+                                        "Élève": d["Identité"],
+                                        "Parent / Responsable": d["Parent"],
+                                        "N° Portable": d["Portable"],
+                                        "N° Urgence": d["Urgence"],
+                                        "Email": d["Email"],
+                                        "Sortie Seul": d["Sortie"],
+                                        "Médical": d["Medical"]
+                                    }
+                                    for d in liste_donnees_absents
+                                ])
+                                nom_fich_abs = f"Absents_{groupe}_{date_appel}".replace(" ", "_").replace("/", "-")
+                                st.download_button(
+                                    label=f"📥 Télécharger la liste des absents ({len(liste_donnees_absents)}) en CSV",
+                                    data=df_exp_abs.to_csv(index=False).encode('utf-8-sig'),
+                                    file_name=f"{nom_fich_abs}.csv",
+                                    mime="text/csv",
+                                    key=f"dl_csv_{date_appel}_{groupe}"
+                                )
+                            else:
+                                st.success("✅ Aucun absent sur ce créneau (100% de présence) !")
+
+                            with st.expander(f"👁️ Voir la liste des {len(presents)} présents"):
+                                if presents:
+                                    st.write(", ".join(sorted(presents)))
+                                else:
+                                    st.info("Aucun élève noté présent.")
+
+                            st.markdown("---")
+
+                if appels_affiches == 0:
+                    st.info("Aucun appel ne correspond aux filtres sélectionnés.")
 
     elif module_choisi == "🛒 Module Boutique":
         st.subheader("🛒 Suivi des Achats Boutique")
@@ -1739,11 +1907,15 @@ else:
 
                 if st.button(f"💾 Enregistrer l'appel pour {lieu_appel}"):
                     liste_presents = [df_groupe.loc[idx_app, 'Identité'] for idx_app, est_present in presences.items() if est_present]
+                    liste_absents = [df_groupe.loc[idx_app, 'Identité'] for idx_app, est_present in presences.items() if not est_present]
                     if date_jour not in st.session_state['db']['historique_appels']: st.session_state['db']['historique_appels'][date_jour] = {}
-                    st.session_state['db']['historique_appels'][date_jour][lieu_appel] = {"entraineur": entraineur_appel, "presents": liste_presents}
+                    st.session_state['db']['historique_appels'][date_jour][lieu_appel] = {
+                        "entraineur": entraineur_appel,
+                        "presents": liste_presents,
+                        "absents": liste_absents
+                    }
                     sauvegarder_base_cloud(st.session_state['db'])
                     st.success("Appel enregistré dans le Cloud !")
-
                 st.markdown("---")
                 st.markdown("#### 📥 Exporter la liste d'appel")
                 col_ap1, col_ap2 = st.columns(2)
