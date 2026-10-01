@@ -13,6 +13,8 @@ from datetime import datetime
 import urllib.parse
 import gspread
 from google.oauth2.service_account import Credentials
+import chess
+import chess.svg
 
 st.set_page_config(page_title="Académie d'Échecs des Calanques", layout="wide", page_icon="♟️")
 
@@ -1987,7 +1989,7 @@ else:
 
         with tab_ouvertures:
             st.markdown("### 📖 Répertoires d'Ouvertures")
-            st.info("Définissez le répertoire d'ouvertures (Blancs et Noirs) pour chaque groupe. Vous pouvez utiliser le code ECO (ex: C50) ou le nom de l'ouverture (ex: Partie Italienne).")
+            st.info("Définissez plusieurs ouvertures pour ce groupe. Vous pouvez entrer les premiers coups (ex: e4 e5 Nf3) pour afficher l'échiquier !")
             
             if "repertoires_ouvertures" not in st.session_state['db']:
                 st.session_state['db']["repertoires_ouvertures"] = {}
@@ -1996,15 +1998,51 @@ else:
             with c_jour_ouv: jour_ouv = st.selectbox("Jour :", options=list(structure_creneaux.keys()), key="jour_ouv")
             with c_lieu_ouv: lieu_ouv = st.selectbox("Groupe / Créneau :", options=structure_creneaux[jour_ouv], key="lieu_ouv")
             
-            current_repertoire = st.session_state['db']['repertoires_ouvertures'].get(lieu_ouv, {"blancs": "", "noirs": ""})
+            key_ouvertures = f"ouvertures_{lieu_ouv}"
+            if key_ouvertures not in st.session_state:
+                db_list = st.session_state['db']['repertoires_ouvertures'].get(lieu_ouv, [])
+                if isinstance(db_list, dict):
+                    new_list = []
+                    if db_list.get("blancs"): new_list.append({"nom": db_list["blancs"], "couleur": "Blancs", "moves": ""})
+                    if db_list.get("noirs"): new_list.append({"nom": db_list["noirs"], "couleur": "Noirs", "moves": ""})
+                    db_list = new_list
+                st.session_state[key_ouvertures] = list(db_list)
+                
+            ouvertures = st.session_state[key_ouvertures]
+
+            for i, ouv in enumerate(ouvertures):
+                st.markdown(f"**Ouverture {i+1}**")
+                c1, c2, c3, c4 = st.columns([3, 2, 4, 1])
+                ouv['nom'] = c1.text_input("Nom / ECO", value=ouv.get('nom', ''), key=f"nom_{lieu_ouv}_{i}")
+                ouv['couleur'] = c2.selectbox("Couleur", ["Blancs", "Noirs"], index=0 if ouv.get('couleur', 'Blancs') == "Blancs" else 1, key=f"coul_{lieu_ouv}_{i}")
+                ouv['moves'] = c3.text_input("Coups PGN (ex: e4 e5 Nf3)", value=ouv.get('moves', ''), key=f"moves_{lieu_ouv}_{i}")
+                
+                board_svg = None
+                erreur_coups = False
+                if ouv['moves']:
+                    try:
+                        board = chess.Board()
+                        for move in ouv['moves'].split():
+                            board.push_san(move)
+                        board_svg = chess.svg.board(board=board, size=200, orientation=chess.WHITE if ouv['couleur'] == "Blancs" else chess.BLACK)
+                    except Exception:
+                        erreur_coups = True
+                
+                if board_svg:
+                    st.markdown(f"<div style='margin-bottom: 15px;'>{board_svg}</div>", unsafe_allow_html=True)
+                elif erreur_coups:
+                    st.error("Coups invalides. Utilisez la notation PGN en anglais (ex: e4 e5 Nf3 Nc6).")
+                
+                if c4.button("🗑️", key=f"del_{lieu_ouv}_{i}"):
+                    ouvertures.pop(i)
+                    st.rerun()
             
-            repertoire_blancs = st.text_input("Répertoire avec les Blancs (Code ECO ou Nom) :", value=current_repertoire.get("blancs", ""))
-            repertoire_noirs = st.text_input("Répertoire avec les Noirs (Code ECO ou Nom) :", value=current_repertoire.get("noirs", ""))
+            if st.button("➕ Ajouter une ouverture"):
+                ouvertures.append({"nom": "", "couleur": "Blancs", "moves": ""})
+                st.rerun()
             
-            if st.button(f"💾 Sauvegarder le répertoire pour {lieu_ouv}"):
-                st.session_state['db']['repertoires_ouvertures'][lieu_ouv] = {
-                    "blancs": repertoire_blancs,
-                    "noirs": repertoire_noirs
-                }
+            st.markdown("---")
+            if st.button(f"💾 Sauvegarder les ouvertures pour {lieu_ouv}"):
+                st.session_state['db']['repertoires_ouvertures'][lieu_ouv] = ouvertures
                 sauvegarder_base_cloud(st.session_state['db'])
                 st.success(f"Répertoire d'ouvertures enregistré pour {lieu_ouv} !")
