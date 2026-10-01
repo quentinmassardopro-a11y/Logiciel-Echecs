@@ -1,4 +1,4 @@
-﻿import streamlit as st
+import streamlit as st
 import requests
 import pandas as pd
 import random
@@ -1643,17 +1643,32 @@ else:
             else:
                 df_groupe = df[df["Identité"].isin(liste_identites)].drop_duplicates(subset=["ID_Dossier"])
                 total_appel = len(df_groupe)
+                # Trier par nom de famille (Nom) alphabétiquement
+                df_groupe = df_groupe.sort_values(by="Nom")
+                
+                # Préparer le DataFrame pour le data_editor
+                df_appel = df_groupe.copy()
+                df_appel['Présent ✅'] = True
+                df_appel['Sortie Seul'] = df_appel.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Identité'], r.get('Sortie Seul', '-')), axis=1)
+                
+                df_display = df_appel[['Présent ✅', 'Nom', 'Prénom', 'Sortie Seul']].copy()
+                df_display["_orig_index"] = df_appel.index
+                df_display.set_index("_orig_index", inplace=True)
+                
                 st.markdown("---")
-                presences = {}
-                for idx, row in df_groupe.iterrows():
-                    c1, c2 = st.columns([4, 1])
-                    sortie_act = st.session_state['db']['sorties_manuelles'].get(row['Identité'], row.get('Sortie Seul', '-'))
-                    nom_aff = row['Nom'] + " " + row['Prénom']
-                    if len(df_groupe[df_groupe['Identité'] == row['Identité']]) > 1: nom_aff += f" ({idx})"
-                    c1.write(f"👤 **{nom_aff}** *(Sortie: {sortie_act})*")
-                    presences[idx] = c2.checkbox("Présent", value=True, key=f"pres_{idx}")
-
-                presents_count = sum(presences.values())
+                edited_df = st.data_editor(
+                    df_display,
+                    column_config={
+                        "Présent ✅": st.column_config.CheckboxColumn("Présent ✅", default=True),
+                        "Nom": st.column_config.Column("Nom", disabled=True),
+                        "Prénom": st.column_config.Column("Prénom", disabled=True),
+                        "Sortie Seul": st.column_config.Column("Sortie Seul", disabled=True)
+                    },
+                    use_container_width=True,
+                    hide_index=True
+                )
+                
+                presents_count = edited_df["Présent ✅"].sum()
                 absents_count = total_appel - presents_count
                 
                 st.markdown("---")
@@ -1665,8 +1680,8 @@ else:
                 note_seance = st.text_area("📝 Note de séance (comportement, travail réalisé, etc.) :", "")
 
                 if st.button(f"💾 Enregistrer l'appel pour {lieu_appel}"):
-                    liste_presents = [df_groupe.loc[idx_app, 'Identité'] for idx_app, est_present in presences.items() if est_present]
-                    liste_absents = [df_groupe.loc[idx_app, 'Identité'] for idx_app, est_present in presences.items() if not est_present]
+                    liste_presents = [df_groupe.loc[idx_app, 'Identité'] for idx_app, row_ed in edited_df.iterrows() if row_ed["Présent ✅"]]
+                    liste_absents = [df_groupe.loc[idx_app, 'Identité'] for idx_app, row_ed in edited_df.iterrows() if not row_ed["Présent ✅"]]
                     if date_jour not in st.session_state['db']['historique_appels']: st.session_state['db']['historique_appels'][date_jour] = {}
                     st.session_state['db']['historique_appels'][date_jour][lieu_appel] = {
                         "entraineur": entraineur_appel,
