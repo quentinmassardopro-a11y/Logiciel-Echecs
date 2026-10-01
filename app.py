@@ -1867,7 +1867,8 @@ else:
                 date_match = info_r.get("date", "Inconnue")
                 
                 couleur_calculee = "⚪ Blancs" if domicile else "⚫ Noirs"
-                st.info(f"📍 Match à **{'Domicile' if domicile else 'l\\'Extérieur'}**. Couleur suggérée au 1er échiquier : **{couleur_calculee}**")
+                texte_domicile = "Domicile" if domicile else "l'Extérieur"
+                st.info(f"📍 Match à **{texte_domicile}**. Couleur suggérée au 1er échiquier : **{couleur_calculee}**")
                 
                 if "couleurs" not in st.session_state['db']['equipes_interclubs'][equipe_choisie]: st.session_state['db']['equipes_interclubs'][equipe_choisie]["couleurs"] = {}
                 couleur_ech1 = st.session_state['db']['equipes_interclubs'][equipe_choisie]["couleurs"].get(ronde_choisie, couleur_calculee)
