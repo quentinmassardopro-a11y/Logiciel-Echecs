@@ -68,7 +68,8 @@ def initialiser_memoire_vierge():
         "tshirts_donnes": {},     
         "boutique_donnees": {},
         "equipes_interclubs": {},
-        "ffe_joueurs": []
+        "ffe_joueurs": [],
+        "repertoires_ouvertures": {}
     }
 
 def charger_base_cloud():
@@ -1612,7 +1613,7 @@ else:
 
     elif module_choisi == "♟️ Module Entraîneur":
         st.subheader("♟️ Espace Entraîneur")
-        tab_appel, tab_tournoi, tab_classement, tab_affectations = st.tabs(["📋 Faire l'Appel", "⚔️ Tournoi & Elo", "🏆 Classement", "⚙️ Affecter Élèves"])
+        tab_appel, tab_tournoi, tab_classement, tab_affectations, tab_ouvertures = st.tabs(["📋 Faire l'Appel", "⚔️ Tournoi & Elo", "🏆 Classement", "⚙️ Affecter Élèves", "📖 Ouvertures"])
 
         with tab_affectations:
             st.markdown("### ⚙️ Création Manuelle des listes de Créneaux")
@@ -1983,3 +1984,27 @@ else:
                 max_elo = max(1000, df_classement["Elo ⚡🦐"].max())
                 st.dataframe(df_classement, use_container_width=True, column_config={"Elo ⚡🦐": st.column_config.ProgressColumn("Niveau de puissance", format="%d", min_value=100, max_value=int(max_elo))})
             else: st.info("Aucun élève à afficher.")
+
+        with tab_ouvertures:
+            st.markdown("### 📖 Répertoires d'Ouvertures")
+            st.info("Définissez le répertoire d'ouvertures (Blancs et Noirs) pour chaque groupe. Vous pouvez utiliser le code ECO (ex: C50) ou le nom de l'ouverture (ex: Partie Italienne).")
+            
+            if "repertoires_ouvertures" not in st.session_state['db']:
+                st.session_state['db']["repertoires_ouvertures"] = {}
+                
+            c_jour_ouv, c_lieu_ouv = st.columns(2)
+            with c_jour_ouv: jour_ouv = st.selectbox("Jour :", options=list(structure_creneaux.keys()), key="jour_ouv")
+            with c_lieu_ouv: lieu_ouv = st.selectbox("Groupe / Créneau :", options=structure_creneaux[jour_ouv], key="lieu_ouv")
+            
+            current_repertoire = st.session_state['db']['repertoires_ouvertures'].get(lieu_ouv, {"blancs": "", "noirs": ""})
+            
+            repertoire_blancs = st.text_input("Répertoire avec les Blancs (Code ECO ou Nom) :", value=current_repertoire.get("blancs", ""))
+            repertoire_noirs = st.text_input("Répertoire avec les Noirs (Code ECO ou Nom) :", value=current_repertoire.get("noirs", ""))
+            
+            if st.button(f"💾 Sauvegarder le répertoire pour {lieu_ouv}"):
+                st.session_state['db']['repertoires_ouvertures'][lieu_ouv] = {
+                    "blancs": repertoire_blancs,
+                    "noirs": repertoire_noirs
+                }
+                sauvegarder_base_cloud(st.session_state['db'])
+                st.success(f"Répertoire d'ouvertures enregistré pour {lieu_ouv} !")
