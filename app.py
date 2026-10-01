@@ -1649,9 +1649,12 @@ else:
                 # Préparer le DataFrame pour le data_editor
                 df_appel = df_groupe.copy()
                 df_appel['Présent ✅'] = True
-                df_appel['Sortie Seul'] = df_appel.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Identité'], r.get('Sortie Seul', '-')), axis=1)
                 
-                df_display = df_appel[['Présent ✅', 'Nom', 'Prénom', 'Sortie Seul']].copy()
+                # S'assurer que la colonne 'Classe' existe, sinon mettre une valeur par défaut
+                if 'Classe' not in df_appel.columns:
+                    df_appel['Classe'] = "-"
+                
+                df_display = df_appel[['Présent ✅', 'Nom', 'Prénom', 'Classe']].copy()
                 df_display["_orig_index"] = df_appel.index
                 df_display.set_index("_orig_index", inplace=True)
                 
@@ -1662,7 +1665,7 @@ else:
                         "Présent ✅": st.column_config.CheckboxColumn("Présent ✅", default=True),
                         "Nom": st.column_config.Column("Nom", disabled=True),
                         "Prénom": st.column_config.Column("Prénom", disabled=True),
-                        "Sortie Seul": st.column_config.Column("Sortie Seul", disabled=True)
+                        "Classe": st.column_config.Column("Classe", disabled=True)
                     },
                     use_container_width=True,
                     hide_index=True
