@@ -553,8 +553,7 @@ def affectations_automatiques(row):
     ville_choisie = str(row.get("Dans quel ville sera votre créneaux principale", "")).lower()
     
     if "trinit" in camp:
-        if "cp" in classe: creneaux.append("Lundi - Sainte-Trinité (CP)")
-        elif "ce1" in classe: creneaux.append("Mardi - Sainte-Trinité (CE1)")
+        if "cp" in classe or "ce1" in classe: creneaux.append("Mardi - Sainte-Trinité (CP-CE1)")
         elif any(c in classe for c in ["ce2", "cm1", "cm2", "cm"]): creneaux.append("Vendredi - Sainte-Trinité (CE2-CM2)")
         elif any(c in classe for c in ["coll", "6ème", "5ème", "4ème", "3ème"]): creneaux.append("Jeudi - Sainte-Trinité (Collège)")
     elif "augustin" in camp:
@@ -573,11 +572,11 @@ def affectations_automatiques(row):
             
     if not creneaux:
         if "lundi" in form:
-            if "trinit" in camp: creneaux.append("Lundi - Sainte-Trinité (CP)")
+            if "trinit" in camp: creneaux.append("Mardi - Sainte-Trinité (CP-CE1)")
             elif "ciotat" in form: creneaux.append("Lundi - La Ciotat")
             else: creneaux.append("Lundi - Club Cassis")
         elif "mardi" in form:
-            if "trinit" in camp: creneaux.append("Mardi - Sainte-Trinité (CE1)")
+            if "trinit" in camp: creneaux.append("Mardi - Sainte-Trinité (CP-CE1)")
             elif "augustin" in camp: creneaux.append("Mardi - Saint-Augustin (CP-CE1)")
             elif "marseille" in form: creneaux.append("Mardi - Marseille")
             else: creneaux.append("Mardi - Ceyreste")
@@ -788,13 +787,25 @@ for cle, val_defaut in default_mem.items():
     if cle not in st.session_state['db']:
         st.session_state['db'][cle] = val_defaut
 
+# --- MIGRATION SAINTE-TRINITE CP-CE1 ---
+if 'affectations_creneaux' in st.session_state['db']:
+    aff = st.session_state['db']['affectations_creneaux']
+    lundi_cp = aff.get("Lundi - Sainte-Trinité (CP)", [])
+    mardi_ce1 = aff.get("Mardi - Sainte-Trinité (CE1)", [])
+    if lundi_cp or mardi_ce1:
+        mardi_cp_ce1 = aff.get("Mardi - Sainte-Trinité (CP-CE1)", [])
+        nouveau = list(set(mardi_cp_ce1 + lundi_cp + mardi_ce1))
+        aff["Mardi - Sainte-Trinité (CP-CE1)"] = nouveau
+        if "Lundi - Sainte-Trinité (CP)" in aff: del aff["Lundi - Sainte-Trinité (CP)"]
+        if "Mardi - Sainte-Trinité (CE1)" in aff: del aff["Mardi - Sainte-Trinité (CE1)"]
+
 # --- NAVIGATION DES MODULES ---
 df = st.session_state['df_adherents']
 date_jour = datetime.now().strftime("%d/%m/%Y")
 
 structure_creneaux = {
-    "Lundi": ["Lundi - Sainte-Trinité (CP)", "Lundi - La Ciotat", "Lundi - Carnoux", "Lundi - Club Cassis"],
-    "Mardi": ["Mardi - Sainte-Trinité (CE1)", "Mardi - Saint-Augustin (CP-CE1)", "Mardi - Ceyreste", "Mardi - Marseille"],
+    "Lundi": ["Lundi - La Ciotat", "Lundi - Carnoux", "Lundi - Club Cassis"],
+    "Mardi": ["Mardi - Sainte-Trinité (CP-CE1)", "Mardi - Saint-Augustin (CP-CE1)", "Mardi - Ceyreste", "Mardi - Marseille"],
     "Mercredi": ["Mercredi - Ceyreste", "Mercredi - Cassis"],
     "Jeudi": ["Jeudi - Sainte-Trinité (Collège)", "Jeudi - Don Bosco (École)", "Jeudi - Don Bosco (Collège)", "Jeudi - Cassis", "Jeudi - La Ciotat"],
     "Vendredi": ["Vendredi - Saint-Augustin (CE2-CM2)", "Vendredi - Sainte-Trinité (CE2-CM2)", "Vendredi - Cassis"]
@@ -1699,28 +1710,6 @@ else:
         tab_adultes, tab_jeunes = st.tabs(["🏅 Interclubs Adultes", "👦👧 Interclubs Jeunes"])
         
         def afficher_gestion_equipes(categorie):
-            with st.expander(f"⚙️ Paramétrer une équipe {categorie} (Roster & Division)", expanded=False):
-                with st.form(f"form_{categorie}"):
-                    c1, c2, c3, c4 = st.columns([2, 1, 1, 2])
-                    nv_nom = c1.text_input("Nom de l'équipe (ex: Cassis 1)")
-                    nv_div = c2.text_input("Division (ex: N2, N3...)")
-                    nb_ech_defaut = 8 if categorie == "Adultes" else 4
-                    nv_nb_ech = c3.number_input("Nb d'échiquiers", min_value=2, max_value=16, value=nb_ech_defaut)
-                    nv_lien = c4.text_input("Lien FFE (ex: Equipe.aspx?EquipeRef=21406)")
-                    
-                    if st.form_submit_button("Sauvegarder l'équipe"):
-                        if nv_nom:
-                            if nv_nom not in st.session_state['db']['equipes_interclubs']:
-                                st.session_state['db']['equipes_interclubs'][nv_nom] = {
-                                    "Categorie": categorie, "Division": nv_div, "Nb_Echiquiers": int(nv_nb_ech), "Lien": nv_lien,
-                                    "roster": [], "compo": {}, "couleurs": {}
-                                }
-                            else:
-                                st.session_state['db']['equipes_interclubs'][nv_nom]["Division"] = nv_div
-                                st.session_state['db']['equipes_interclubs'][nv_nom]["Nb_Echiquiers"] = int(nv_nb_ech)
-                                st.session_state['db']['equipes_interclubs'][nv_nom]["Lien"] = nv_lien
-                            sauvegarder_base_cloud(st.session_state['db'])
-                            st.rerun()
 
             equipes_db = st.session_state['db'].get('equipes_interclubs', {})
             equipes_cat = {k: v for k, v in equipes_db.items() if v.get("Categorie") == categorie}
@@ -1824,7 +1813,7 @@ else:
                 
                 rondes_dispos = []
                 idx_prochaine = 0
-                dict_adversaires = {}
+                infos_ronde = {}
                 
                 if not df_calendrier.empty:
                     col_ronde = next((c for c in df_calendrier.columns if 'ronde' in str(c).lower() or 'match' in str(c).lower()), None)
@@ -1847,32 +1836,41 @@ else:
                                 r_name = str(r[col_ronde])
                                 sc = str(r.get(col_score, "")).strip()
                                 
-                                # Extraire l'adversaire de façon robuste
+                                # Extraire l'adversaire et le statut domicile
                                 match_text = str(r.get("Match", ""))
-                                adv = match_text.lower()
-                                for t_name in match_text.split("-"):
-                                    if mots_equipe in t_name.lower():
-                                        adv = adv.replace(t_name.lower().strip(), "")
-                                adv = adv.replace("-", "").replace("vs", "").strip()
+                                domicile = True
+                                adv = match_text
+                                t_names = match_text.split("-")
+                                if len(t_names) >= 2:
+                                    for idx_t, t in enumerate(t_names):
+                                        if mots_equipe in t.lower():
+                                            if idx_t == len(t_names) - 1: # Si c'est le dernier élément = Extérieur
+                                                domicile = False
+                                                adv = '-'.join(t_names[:-1]).strip()
+                                            else: # Premier ou au milieu = Domicile
+                                                domicile = True
+                                                adv = '-'.join(t_names[idx_t+1:]).strip()
+                                            break
                                 
-                                if adv: dict_adversaires[r_name] = f"{r_name} (vs {adv.title()})"
+                                date_m = str(r.get("Date", "Inconnue"))
+                                infos_ronde[r_name] = {"adversaire": adv.title(), "domicile": domicile, "date": date_m}
                                 
                                 if sc in ["", "nan", "None"] or " - " not in sc or "X" in sc:
                                     if idx_prochaine == 0: idx_prochaine = rondes_dispos.index(str(r[col_ronde]))
                 
                 if not rondes_dispos: rondes_dispos = [f"Ronde {i}" for i in range(1, 12)]
 
-                c_r1, c_r2 = st.columns([1, 2])
-                ronde_choisie = c_r1.selectbox("Sélectionnez la ronde :", rondes_dispos, index=idx_prochaine if idx_prochaine < len(rondes_dispos) else 0, key=f"sel_r_{equipe_choisie}", format_func=lambda x: dict_adversaires.get(x, x))
+                ronde_choisie = st.selectbox("Sélectionnez la ronde :", rondes_dispos, index=idx_prochaine if idx_prochaine < len(rondes_dispos) else 0, key=f"sel_r_{equipe_choisie}", format_func=lambda x: f"{x} (vs {infos_ronde.get(x, {}).get('adversaire', 'Inconnu')})")
+                
+                info_r = infos_ronde.get(ronde_choisie, {})
+                domicile = info_r.get("domicile", True)
+                date_match = info_r.get("date", "Inconnue")
+                
+                couleur_calculee = "⚪ Blancs" if domicile else "⚫ Noirs"
+                st.info(f"📍 Match à **{'Domicile' if domicile else 'l\\'Extérieur'}**. Couleur suggérée au 1er échiquier : **{couleur_calculee}**")
                 
                 if "couleurs" not in st.session_state['db']['equipes_interclubs'][equipe_choisie]: st.session_state['db']['equipes_interclubs'][equipe_choisie]["couleurs"] = {}
-                couleur_saved = st.session_state['db']['equipes_interclubs'][equipe_choisie]["couleurs"].get(ronde_choisie, "⚪ Blancs")
-                couleur_ech1 = c_r2.radio("Couleur au 1er échiquier :", ["⚪ Blancs", "⚫ Noirs"], index=0 if couleur_saved == "⚪ Blancs" else 1, horizontal=True, key=f"coul_{equipe_choisie}")
-
-                date_match = "Inconnue"
-                if not df_calendrier.empty and col_ronde and 'Date' in df_calendrier.columns:
-                    try: date_match = df_calendrier[df_calendrier[col_ronde] == ronde_choisie]['Date'].values[0]
-                    except: pass
+                couleur_ech1 = st.session_state['db']['equipes_interclubs'][equipe_choisie]["couleurs"].get(ronde_choisie, couleur_calculee)
 
                 # CALCUL DES DISPONIBILITÉS FFE (Intelligence)
                 joueurs_etats = {}
@@ -1899,7 +1897,7 @@ else:
                             if get_rank_division(eq_d.get("Division", "")) < current_team_rank:
                                 for r_n, comp in eq_d.get("compo", {}).items():
                                     if p in comp: matches_higher += 1
-                        if matches_higher >= 4:
+                        if matches_higher >= 3:
                             joueurs_etats[p] = {"statut": "🚫", "raison": f"Brûlé (a joué {matches_higher} matchs en div. sup.)"}
 
                 options_affichees = [""]
@@ -1925,14 +1923,12 @@ else:
 
                 nouvelle_compo = []
                 blocage_sauvegarde = False
-                erreurs_bloquantes = []
                 
                 st.markdown("""<div style='background-color:#f8f9fa; padding:20px; border-radius:10px; border:1px solid #e0e0e0;'>""", unsafe_allow_html=True)
                 
                 if categorie == "Jeunes":
                     st.info("RAPPEL FFE : Échiquiers ordonnés par âge strict (1er: U16, 2e: U14...). L'Elo ne sert qu'à départager un même âge.")
                 
-                c_echs = st.columns(2)
                 for i in range(nb_ech_equipe):
                     val_saved_name = compo_actuelle[i]
                     
@@ -1951,24 +1947,22 @@ else:
                     
                     if choix.startswith("⛔") or choix.startswith("🚫"):
                         blocage_sauvegarde = True
-                        erreurs_bloquantes.append(f"Échiquier {i+1} : Vous ne pouvez pas aligner {joueur_selectionne} ({joueurs_etats[joueur_selectionne]['raison']})")
+                        st.error(f"⚠️ {joueur_selectionne} ne peut pas jouer : {joueurs_etats[joueur_selectionne]['raison']}")
+                        
+                    # Règle des 100 points : calculée directement en direct avec l'échiquier précédent
+                    if categorie == "Adultes" and i > 0 and nouvelle_compo[i] and nouvelle_compo[i-1]:
+                        j_prev = nouvelle_compo[i-1]
+                        j_curr = nouvelle_compo[i]
+                        elo_prev = dict_elo_global.get(j_prev, 1000)
+                        elo_curr = dict_elo_global.get(j_curr, 1000)
+                        if elo_prev < elo_curr - 100:
+                            blocage_sauvegarde = True
+                            st.error(f"🚨 Règle des 100 points enfreinte entre l'échiquier {i} ({j_prev}, {elo_prev}) et {i+1} ({j_curr}, {elo_curr}). L'Elo du joueur inférieur ne peut excéder de plus de 100 points celui du joueur supérieur.")
                 
                 st.markdown("</div>", unsafe_allow_html=True)
 
-                if categorie == "Adultes":
-                    for i in range(len(nouvelle_compo) - 1):
-                        for j in range(i+1, len(nouvelle_compo)):
-                            j1, j2 = nouvelle_compo[i], nouvelle_compo[j]
-                            if j1 and j2:
-                                elo1, elo2 = dict_elo_global.get(j1, 1000), dict_elo_global.get(j2, 1000)
-                                if elo1 < elo2 - 100:
-                                    blocage_sauvegarde = True
-                                    erreurs_bloquantes.append(f"Règle des 100 points enfreinte entre l'échiquier {i+1} ({j1}, {elo1}) et l'échiquier {j+1} ({j2}, {elo2}).")
-
                 st.write("")
-                if erreurs_bloquantes:
-                    for err in erreurs_bloquantes: st.error(err)
-                elif any(nouvelle_compo): 
+                if not blocage_sauvegarde and any(nouvelle_compo): 
                     st.success("✅ Équipe réglementaire. Vous pouvez sauvegarder.")
 
                 if st.button("💾 Enregistrer la Composition", use_container_width=True, disabled=blocage_sauvegarde):
@@ -1986,48 +1980,111 @@ else:
                         date_pdf = c_p1.text_input("Date du match", value=date_match, key=f"date_{equipe_choisie}")
                         lieu_pdf = c_p2.text_input("Lieu de rencontre", value="Domicile" if "cassis" in equipe_choisie.lower() else "", key=f"lieu_{equipe_choisie}")
                         
-                        pdf_vierge = st.file_uploader("Importer la feuille FFE vierge (PDF)", type=['pdf'], key=f"up_{equipe_choisie}")
-                        if pdf_vierge:
+                        if st.button("🖨️ Générer la Feuille de Match", key=f"btn_pdf_{equipe_choisie}", use_container_width=True):
                             try:
                                 packet = io.BytesIO()
                                 c = canvas.Canvas(packet, pagesize=A4)
-                                c.drawString(100, 770, str(date_pdf))
-                                c.drawString(250, 770, str(lieu_pdf))
-                                c.drawString(450, 770, str(ronde_choisie))
                                 
-                                x_offset = 0 if couleur_ech1 == "⚪ Blancs" else 280
-                                c.drawString(80 + x_offset, 750, str(equipe_choisie))
+                                # --- TITRE ET EN-TÊTE ---
+                                c.setFont("Helvetica-Bold", 16)
+                                c.drawString(160, 800, "FÉDÉRATION FRANÇAISE DES ÉCHECS")
+                                c.setFont("Helvetica-Bold", 14)
+                                c.drawString(230, 775, "FEUILLE DE MATCH")
                                 
-                                y_start = 615
-                                y_step = 28
+                                c.setFont("Helvetica", 11)
+                                c.drawString(50, 740, f"Date : {date_pdf}")
+                                c.drawString(250, 740, f"Lieu : {lieu_pdf}")
+                                c.drawString(420, 740, f"Ronde : {ronde_choisie}")
+                                
+                                c.setLineWidth(1)
+                                c.line(40, 730, 555, 730)
+                                
+                                # --- NOMS DES EQUIPES ---
+                                c.setFont("Helvetica-Bold", 12)
+                                eq_blancs = equipe_choisie if couleur_ech1 == "⚪ Blancs" else "........................................"
+                                eq_noirs = equipe_choisie if couleur_ech1 == "⚫ Noirs" else "........................................"
+                                
+                                c.drawString(110, 700, f"BLANCS : {eq_blancs}")
+                                c.drawString(360, 700, f"NOIRS : {eq_noirs}")
+                                
+                                # --- EN-TÊTE DU TABLEAU ---
+                                c.setFont("Helvetica-Bold", 9)
+                                c.drawString(45, 670, "Ech.")
+                                c.drawString(120, 670, "Nom Prénom")
+                                c.drawString(225, 670, "Licence")
+                                c.drawString(275, 670, "Elo")
+                                
+                                c.drawString(310, 670, "Score")
+                                c.drawString(350, 670, "Score")
+                                
+                                c.drawString(420, 670, "Nom Prénom")
+                                c.drawString(505, 670, "Licence")
+                                c.drawString(555, 670, "Elo")
+                                
+                                c.line(40, 660, 580, 660)
+                                
+                                # --- GRILLE DES JOUEURS ---
+                                y_start = 635
+                                y_step = 40
+                                c.setFont("Helvetica", 10)
+                                
                                 compo = st.session_state['db']['equipes_interclubs'][equipe_choisie]["compo"].get(ronde_choisie, [])
-                                for idx, joueur in enumerate(compo):
-                                    if joueur:
-                                        c.drawString(70 + x_offset, y_start - (idx * y_step), str(joueur))
+                                
+                                for i in range(nb_ech_equipe):
+                                    y = y_start - i * y_step
+                                    c.drawString(50, y, str(i + 1))
+                                    
+                                    # Lignes de séparation horizontales
+                                    c.setLineWidth(0.5)
+                                    c.line(40, y - 10, 580, y - 10)
+                                    
+                                    # Lignes verticales
+                                    c.line(40, y + 25, 40, y - 10)    # Bord gauche
+                                    c.line(75, y + 25, 75, y - 10)    # Après N° Ech
+                                    c.line(220, y + 25, 220, y - 10)  # Après Nom Blancs
+                                    c.line(270, y + 25, 270, y - 10)  # Après Licence Blancs
+                                    c.line(305, y + 25, 305, y - 10)  # Après Elo Blancs
+                                    
+                                    c.line(345, y + 25, 345, y - 10)  # Séparation Scores
+                                    
+                                    c.line(385, y + 25, 385, y - 10)  # Avant Nom Noirs
+                                    c.line(500, y + 25, 500, y - 10)  # Après Nom Noirs
+                                    c.line(550, y + 25, 550, y - 10)  # Après Licence Noirs
+                                    c.line(580, y + 25, 580, y - 10)  # Bord droit
+                                    
+                                    if i < len(compo) and compo[i]:
+                                        joueur = compo[i]
+                                        x_offset = 0 if couleur_ech1 == "⚪ Blancs" else 310
+                                        c.drawString(80 + x_offset, y, str(joueur))
+                                        
                                         row_joueur = df[df['Identité'] == joueur]
                                         if not row_joueur.empty:
                                             code_ffe = str(row_joueur.iloc[0].get('Licence_FFE', ''))
-                                            if code_ffe != "Non croisé": c.drawString(240 + x_offset, y_start - (idx * y_step), code_ffe)
-                                        c.drawString(300 + x_offset, y_start - (idx * y_step), str(dict_elo_global.get(joueur, "")))
+                                            if code_ffe != "Non croisé": 
+                                                c.drawString(225 + x_offset, y, code_ffe)
+                                            elo = str(dict_elo_global.get(joueur, ""))
+                                            c.drawString(275 + x_offset, y, elo)
+                                
+                                # --- LIGNE DU HAUT DE LA GRILLE ---
+                                c.line(40, y_start + 25, 580, y_start + 25)
+                                
+                                # --- SIGNATURES ---
+                                y_sign = y_start - nb_ech_equipe * y_step - 40
+                                c.setFont("Helvetica-Bold", 10)
+                                c.drawString(80, y_sign, "Signature Capitaine Blancs :")
+                                c.drawString(380, y_sign, "Signature Capitaine Noirs :")
                                 
                                 c.save()
                                 packet.seek(0)
-                                new_pdf = PyPDF2.PdfReader(packet)
-                                
-                                # Reset file pointer for the uploaded file just in case
-                                pdf_vierge.seek(0)
-                                existing_pdf = PyPDF2.PdfReader(pdf_vierge)
-                                
-                                output = PyPDF2.PdfWriter()
-                                page = existing_pdf.pages[0]
-                                page.merge_page(new_pdf.pages[0])
-                                output.add_page(page)
-                                
-                                output_stream = io.BytesIO()
-                                output.write(output_stream)
-                                st.download_button("🖨️ Télécharger le PDF complété", data=output_stream.getvalue(), file_name=f"Feuille_{equipe_choisie}_{ronde_choisie}.pdf", mime="application/pdf", key=f"dl_pdf_{equipe_choisie}")
+                                st.download_button(
+                                    "📥 Télécharger la Feuille PDF", 
+                                    data=packet.getvalue(), 
+                                    file_name=f"Feuille_{equipe_choisie}_{ronde_choisie}.pdf", 
+                                    mime="application/pdf", 
+                                    key=f"dl_pdf_autogen_{equipe_choisie}"
+                                )
                             except Exception as e:
-                                st.error(f"Impossible de dessiner sur le PDF : {e}")
+                                st.error(f"Erreur de génération du PDF : {e}")
 
         with tab_adultes: afficher_gestion_equipes("Adultes")
         with tab_jeunes: afficher_gestion_equipes("Jeunes")
