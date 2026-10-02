@@ -1773,17 +1773,19 @@ else:
                     st.info(f"ℹ️ Aucun appel n'a encore été enregistré aujourd'hui ({date_jour}) pour **{creneau_tournoi}** dans l'onglet **'📋 Faire l'Appel'**. Les élèves retirés ci-dessous seront considérés en forfait.")
                     default_selection = joueurs_inscrits
 
-                c_part1, c_part2 = st.columns([3, 1])
+                joueurs_presents = st.multiselect(
+                    "Élèves participant à la ronde (les absents non sélectionnés sont en forfait) :",
+                    options=joueurs_inscrits,
+                    default=default_selection,
+                    key=f"presents_tournoi_{creneau_tournoi}"
+                )
+                joueurs_forfaits = [j for j in joueurs_inscrits if j not in joueurs_presents]
+                
+                c_part1, c_part2 = st.columns(2)
                 with c_part1:
-                    joueurs_presents = st.multiselect(
-                        "Élèves participant à la ronde (les absents non sélectionnés sont en forfait) :",
-                        options=joueurs_inscrits,
-                        default=default_selection,
-                        key=f"presents_tournoi_{creneau_tournoi}"
-                    )
+                    st.metric("Joueurs Présents", len(joueurs_presents))
                 with c_part2:
-                    joueurs_forfaits = [j for j in joueurs_inscrits if j not in joueurs_presents]
-                    st.metric("Élèves en Forfait", len(joueurs_forfaits))
+                    st.metric("En Forfait", len(joueurs_forfaits))
 
                 # Calcul des Elos actifs pour tous les inscrits (hiérarchie FIDE > National > Crevette)
                 elos_actifs, types_elos = {}, {}
