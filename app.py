@@ -1718,7 +1718,41 @@ else:
                 st.info("Aucun créneau disponible.")
             else:
                 creneau_tournoi = st.selectbox("Lancer le tournoi pour le créneau :", options=creneaux_remplis, key="sel_creneau_tournoi")
-                joueurs_inscrits = sorted(list(set(st.session_state['db']['affectations_creneaux'][creneau_tournoi])))
+                joueurs_inscrits_base = sorted(list(set(st.session_state['db']['affectations_creneaux'][creneau_tournoi])))
+                
+                # Gestion des joueurs ajoutés/retirés manuellement
+                if 'etats_tournois' not in st.session_state['db']:
+                    st.session_state['db']['etats_tournois'] = {}
+                etat_sauve_temporaire = st.session_state['db']['etats_tournois'].get(creneau_tournoi, {})
+                
+                tous_les_joueurs = sorted(list(set(st.session_state['df_adherents']['Identité'].dropna()))) if 'df_adherents' in st.session_state and not st.session_state['df_adherents'].empty and 'Identité' in st.session_state['df_adherents'].columns else []
+                joueurs_non_inscrits = [j for j in tous_les_joueurs if j not in joueurs_inscrits_base]
+                
+                with st.expander("⚙️ Ajouter/Retirer manuellement des joueurs de ce tournoi"):
+                    st.caption("Utilisez ces options pour intégrer un joueur externe pour ce tournoi ou retirer définitivement un élève ayant quitté le club.")
+                    joueurs_supp = st.multiselect(
+                        "Ajouter des joueurs d'autres créneaux :",
+                        options=joueurs_non_inscrits,
+                        default=etat_sauve_temporaire.get('joueurs_supp', []),
+                        key=f"supp_{creneau_tournoi}"
+                    )
+                    base_et_supp = sorted(list(set(joueurs_inscrits_base + joueurs_supp)))
+                    
+                    joueurs_retires = st.multiselect(
+                        "Retirer définitivement du tournoi (abandons, départs) :",
+                        options=base_et_supp,
+                        default=[j for j in etat_sauve_temporaire.get('joueurs_retires', []) if j in base_et_supp],
+                        key=f"retires_{creneau_tournoi}"
+                    )
+                    
+                    if joueurs_supp != etat_sauve_temporaire.get('joueurs_supp', []) or joueurs_retires != etat_sauve_temporaire.get('joueurs_retires', []):
+                        if creneau_tournoi not in st.session_state['db']['etats_tournois']:
+                            st.session_state['db']['etats_tournois'][creneau_tournoi] = {}
+                        st.session_state['db']['etats_tournois'][creneau_tournoi]['joueurs_supp'] = joueurs_supp
+                        st.session_state['db']['etats_tournois'][creneau_tournoi]['joueurs_retires'] = joueurs_retires
+                        sauvegarder_base_cloud(st.session_state['db'])
+
+                joueurs_inscrits = [j for j in base_et_supp if j not in joueurs_retires]
 
                 # --- 1. LIAISON AUTOMATIQUE AVEC L'APPEL DU JOUR ---
                 appel_du_jour = st.session_state['db'].get('historique_appels', {}).get(date_jour, {}).get(creneau_tournoi)
@@ -1829,19 +1863,24 @@ else:
                 with col_t1:
                     st.metric("Ronde actuelle", st.session_state['ronde_actuelle'])
                 with col_t2:
-                    if st.button("🔄 Réinitialiser le tournoi"):
-                        st.session_state['scores_tournoi'] = {j: 0.0 for j in joueurs_inscrits}
-                        st.session_state['adversaires_tournoi'] = {j: [] for j in joueurs_inscrits}
-                        st.session_state['couleurs_tournoi'] = {j: [] for j in joueurs_inscrits}
-                        st.session_state['historique_rencontres'] = set()
-                        st.session_state['exempts_passes'] = set()
-                        st.session_state['ronde_actuelle'] = 1
+                    if st.button("🔄 Réinitialiser la ronde actuelle"):
                         st.session_state['appariements_ronde'] = []
+                        if st.session_state.get('exempt_ronde') and st.session_state['exempt_ronde'] in st.session_state['exempts_passes']:
+                            st.session_state['exempts_passes'].remove(st.session_state['exempt_ronde'])
                         st.session_state['exempt_ronde'] = None
+                        
+                        st.session_state['historique_rencontres'] = set()
+                        for j, advs in st.session_state['adversaires_tournoi'].items():
+                            for adv in advs:
+                                st.session_state['historique_rencontres'].add((min(j, adv), max(j, adv)))
+                                
                         if 'etats_tournois' in st.session_state['db'] and creneau_tournoi in st.session_state['db']['etats_tournois']:
-                            del st.session_state['db']['etats_tournois'][creneau_tournoi]
+                            st.session_state['db']['etats_tournois'][creneau_tournoi]['appariements'] = []
+                            st.session_state['db']['etats_tournois'][creneau_tournoi]['exempt_ronde'] = None
+                            st.session_state['db']['etats_tournois'][creneau_tournoi]['exempts'] = list(st.session_state['exempts_passes'])
+                            st.session_state['db']['etats_tournois'][creneau_tournoi]['rencontres'] = [list(p) for p in st.session_state['historique_rencontres']]
                             sauvegarder_base_cloud(st.session_state['db'])
-                        st.success("Tournoi réinitialisé !")
+                        st.success("Ronde actuelle annulée !")
                         st.rerun()
 
                 st.markdown("---")
@@ -1895,15 +1934,18 @@ else:
                     for i, (j1, j2) in enumerate(st.session_state['appariements_ronde'], 1):
                         sym1 = "⚡" if "FIDE" in types_elos[j1] else ("🇫🇷" if "National" in types_elos[j1] else "🦐")
                         sym2 = "⚡" if "FIDE" in types_elos[j2] else ("🇫🇷" if "National" in types_elos[j2] else "🦐")
+                        pts1 = st.session_state['scores_tournoi'].get(j1, 0.0)
+                        pts2 = st.session_state['scores_tournoi'].get(j2, 0.0)
                         c_ech, c_res = st.columns([3, 2])
-                        c_ech.markdown(f"**Échiquier {i} :** ⚪ **{j1}** ({elos_actifs[j1]} {sym1})  🆚  ⚫ **{j2}** ({elos_actifs[j2]} {sym2})")
+                        c_ech.markdown(f"**Échiquier {i} :** ⚪ **{j1}** [{pts1} pts] ({elos_actifs[j1]} {sym1})  🆚  ⚫ **{j2}** [{pts2} pts] ({elos_actifs[j2]} {sym2})")
                         res = c_res.selectbox(f"Résultat", ["Sélectionner...", "1 - 0 (Blancs)", "0 - 1 (Noirs)", "0.5 - 0.5 (Nulle)"], key=f"res_{creneau_tournoi}_{st.session_state['ronde_actuelle']}_{i}", label_visibility="collapsed")
                         resultats_saisis.append((j1, j2, res))
                         
                     if st.session_state.get('exempt_ronde'):
                         ex = st.session_state['exempt_ronde']
                         sym_ex = "⚡" if "FIDE" in types_elos[ex] else ("🇫🇷" if "National" in types_elos[ex] else "🦐")
-                        st.warning(f"👑 **Exempt (+1 pt) :** {ex} ({elos_actifs[ex]} {sym_ex})")
+                        pts_ex = st.session_state['scores_tournoi'].get(ex, 0.0)
+                        st.warning(f"👑 **Exempt (+1 pt) :** {ex} [{pts_ex} pts] ({elos_actifs[ex]} {sym_ex})")
 
                     st.markdown("---")
                     if st.button("💾 Valider les résultats & Mettre à jour les Elos"):
