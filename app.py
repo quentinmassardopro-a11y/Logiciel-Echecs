@@ -15,6 +15,9 @@ import gspread
 from google.oauth2.service_account import Credentials
 import chess
 import chess.svg
+from bs4 import BeautifulSoup
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 st.set_page_config(page_title="Académie d'Échecs des Calanques", layout="wide", page_icon="♟️")
 
@@ -510,6 +513,49 @@ def fetch_ffe_team_calendar(team_url):
         except: pass
     return rondes
 
+def telecharger_ffe_calanques():
+    """ Télécharge la liste des joueurs du club depuis le site FFE et formate un DataFrame """
+    url = 'https://www.echecs.asso.fr/ListeJoueurs.aspx?Action=JOUEURCLUBREF&ClubRef=2705'
+    try:
+        r = requests.get(url, verify=False, timeout=10)
+        soup = BeautifulSoup(r.content, 'html.parser')
+        data = []
+        for tr in soup.find_all('tr', class_=['liste_clair', 'liste_fonce']):
+            tds = tr.find_all('td')
+            if len(tds) >= 7:
+                nr_ffe = tds[0].text.strip()
+                nom_prenom = tds[1].text.strip()
+                af = tds[2].text.strip()
+                elo = tds[4].text.strip().replace('\xa0', ' ').replace('E', '').replace('F', '').replace('N', '').strip()
+                rapide = tds[5].text.strip().replace('\xa0', ' ').replace('E', '').replace('F', '').replace('N', '').strip()
+                blitz = tds[6].text.strip().replace('\xa0', ' ').replace('E', '').replace('F', '').replace('N', '').strip()
+                
+                mots = nom_prenom.split()
+                nom_parts = [m for m in mots if m.isupper() or ('-' in m and m.replace('-', '').isupper())]
+                prenom_parts = [m for m in mots if m not in nom_parts]
+                
+                nom = " ".join(nom_parts) if nom_parts else nom_prenom
+                prenom = " ".join(prenom_parts) if prenom_parts else ""
+                
+                data.append({
+                    'Nom': nom,
+                    'Prénom': prenom,
+                    'Elo_Lent': elo,
+                    'Elo_Rapide': rapide,
+                    'Elo_Blitz': blitz,
+                    'Licence_FFE': f"{nr_ffe} ({af})" if af in ['A', 'B', 'N'] else nr_ffe,
+                })
+        df_ffe = pd.DataFrame(data)
+        if not df_ffe.empty:
+            df_ffe['Nom_Norm'] = df_ffe['Nom'].astype(str).apply(normaliser_nom)
+            df_ffe['Prenom_Norm'] = df_ffe['Prénom'].astype(str).apply(normaliser_nom)
+            df_ffe['Cle_Forte'] = df_ffe['Nom_Norm'].astype(str) + df_ffe['Prenom_Norm'].astype(str)
+            df_ffe['Cle_Souple'] = df_ffe['Nom_Norm'].astype(str) + df_ffe['Prenom_Norm'].astype(str)
+            return df_ffe[['Cle_Forte', 'Cle_Souple', 'Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE']]
+    except Exception as e:
+        st.sidebar.error(f"Erreur de téléchargement FFE : {e}")
+    return pd.DataFrame()
+
 def analyser_fichier_ffe(fichier):
     """ Analyse le CSV de la FFE et extrait les 3 colonnes d'Elos. """
     try:
@@ -875,7 +921,17 @@ if st.sidebar.button("🔄 Rafraîchir les données (Cloud)"):
 
 st.sidebar.markdown("---")
 st.sidebar.header("1️⃣ Base FFE (Licences)")
-fichier_ffe = st.sidebar.file_uploader("Fichier FFE (Glissez CSV ici)", type=['csv', 'xls', 'xlsx'])
+
+if st.sidebar.button("⬇️ Télécharger Licences depuis FFE (Calanques)"):
+    with st.spinner("Récupération depuis echecs.asso.fr..."):
+        df_ffe_scrap = telecharger_ffe_calanques()
+        if not df_ffe_scrap.empty:
+            st.session_state['df_ffe'] = df_ffe_scrap
+            st.sidebar.success("✅ Liste du club chargée en mémoire !")
+        else:
+            st.sidebar.warning("❌ Impossible de récupérer la liste FFE.")
+
+fichier_ffe = st.sidebar.file_uploader("Ou Fichier FFE (Glissez CSV ici)", type=['csv', 'xls', 'xlsx'])
 if fichier_ffe:
     df_ffe = analyser_fichier_ffe(fichier_ffe)
     if not df_ffe.empty:
@@ -1183,7 +1239,7 @@ else:
             df_admin = df_sans_boutique[(df_sans_boutique["Campagne"].isin(filtre_camp_admin)) & (df_sans_boutique["Type"].isin(filtre_type_admin))].copy()
             
             if filtre_licence and "Licence_FFE" in df_admin.columns: 
-                df_admin = df_admin[(df_admin["Licence_FFE"] == "Non croisé") | (df_admin["Licence_FFE"] == "")]
+                df_admin = df_admin[(df_admin["Licence_FFE"] == "Non croisé") | (df_admin["Licence_FFE"] == "") | (df_admin["Licence_FFE"].str.contains(r'\(N\)', na=False))]
             if filtre_allergie and "Allergies / Médical" in df_admin.columns:
                 mots_sains = ["non", "ras", "rien", "néant", "neant", "aucun", "aucune", "-"]
                 df_admin = df_admin[(df_admin["Allergies / Médical"] != "") & (~df_admin["Allergies / Médical"].astype(str).str.lower().isin(mots_sains))]
