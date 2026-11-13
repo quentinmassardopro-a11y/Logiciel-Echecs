@@ -75,6 +75,7 @@ def initialiser_memoire_vierge():
         "equipes_interclubs": {},
         "ffe_joueurs": [],
         "repertoires_ouvertures": {},
+        "ouvertures_eleves": {},
         "auto_sync_ffe": True
     }
 
@@ -678,6 +679,171 @@ def extraire_code_licence_ffe(val):
     m = re.match(r'^([A-Z]\d+|\d{4,})', s)
     return m.group(1) if m else ""
 
+def est_sans_licence(val):
+    """Retourne True si l'élève n'a pas de licence FFE active (A ou B)."""
+    if pd.isna(val):
+        return True
+    s_low = str(val).strip().lower()
+    if not s_low or s_low in ["non croisé", "non croise", "nan", "none", "-", "0", "aucune", "non"]:
+        return True
+    if re.search(r'\(\s*n\s*\)|(?:^|\s)n$', s_low):
+        return True
+    if not re.search(r'\(\s*[ab]\s*\)', s_low):
+        return True
+    return False
+
+CATALOGUE_ECO = [
+    # Volume A : Flanc & Irrégulières
+    {"eco": "A00", "nom": "Ouverture irrégulière / Orang-Outan (Sokolsky)", "moves": "b4"},
+    {"eco": "A01", "nom": "Attaque Nimzo-Larsen", "moves": "b3"},
+    {"eco": "A02", "nom": "Ouverture Bird", "moves": "f4"},
+    {"eco": "A03", "nom": "Ouverture Bird — Ligne d5", "moves": "f4 d5"},
+    {"eco": "A04", "nom": "Ouverture Réti / Début Zukertort", "moves": "Nf3"},
+    {"eco": "A06", "nom": "Ouverture Réti (1.Cf3 d5)", "moves": "Nf3 d5"},
+    {"eco": "A07", "nom": "Attaque Est-Indienne (Système Barcza)", "moves": "Nf3 d5 g3"},
+    {"eco": "A09", "nom": "Gambit Réti (1.Cf3 d5 2.c4)", "moves": "Nf3 d5 c4"},
+    {"eco": "A10", "nom": "Ouverture Anglaise", "moves": "c4"},
+    {"eco": "A13", "nom": "Anglaise — Système Agincourt", "moves": "c4 e6"},
+    {"eco": "A15", "nom": "Anglaise — Défense Anglo-Indienne", "moves": "c4 Nf6"},
+    {"eco": "A16", "nom": "Anglaise — Anglo-Grünfeld", "moves": "c4 Nf6 Nc3 d5"},
+    {"eco": "A20", "nom": "Anglaise — Sicilienne inversée", "moves": "c4 e5"},
+    {"eco": "A22", "nom": "Anglaise — Variante de Brême", "moves": "c4 e5 Nc3 Nf6"},
+    {"eco": "A25", "nom": "Anglaise — Sicilienne inversée fermée", "moves": "c4 e5 Nc3 Nc6"},
+    {"eco": "A30", "nom": "Anglaise Symétrique", "moves": "c4 c5"},
+    {"eco": "A34", "nom": "Anglaise Symétrique — Ligne Nc3 Nc6", "moves": "c4 c5 Nc3 Nc6"},
+    {"eco": "A40", "nom": "Défense sur 1.d4 (ligne rare / Moderne)", "moves": "d4 g6"},
+    {"eco": "A43", "nom": "Vieille Benoni", "moves": "d4 c5"},
+    {"eco": "A45", "nom": "Attaque Trompowsky", "moves": "d4 Nf6 Bg5"},
+    {"eco": "A46", "nom": "Attaque Torre / Jeu du Pion Dame", "moves": "d4 Nf6 Nf3 e6"},
+    {"eco": "A48", "nom": "Système de Londres contre Est-Indienne", "moves": "d4 Nf6 Nf3 g6 Bf4"},
+    {"eco": "A50", "nom": "Défense Indienne (1.d4 Cf6 2.c4)", "moves": "d4 Nf6 c4"},
+    {"eco": "A52", "nom": "Gambit de Budapest", "moves": "d4 Nf6 c4 e5"},
+    {"eco": "A53", "nom": "Vieille Indienne", "moves": "d4 Nf6 c4 d6"},
+    {"eco": "A56", "nom": "Défense Benoni", "moves": "d4 Nf6 c4 c5"},
+    {"eco": "A57", "nom": "Gambit Benko / Volga", "moves": "d4 Nf6 c4 c5 d5 b5"},
+    {"eco": "A60", "nom": "Benoni Moderne", "moves": "d4 Nf6 c4 c5 d5 e6"},
+    {"eco": "A70", "nom": "Benoni Moderne Classique", "moves": "d4 Nf6 c4 c5 d5 e6 Nc3 exd5 cxd5 d6 e4"},
+    {"eco": "A80", "nom": "Défense Hollandaise", "moves": "d4 f5"},
+    {"eco": "A84", "nom": "Hollandaise — Mur de Pierre", "moves": "d4 f5 c4 e6 Nc3 d5"},
+    {"eco": "A85", "nom": "Hollandaise — Système c4/Cc3", "moves": "d4 f5 c4 Nf6 Nc3"},
+    {"eco": "A87", "nom": "Hollandaise — Variante de Leningrad", "moves": "d4 f5 c4 Nf6 g3 g6 Bg2 Bg7"},
+    {"eco": "A90", "nom": "Hollandaise Classique", "moves": "d4 f5 c4 Nf6 g3 e6 Bg2"},
+    # Volume B : Semi-ouvertes (sauf Française)
+    {"eco": "B00", "nom": "Défense Owen (1.e4 b6)", "moves": "e4 b6"},
+    {"eco": "B01", "nom": "Défense Scandinave", "moves": "e4 d5"},
+    {"eco": "B02", "nom": "Défense Alekhine", "moves": "e4 Nf6"},
+    {"eco": "B04", "nom": "Défense Alekhine Moderne", "moves": "e4 Nf6 e5 Nd5 d4 d6 Nf3"},
+    {"eco": "B06", "nom": "Défense Moderne", "moves": "e4 g6"},
+    {"eco": "B07", "nom": "Défense Pirc", "moves": "e4 d6 d4 Nf6 Nc3"},
+    {"eco": "B08", "nom": "Défense Pirc Classique", "moves": "e4 d6 d4 Nf6 Nc3 g6 Nf3"},
+    {"eco": "B09", "nom": "Pirc — Attaque Autrichienne", "moves": "e4 d6 d4 Nf6 Nc3 g6 f4"},
+    {"eco": "B10", "nom": "Défense Caro-Kann", "moves": "e4 c6"},
+    {"eco": "B12", "nom": "Caro-Kann — Variante d'Avance", "moves": "e4 c6 d4 d5 e5"},
+    {"eco": "B13", "nom": "Caro-Kann — Variante d'Échange / Panov", "moves": "e4 c6 d4 d5 exd5 cxd5"},
+    {"eco": "B15", "nom": "Caro-Kann Classique", "moves": "e4 c6 d4 d5 Nc3"},
+    {"eco": "B17", "nom": "Caro-Kann — Variante Karpov / Steinitz", "moves": "e4 c6 d4 d5 Nc3 dxe4 Nxe4 Nd7"},
+    {"eco": "B18", "nom": "Caro-Kann — Variante Classique Ff5", "moves": "e4 c6 d4 d5 Nc3 dxe4 Nxe4 Bf5"},
+    {"eco": "B20", "nom": "Défense Sicilienne", "moves": "e4 c5"},
+    {"eco": "B21", "nom": "Sicilienne — Gambit Smith-Morra", "moves": "e4 c5 d4 cxd4 c3"},
+    {"eco": "B22", "nom": "Sicilienne — Variante Alapine", "moves": "e4 c5 c3"},
+    {"eco": "B23", "nom": "Sicilienne Fermée", "moves": "e4 c5 Nc3"},
+    {"eco": "B27", "nom": "Sicilienne — Dragon Hyper-Accéléré", "moves": "e4 c5 Nf3 g6"},
+    {"eco": "B30", "nom": "Sicilienne — Attaque Rossolimo", "moves": "e4 c5 Nf3 Nc6 Bb5"},
+    {"eco": "B32", "nom": "Sicilienne — Kalashnikov", "moves": "e4 c5 Nf3 Nc6 d4 cxd4 Nxd4 e5"},
+    {"eco": "B33", "nom": "Sicilienne — Variante Sveshnikov", "moves": "e4 c5 Nf3 Nc6 d4 cxd4 Nxd4 Nf6 Nc3 e5"},
+    {"eco": "B35", "nom": "Sicilienne — Dragon Accéléré", "moves": "e4 c5 Nf3 Nc6 d4 cxd4 Nxd4 g6"},
+    {"eco": "B40", "nom": "Sicilienne — Variante Française (2...e6)", "moves": "e4 c5 Nf3 e6"},
+    {"eco": "B42", "nom": "Sicilienne — Variante Kan", "moves": "e4 c5 Nf3 e6 d4 cxd4 Nxd4 a6"},
+    {"eco": "B44", "nom": "Sicilienne — Variante Taimanov", "moves": "e4 c5 Nf3 e6 d4 cxd4 Nxd4 Nc6"},
+    {"eco": "B50", "nom": "Sicilienne — Ligne 2...d6", "moves": "e4 c5 Nf3 d6"},
+    {"eco": "B52", "nom": "Sicilienne — Attaque Moscou", "moves": "e4 c5 Nf3 d6 Bb5+"},
+    {"eco": "B54", "nom": "Sicilienne Ouverte", "moves": "e4 c5 Nf3 d6 d4 cxd4 Nxd4"},
+    {"eco": "B60", "nom": "Sicilienne — Attaque Richter-Rauzer", "moves": "e4 c5 Nf3 d6 d4 cxd4 Nxd4 Nf6 Nc3 Nc6 Bg5"},
+    {"eco": "B70", "nom": "Sicilienne — Variante du Dragon", "moves": "e4 c5 Nf3 d6 d4 cxd4 Nxd4 Nf6 Nc3 g6"},
+    {"eco": "B76", "nom": "Sicilienne — Dragon Attaque Yougoslave", "moves": "e4 c5 Nf3 d6 d4 cxd4 Nxd4 Nf6 Nc3 g6 Be3 Bg7 f3"},
+    {"eco": "B80", "nom": "Sicilienne — Variante Scheveningen", "moves": "e4 c5 Nf3 d6 d4 cxd4 Nxd4 Nf6 Nc3 e6"},
+    {"eco": "B90", "nom": "Sicilienne — Variante Najdorf", "moves": "e4 c5 Nf3 d6 d4 cxd4 Nxd4 Nf6 Nc3 a6"},
+    # Volume C : Défense Française & Ouvertes (1.e4 e5)
+    {"eco": "C00", "nom": "Défense Française", "moves": "e4 e6"},
+    {"eco": "C01", "nom": "Française — Variante d'Échange", "moves": "e4 e6 d4 d5 exd5 exd5"},
+    {"eco": "C02", "nom": "Française — Variante d'Avance", "moves": "e4 e6 d4 d5 e5"},
+    {"eco": "C03", "nom": "Française — Variante Tarrasch", "moves": "e4 e6 d4 d5 Nd2"},
+    {"eco": "C10", "nom": "Française — Variante Rubinstein", "moves": "e4 e6 d4 d5 Nc3 dxe4"},
+    {"eco": "C11", "nom": "Française Classique", "moves": "e4 e6 d4 d5 Nc3 Nf6"},
+    {"eco": "C15", "nom": "Française — Variante Winawer", "moves": "e4 e6 d4 d5 Nc3 Bb4"},
+    {"eco": "C20", "nom": "Début du Pion Roi (1.e4 e5)", "moves": "e4 e5"},
+    {"eco": "C21", "nom": "Partie du Centre", "moves": "e4 e5 d4 exd4"},
+    {"eco": "C23", "nom": "Début du Fou", "moves": "e4 e5 Bc4"},
+    {"eco": "C25", "nom": "Partie Viennoise", "moves": "e4 e5 Nc3"},
+    {"eco": "C30", "nom": "Gambit du Roi", "moves": "e4 e5 f4"},
+    {"eco": "C40", "nom": "Début du Cavalier Roi", "moves": "e4 e5 Nf3"},
+    {"eco": "C41", "nom": "Défense Philidor", "moves": "e4 e5 Nf3 d6"},
+    {"eco": "C42", "nom": "Défense Petrov / Défense Russe", "moves": "e4 e5 Nf3 Nf6"},
+    {"eco": "C44", "nom": "Partie Écossaise (3.d4)", "moves": "e4 e5 Nf3 Nc6 d4"},
+    {"eco": "C45", "nom": "Partie Écossaise — Ligne principale", "moves": "e4 e5 Nf3 Nc6 d4 exd4 Nxd4"},
+    {"eco": "C46", "nom": "Partie des Trois Cavaliers", "moves": "e4 e5 Nf3 Nc6 Nc3"},
+    {"eco": "C47", "nom": "Partie des Quatre Cavaliers", "moves": "e4 e5 Nf3 Nc6 Nc3 Nf6"},
+    {"eco": "C50", "nom": "Partie Italienne", "moves": "e4 e5 Nf3 Nc6 Bc4"},
+    {"eco": "C51", "nom": "Gambit Evans", "moves": "e4 e5 Nf3 Nc6 Bc4 Bc5 b4"},
+    {"eco": "C53", "nom": "Italienne — Giuoco Piano", "moves": "e4 e5 Nf3 Nc6 Bc4 Bc5 c3"},
+    {"eco": "C54", "nom": "Italienne — Giuoco Pianissimo", "moves": "e4 e5 Nf3 Nc6 Bc4 Bc5 c3 Nf6 d3"},
+    {"eco": "C55", "nom": "Défense des Deux Cavaliers", "moves": "e4 e5 Nf3 Nc6 Bc4 Nf6"},
+    {"eco": "C57", "nom": "Deux Cavaliers — Attaque Fegatello (Fried Liver)", "moves": "e4 e5 Nf3 Nc6 Bc4 Nf6 Ng5"},
+    {"eco": "C60", "nom": "Partie Espagnole (Ruy Lopez)", "moves": "e4 e5 Nf3 Nc6 Bb5"},
+    {"eco": "C63", "nom": "Espagnole — Gambit Schliemann", "moves": "e4 e5 Nf3 Nc6 Bb5 f5"},
+    {"eco": "C65", "nom": "Espagnole — Défense de Berlin", "moves": "e4 e5 Nf3 Nc6 Bb5 Nf6"},
+    {"eco": "C68", "nom": "Espagnole — Variante d'Échange", "moves": "e4 e5 Nf3 Nc6 Bb5 a6 Bxc6"},
+    {"eco": "C78", "nom": "Espagnole — Défense Morphy", "moves": "e4 e5 Nf3 Nc6 Bb5 a6 Ba4 Nf6 O-O"},
+    {"eco": "C80", "nom": "Espagnole — Variante Ouverte", "moves": "e4 e5 Nf3 Nc6 Bb5 a6 Ba4 Nf6 O-O Nxe4"},
+    {"eco": "C84", "nom": "Espagnole Fermée", "moves": "e4 e5 Nf3 Nc6 Bb5 a6 Ba4 Nf6 O-O Be7"},
+    {"eco": "C88", "nom": "Espagnole — Anti-Marshall", "moves": "e4 e5 Nf3 Nc6 Bb5 a6 Ba4 Nf6 O-O Be7 Re1 b5 Bb3 O-O a4"},
+    {"eco": "C89", "nom": "Espagnole — Attaque Marshall", "moves": "e4 e5 Nf3 Nc6 Bb5 a6 Ba4 Nf6 O-O Be7 Re1 b5 Bb3 O-O c3 d5"},
+    {"eco": "C92", "nom": "Espagnole — Variante Fermée Principale", "moves": "e4 e5 Nf3 Nc6 Bb5 a6 Ba4 Nf6 O-O Be7 Re1 b5 Bb3 d6 c3 O-O h3"},
+    # Volume D : Fermées & Grünfeld
+    {"eco": "D00", "nom": "Ouverture du Pion Dame (1.d4 d5)", "moves": "d4 d5"},
+    {"eco": "D01", "nom": "Attaque Richter-Veresov", "moves": "d4 d5 Nc3 Nf6 Bg5"},
+    {"eco": "D02", "nom": "Système de Londres", "moves": "d4 d5 Nf3 Nf6 Bf4"},
+    {"eco": "D03", "nom": "Attaque Torre", "moves": "d4 d5 Nf3 Nf6 Bg5"},
+    {"eco": "D04", "nom": "Système Colle", "moves": "d4 d5 Nf3 Nf6 e3"},
+    {"eco": "D06", "nom": "Gambit Dame", "moves": "d4 d5 c4"},
+    {"eco": "D07", "nom": "Gambit Dame — Défense Chigorin", "moves": "d4 d5 c4 Nc6"},
+    {"eco": "D08", "nom": "Gambit Dame — Contre-Gambit Albin", "moves": "d4 d5 c4 e5"},
+    {"eco": "D10", "nom": "Défense Slave", "moves": "d4 d5 c4 c6"},
+    {"eco": "D11", "nom": "Défense Slave (3.Cf3)", "moves": "d4 d5 c4 c6 Nf3"},
+    {"eco": "D15", "nom": "Défense Slave Classique", "moves": "d4 d5 c4 c6 Nf3 Nf6 Nc3"},
+    {"eco": "D20", "nom": "Gambit Dame Accepté", "moves": "d4 d5 c4 dxc4"},
+    {"eco": "D30", "nom": "Gambit Dame Refusé", "moves": "d4 d5 c4 e6"},
+    {"eco": "D31", "nom": "Gambit Dame Refusé (3.Cc3)", "moves": "d4 d5 c4 e6 Nc3"},
+    {"eco": "D32", "nom": "Défense Tarrasch", "moves": "d4 d5 c4 e6 Nc3 c5"},
+    {"eco": "D35", "nom": "Gambit Dame Refusé — Variante d'Échange", "moves": "d4 d5 c4 e6 Nc3 Nf6 cxd5 exd5"},
+    {"eco": "D37", "nom": "Gambit Dame Refusé Classique (4.Cf3)", "moves": "d4 d5 c4 e6 Nc3 Nf6 Nf3"},
+    {"eco": "D43", "nom": "Défense Semi-Slave", "moves": "d4 d5 c4 c6 Nf3 Nf6 Nc3 e6"},
+    {"eco": "D45", "nom": "Semi-Slave — Système Meran / Anti-Meran", "moves": "d4 d5 c4 c6 Nf3 Nf6 Nc3 e6 e3"},
+    {"eco": "D53", "nom": "Gambit Dame Refusé — Variante Lasker / Tartakower", "moves": "d4 d5 c4 e6 Nc3 Nf6 Bg5 Be7"},
+    {"eco": "D70", "nom": "Défense Néo-Grünfeld", "moves": "d4 Nf6 c4 g6 g3 d5"},
+    {"eco": "D80", "nom": "Défense Grünfeld", "moves": "d4 Nf6 c4 g6 Nc3 d5"},
+    {"eco": "D85", "nom": "Grünfeld — Variante d'Échange", "moves": "d4 Nf6 c4 g6 Nc3 d5 cxd5 Nxd5 e4 Nxc3 bxc3"},
+    {"eco": "D97", "nom": "Grünfeld — Système Russe", "moves": "d4 Nf6 c4 g6 Nc3 d5 Nf3 Bg7 Qb3"},
+    # Volume E : Défenses Indiennes
+    {"eco": "E00", "nom": "Ouverture Catalane / Indienne", "moves": "d4 Nf6 c4 e6"},
+    {"eco": "E04", "nom": "Partie Catalane Ouverte", "moves": "d4 Nf6 c4 e6 g3 d5 Bg2 dxc4"},
+    {"eco": "E06", "nom": "Partie Catalane Fermée", "moves": "d4 Nf6 c4 e6 g3 d5 Bg2 Be7"},
+    {"eco": "E11", "nom": "Défense Bogo-Indienne", "moves": "d4 Nf6 c4 e6 Nf3 Bb4+"},
+    {"eco": "E12", "nom": "Défense Ouest-Indienne", "moves": "d4 Nf6 c4 e6 Nf3 b6"},
+    {"eco": "E15", "nom": "Ouest-Indienne — Variante 4.g3", "moves": "d4 Nf6 c4 e6 Nf3 b6 g3"},
+    {"eco": "E20", "nom": "Défense Nimzo-Indienne", "moves": "d4 Nf6 c4 e6 Nc3 Bb4"},
+    {"eco": "E32", "nom": "Nimzo-Indienne — Variante Capablanca", "moves": "d4 Nf6 c4 e6 Nc3 Bb4 Qc2"},
+    {"eco": "E46", "nom": "Nimzo-Indienne — Système Rubinstein", "moves": "d4 Nf6 c4 e6 Nc3 Bb4 e3 O-O"},
+    {"eco": "E60", "nom": "Défense Est-Indienne", "moves": "d4 Nf6 c4 g6"},
+    {"eco": "E61", "nom": "Est-Indienne (3.Cc3 Fg7)", "moves": "d4 Nf6 c4 g6 Nc3 Bg7"},
+    {"eco": "E62", "nom": "Est-Indienne — Fianchetto", "moves": "d4 Nf6 c4 g6 Nc3 Bg7 Nf3 d6 g3"},
+    {"eco": "E70", "nom": "Est-Indienne — Système 4.e4", "moves": "d4 Nf6 c4 g6 Nc3 Bg7 e4 d6"},
+    {"eco": "E76", "nom": "Est-Indienne — Attaque des Quatre Pions", "moves": "d4 Nf6 c4 g6 Nc3 Bg7 e4 d6 f4"},
+    {"eco": "E80", "nom": "Est-Indienne — Attaque Sämisch", "moves": "d4 Nf6 c4 g6 Nc3 Bg7 e4 d6 f3"},
+    {"eco": "E90", "nom": "Est-Indienne Classique", "moves": "d4 Nf6 c4 g6 Nc3 Bg7 e4 d6 Nf3 O-O"},
+    {"eco": "E97", "nom": "Est-Indienne — Variante Mar del Plata", "moves": "d4 Nf6 c4 g6 Nc3 Bg7 e4 d6 Nf3 O-O Be2 e5 O-O Nc6"},
+]
+
 def nettoyer_chaine_elo_ffe(txt):
     """Nettoie une cellule Elo FFE tout en conservant le marqueur F (FIDE), N (National) ou E (Estimé)."""
     if pd.isna(txt):
@@ -776,9 +942,9 @@ def telecharger_ffe_calanques(timeout=12, silencieux=False):
         for tr in soup.find_all('tr', class_=['liste_clair', 'liste_fonce']):
             tds = tr.find_all('td')
             if len(tds) > max(idx_elo, idx_rapide, idx_blitz, 2):
-                nr_ffe = tds[0].get_text(strip=True)
+                nr_ffe = re.sub(r'\s+', '', tds[0].get_text(strip=True)).upper()
                 nom_prenom = re.sub(r'\s+', ' ', tds[1].get_text(' ', strip=True)).strip()
-                af = tds[2].get_text(strip=True)
+                af = re.sub(r'\s+', '', tds[2].get_text(strip=True).replace('\xa0', '')).upper()
                 elo = nettoyer_chaine_elo_ffe(tds[idx_elo].get_text(' ', strip=True))
                 rapide = nettoyer_chaine_elo_ffe(tds[idx_rapide].get_text(' ', strip=True))
                 blitz = nettoyer_chaine_elo_ffe(tds[idx_blitz].get_text(' ', strip=True))
@@ -790,13 +956,20 @@ def telecharger_ffe_calanques(timeout=12, silencieux=False):
                 nom = " ".join(nom_parts) if nom_parts else nom_prenom
                 prenom = " ".join(prenom_parts) if prenom_parts else ""
 
+                if not nr_ffe:
+                    licence_fmt = "Non croisé"
+                elif af in ['A', 'B']:
+                    licence_fmt = f"{nr_ffe} ({af})"
+                else:
+                    licence_fmt = f"{nr_ffe} (N)"
+
                 data.append({
                     'Nom': nom,
                     'Prénom': prenom,
                     'Elo_Lent': elo,
                     'Elo_Rapide': rapide,
                     'Elo_Blitz': blitz,
-                    'Licence_FFE': f"{nr_ffe} ({af})" if af in ['A', 'B', 'N'] else nr_ffe,
+                    'Licence_FFE': licence_fmt,
                 })
         df_ffe = pd.DataFrame(data)
         if not df_ffe.empty:
@@ -825,6 +998,7 @@ def analyser_fichier_ffe(fichier):
         col_rapide = next((c for c in df_ffe.columns if "rapide" in str(c).lower()), None)
         col_blitz = next((c for c in df_ffe.columns if "blitz" in str(c).lower()), None)
         col_licence = next((c for c in df_ffe.columns if any(m in str(c).lower() for m in ["n° ffe", "licence", "code", "ref", "identifiant"])), None)
+        col_af = next((c for c in df_ffe.columns if str(c).strip().lower() in ["af", "aff", "af. info", "statut", "a/b", "type licence"]), None)
         col_dna = next((c for c in df_ffe.columns if any(m in str(c).lower() for m in ["dna", "né", "naissance"])), None)
 
         if col_nom and col_prenom:
@@ -836,7 +1010,19 @@ def analyser_fichier_ffe(fichier):
             df_ffe['Elo_Lent'] = df_ffe[col_lent].astype(str) if col_lent else ""
             df_ffe['Elo_Rapide'] = df_ffe[col_rapide].astype(str) if col_rapide else ""
             df_ffe['Elo_Blitz'] = df_ffe[col_blitz].astype(str) if col_blitz else ""
-            df_ffe['Licence_FFE'] = df_ffe[col_licence].astype(str) if col_licence else "Non croisé"
+            if col_licence:
+                lic_series = df_ffe[col_licence].fillna("").astype(str).str.strip()
+                lic_series = lic_series.apply(lambda v: "Non croisé" if not v or v.lower() in ["nan", "none", "-"] else v)
+                if col_af:
+                    af_series = df_ffe[col_af].fillna("").astype(str).str.strip().str.upper()
+                    df_ffe['Licence_FFE'] = [
+                        (f"{l} ({a})" if (l != "Non croisé" and a in ['A', 'B', 'N'] and f"({a})" not in l.upper()) else l)
+                        for l, a in zip(lic_series, af_series)
+                    ]
+                else:
+                    df_ffe['Licence_FFE'] = lic_series
+            else:
+                df_ffe['Licence_FFE'] = "Non croisé"
 
             df_ffe = enrichir_cles_ffe(df_ffe)
             return df_ffe[['Nom_Norm', 'Prenom_Norm', 'Annee_FFE', 'Cle_Forte', 'Cle_Souple', 'Cle_Inverse', 'Code_FFE', 'Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE']]
@@ -917,8 +1103,8 @@ def recroiser_et_maj_ffe(df_base, df_ffe):
                 new_v = str(match[col]).strip()
                 if old_v != new_v:
                     df_res.at[idx, col] = new_v
-                    if col != 'Licence_FFE' or old_v == 'Non croisé':
-                        diffs_eleve.append(f"{col.replace('Elo_', '')}: {old_v or '-'} ➔ {new_v or '-'}")
+                    label_col = "Licence" if col == "Licence_FFE" else col.replace('Elo_', '')
+                    diffs_eleve.append(f"{label_col}: {old_v or '-'} ➔ {new_v or '-'}")
             if diffs_eleve:
                 identite = row.get('Identité', f"{row.get('Prénom', '')} {row.get('Nom', '')}".strip())
                 changements.append(f"**{identite}** ({', '.join(diffs_eleve)})")
@@ -1503,6 +1689,7 @@ else:
                                 if nv_identite not in st.session_state['db']['sorties_manuelles']: st.session_state['db']['sorties_manuelles'][nv_identite] = st.session_state['db']['sorties_manuelles'].get(identite_cible, "-")
                                 if nv_identite not in st.session_state['db']['tshirts_donnes']: st.session_state['db']['tshirts_donnes'][nv_identite] = st.session_state['db']['tshirts_donnes'].get(identite_cible, False)
                                 if nv_identite not in st.session_state['db']['cartes_membres']: st.session_state['db']['cartes_membres'][nv_identite] = dict(st.session_state['db']['cartes_membres'].get(identite_cible, {"Cassis": False, "Carnoux": False}))
+                                if nv_identite not in st.session_state['db'].setdefault('ouvertures_eleves', {}): st.session_state['db']['ouvertures_eleves'][nv_identite] = list(st.session_state['db']['ouvertures_eleves'].get(identite_cible, []))
                                     
                                 row_updated = st.session_state['df_adherents'].loc[idx_cible]
                                 creneaux_autos = affectations_automatiques(row_updated)
@@ -1523,6 +1710,7 @@ else:
                                     st.session_state['db']['sorties_manuelles'].pop(identite_cible, None)
                                     st.session_state['db']['tshirts_donnes'].pop(identite_cible, None)
                                     st.session_state['db']['cartes_membres'].pop(identite_cible, None)
+                                    st.session_state['db'].get('ouvertures_eleves', {}).pop(identite_cible, None)
 
                                 sauvegarder_base_cloud(st.session_state['db'])
                                 sauvegarder_adherents_cloud(st.session_state['df_adherents'])
@@ -1571,28 +1759,40 @@ else:
             with col_ad2: filtre_type_admin = st.multiselect("Types :", options=df_sans_boutique["Type"].unique(), default=df_sans_boutique["Type"].unique())
             
             st.markdown("##### ⚡ Filtres d'Action Rapide")
-            c_f1, c_f2, c_f3, c_f4 = st.columns(4)
+            c_f1, c_f2, c_f3, c_f4 = st.columns([1.1, 1.2, 1.4, 1.5])
             with c_f1: filtre_licence = st.checkbox("🚫 Sans Licence")
             with c_f2: filtre_allergie = st.checkbox("🤧 Allergies / Médical")
             with c_f3: filtre_sortie = st.checkbox("🚶 Sorties Autorisées (OUI)")
-            with c_f4: filtre_carte = st.checkbox("🎟️ Carte Cassis/Carnoux Manquante")
-                
+            with c_f4:
+                if st.button("🔄 Actualiser licences & Elos FFE", key="btn_maj_ffe_admin"):
+                    ok_ffe, chang_ffe, nb_ffe = actualiser_elos_ffe_automatique(silencieux=False)
+                    if ok_ffe and chang_ffe:
+                        st.session_state['msg_maj_ffe_admin'] = ("success", f"✅ {nb_ffe} élève(s) mis à jour depuis la FFE ({len(chang_ffe)} modification(s)).")
+                        st.rerun()
+                    elif ok_ffe:
+                        st.session_state['msg_maj_ffe_admin'] = ("info", "ℹ️ Aucune nouvelle modification détectée sur le site FFE.")
+                    else:
+                        st.session_state['msg_maj_ffe_admin'] = ("warning", "⚠️ Impossible de joindre le site de la FFE pour le moment.")
+
+            if 'msg_maj_ffe_admin' in st.session_state:
+                lvl_msg, txt_msg = st.session_state.pop('msg_maj_ffe_admin')
+                if lvl_msg == "success": st.success(txt_msg)
+                elif lvl_msg == "info": st.info(txt_msg)
+                else: st.warning(txt_msg)
+
             df_admin = df_sans_boutique[(df_sans_boutique["Campagne"].isin(filtre_camp_admin)) & (df_sans_boutique["Type"].isin(filtre_type_admin))].copy()
             
-            if filtre_licence and "Licence_FFE" in df_admin.columns: 
-                df_admin = df_admin[(df_admin["Licence_FFE"] == "Non croisé") | (df_admin["Licence_FFE"] == "") | (df_admin["Licence_FFE"].str.contains(r'\(N\)', na=False))]
+            if filtre_licence:
+                if "Licence_FFE" in df_admin.columns:
+                    df_admin = df_admin[df_admin["Licence_FFE"].apply(est_sans_licence)]
+                else:
+                    st.warning("⚠️ Colonne Licence_FFE introuvable. Cliquez sur '🔄 Actualiser licences & Elos FFE'.")
             if filtre_allergie and "Allergies / Médical" in df_admin.columns:
                 mots_sains = ["non", "ras", "rien", "néant", "neant", "aucun", "aucune", "-"]
                 df_admin = df_admin[(df_admin["Allergies / Médical"] != "") & (~df_admin["Allergies / Médical"].astype(str).str.lower().isin(mots_sains))]
             if filtre_sortie: 
                 df_admin = df_admin[df_admin.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Identité'], r['Sortie Seul']) == "✅ OUI", axis=1)]
-            if filtre_carte:
-                def is_carte_manquante(row):
-                    identite, camp, ville = row["Identité"], str(row.get("Campagne", "")).lower(), str(row.get("Dans quel ville sera votre créneaux principale", "")).lower()
-                    if ("cassis" in camp or "cassis" in ville) and not st.session_state['db']['cartes_membres'].get(identite, {}).get("Cassis", False): return True
-                    if ("carnoux" in camp or "carnoux" in ville) and not st.session_state['db']['cartes_membres'].get(identite, {}).get("Carnoux", False): return True
-                    return False
-                df_admin = df_admin[df_admin.apply(is_carte_manquante, axis=1)]
+            st.caption(f"🔎 {len(df_admin)} élève(s) affiché(s)")
             
             # Affichage correct de l'Elo dans le tableau
             df_admin['Elo Actif ⚡'] = df_admin['Identité'].apply(lambda x: get_elo_actif(x, df_admin, st.session_state['db'])[0])
@@ -2604,61 +2804,231 @@ else:
             else: st.info("Aucun élève à afficher.")
 
         with tab_ouvertures:
-            st.markdown("### 📖 Répertoires d'Ouvertures")
-            st.info("Définissez plusieurs ouvertures pour ce groupe. Vous pouvez entrer les premiers coups (ex: e4 e5 Nf3) pour afficher l'échiquier !")
-            
-            if "repertoires_ouvertures" not in st.session_state['db']:
-                st.session_state['db']["repertoires_ouvertures"] = {}
-                
-            c_jour_ouv, c_lieu_ouv = st.columns(2)
-            with c_jour_ouv: jour_ouv = st.selectbox("Jour :", options=list(structure_creneaux.keys()), key="jour_ouv")
-            with c_lieu_ouv: lieu_ouv = st.selectbox("Groupe / Créneau :", options=structure_creneaux[jour_ouv], key="lieu_ouv")
-            
-            key_ouvertures = f"ouvertures_{lieu_ouv}"
-            if key_ouvertures not in st.session_state:
-                db_list = st.session_state['db']['repertoires_ouvertures'].get(lieu_ouv, [])
-                if isinstance(db_list, dict):
-                    new_list = []
-                    if db_list.get("blancs"): new_list.append({"nom": db_list["blancs"], "couleur": "Blancs", "moves": ""})
-                    if db_list.get("noirs"): new_list.append({"nom": db_list["noirs"], "couleur": "Noirs", "moves": ""})
-                    db_list = new_list
-                st.session_state[key_ouvertures] = list(db_list)
-                
-            ouvertures = st.session_state[key_ouvertures]
+            st.markdown("### 📖 Ouvertures des Élèves (Codes ECO)")
+            st.info("Sélectionnez un élève et attribuez-lui les ouvertures qu'il joue avec les Blancs et les Noirs selon la classification officielle ECO.")
 
-            for i, ouv in enumerate(ouvertures):
-                st.markdown(f"**Ouverture {i+1}**")
-                c1, c2, c3, c4 = st.columns([3, 2, 4, 1])
-                ouv['nom'] = c1.text_input("Nom / ECO", value=ouv.get('nom', ''), key=f"nom_{lieu_ouv}_{i}")
-                ouv['couleur'] = c2.selectbox("Couleur", ["Blancs", "Noirs"], index=0 if ouv.get('couleur', 'Blancs') == "Blancs" else 1, key=f"coul_{lieu_ouv}_{i}")
-                ouv['moves'] = c3.text_input("Coups PGN (ex: e4 e5 Nf3)", value=ouv.get('moves', ''), key=f"moves_{lieu_ouv}_{i}")
-                
-                board_svg = None
-                erreur_coups = False
-                if ouv['moves']:
-                    try:
-                        board = chess.Board()
-                        for move in ouv['moves'].split():
-                            board.push_san(move)
-                        board_svg = chess.svg.board(board=board, size=200, orientation=chess.WHITE if ouv['couleur'] == "Blancs" else chess.BLACK)
-                    except Exception:
-                        erreur_coups = True
-                
-                if board_svg:
-                    st.markdown(f"<div style='margin-bottom: 15px;'>{board_svg}</div>", unsafe_allow_html=True)
-                elif erreur_coups:
-                    st.error("Coups invalides. Utilisez la notation PGN en anglais (ex: e4 e5 Nf3 Nc6).")
-                
-                if c4.button("🗑️", key=f"del_{lieu_ouv}_{i}"):
-                    ouvertures.pop(i)
-                    st.rerun()
-            
-            if st.button("➕ Ajouter une ouverture"):
-                ouvertures.append({"nom": "", "couleur": "Blancs", "moves": ""})
-                st.rerun()
-            
+            if "ouvertures_eleves" not in st.session_state['db'] or not isinstance(st.session_state['db']["ouvertures_eleves"], dict):
+                st.session_state['db']["ouvertures_eleves"] = {}
+
+            def _rendre_echiquier_ouv(moves_str, couleur_str, size=200):
+                """Valide une suite de coups PGN/SAN (avec numéros éventuels) et retourne (svg_ou_None, moves_nettoyes, erreur)."""
+                raw_tokens = str(moves_str or "").replace("\n", " ").split()
+                tokens = []
+                for tok in raw_tokens:
+                    tok_clean = re.sub(r'^\d+\.+', '', tok).strip()
+                    if not tok_clean or tok_clean in {"*", "1-0", "0-1", "1/2-1/2"}:
+                        continue
+                    tokens.append(tok_clean)
+                if not tokens:
+                    return None, "", False
+                try:
+                    board_ouv = chess.Board()
+                    for mv in tokens:
+                        board_ouv.push_san(mv)
+                    orient = chess.WHITE if couleur_str == "Blancs" else chess.BLACK
+                    svg = chess.svg.board(board=board_ouv, size=size, orientation=orient)
+                    return svg, " ".join(tokens), False
+                except Exception:
+                    return None, " ".join(tokens), True
+
+            if 'msg_ouv_eleve' in st.session_state:
+                lvl_o, txt_o = st.session_state.pop('msg_ouv_eleve')
+                if lvl_o == "success": st.success(txt_o)
+                else: st.warning(txt_o)
+
+            df_ouv_src = st.session_state['df_adherents']
+            if "Type" in df_ouv_src.columns:
+                df_ouv_src = df_ouv_src[df_ouv_src["Type"] != "Boutique"]
+            tous_eleves_ouv = sorted(df_ouv_src["Identité"].dropna().astype(str).unique().tolist())
+
+            liste_creneaux_ouv = ["Tous les élèves"] + [c for cr_list in structure_creneaux.values() for c in cr_list]
+            c_ouv_f1, c_ouv_f2 = st.columns([1.2, 2])
+            with c_ouv_f1:
+                filtre_creneau_ouv = st.selectbox("Filtrer par créneau :", options=liste_creneaux_ouv, key="ouv_filtre_creneau")
+            if filtre_creneau_ouv == "Tous les élèves":
+                eleves_ouv_opts = tous_eleves_ouv
+            else:
+                aff_cr = st.session_state['db'].get('affectations_creneaux', {}).get(filtre_creneau_ouv, [])
+                eleves_ouv_opts = sorted(set(aff_cr))
+
+            with c_ouv_f2:
+                eleve_ouv_sel = st.selectbox(
+                    "👤 Sélectionner un élève :",
+                    options=eleves_ouv_opts if eleves_ouv_opts else ["Aucun élève"],
+                    key="ouv_eleve_sel"
+                )
+
+            if eleves_ouv_opts and eleve_ouv_sel != "Aucun élève":
+                eid_ouv = hashlib.md5(eleve_ouv_sel.encode('utf-8')).hexdigest()[:8]
+                elo_eleve_ouv, cat_eleve_ouv = get_elo_actif(eleve_ouv_sel, st.session_state['df_adherents'], st.session_state['db'])
+                ouvs_eleve = st.session_state['db']['ouvertures_eleves'].setdefault(eleve_ouv_sel, [])
+                nb_b = sum(1 for o in ouvs_eleve if o.get('couleur') == 'Blancs')
+                nb_n = sum(1 for o in ouvs_eleve if o.get('couleur') == 'Noirs')
+                st.caption(f"♟️ **{eleve_ouv_sel}** — Elo actif : **{elo_eleve_ouv}** ({cat_eleve_ouv}) | ⚪ Blancs : {nb_b} | ⚫ Noirs : {nb_n}")
+
+                st.markdown("#### 📚 Ouvertures assignées à l'élève")
+                if not ouvs_eleve:
+                    st.info("Aucune ouverture enregistrée pour cet élève. Ajoutez-en une ci-dessous avec son code ECO.")
+                else:
+                    indices_tries = sorted(
+                        range(len(ouvs_eleve)),
+                        key=lambda k: (0 if ouvs_eleve[k].get('couleur') == 'Blancs' else 1, str(ouvs_eleve[k].get('eco', '')))
+                    )
+                    for idx_o in indices_tries:
+                        ouv = ouvs_eleve[idx_o]
+                        coul_o = ouv.get('couleur', 'Blancs')
+                        badge_coul = "⚪ Blancs" if coul_o == "Blancs" else "⚫ Noirs"
+                        eco_o = ouv.get('eco', '---')
+                        nom_o = ouv.get('nom', 'Ouverture')
+                        with st.expander(f"{badge_coul} — [{eco_o}] {nom_o}", expanded=False):
+                            col_svg_e, col_edit_e = st.columns([1, 2])
+                            svg_e, _, err_e = _rendre_echiquier_ouv(ouv.get('moves', ''), coul_o, size=190)
+                            with col_svg_e:
+                                if svg_e:
+                                    st.markdown(f"<div>{svg_e}</div>", unsafe_allow_html=True)
+                                elif err_e:
+                                    st.error("Coups SAN invalides.")
+                                else:
+                                    st.caption("Aucun coup saisi.")
+                            with col_edit_e:
+                                nv_moves = st.text_input("Coups PGN (notation anglaise, ex: e4 c5 Nf3) :", value=ouv.get('moves', ''), key=f"edit_mv_{eid_ouv}_{idx_o}")
+                                nv_note = st.text_input("Note pédagogique / variante travaillée :", value=ouv.get('note', ''), key=f"edit_nt_{eid_ouv}_{idx_o}")
+                                c_btn1, c_btn2 = st.columns(2)
+                                with c_btn1:
+                                    if st.button("💾 Mettre à jour", key=f"save_ouv_{eid_ouv}_{idx_o}"):
+                                        _, moves_clean, err_upd = _rendre_echiquier_ouv(nv_moves, coul_o)
+                                        if err_upd:
+                                            st.error("Coups invalides (utilisez la notation SAN anglaise : e4 e5 Nf3 Nc6).")
+                                        else:
+                                            ouvs_eleve[idx_o]['moves'] = moves_clean
+                                            ouvs_eleve[idx_o]['note'] = nv_note.strip()
+                                            sauvegarder_base_cloud(st.session_state['db'])
+                                            st.session_state['msg_ouv_eleve'] = ("success", f"✅ Ouverture [{eco_o}] {nom_o} mise à jour pour {eleve_ouv_sel}.")
+                                            st.rerun()
+                                with c_btn2:
+                                    if st.button("🗑️ Supprimer", key=f"del_ouv_{eid_ouv}_{idx_o}"):
+                                        ouvs_eleve.pop(idx_o)
+                                        sauvegarder_base_cloud(st.session_state['db'])
+                                        st.session_state['msg_ouv_eleve'] = ("success", f"🗑️ Ouverture supprimée pour {eleve_ouv_sel}.")
+                                        st.rerun()
+
+                st.markdown("#### ➕ Attribuer une nouvelle ouverture ECO")
+                with st.container(border=True):
+                    c_add1, c_add2 = st.columns([1, 2])
+                    with c_add1:
+                        coul_add_ui = st.radio("Couleur :", ["⚪ Blancs", "⚫ Noirs"], horizontal=True, key=f"add_coul_{eid_ouv}")
+                        coul_add = "Blancs" if "Blancs" in coul_add_ui else "Noirs"
+                    with c_add2:
+                        famille_eco = st.selectbox(
+                            "Famille ECO :",
+                            [
+                                "Toutes (A–E)",
+                                "A — Flanc & Irrégulières (A00–A99)",
+                                "B — Semi-ouvertes 1.e4 (B00–B99)",
+                                "C — Ouvertes 1.e4 e5 & Française (C00–C99)",
+                                "D — Fermées & Grünfeld (D00–D99)",
+                                "E — Indiennes (E00–E99)",
+                            ],
+                            key=f"add_fam_{eid_ouv}"
+                        )
+
+                    if famille_eco.startswith("Toutes"):
+                        eco_filtres = CATALOGUE_ECO
+                    else:
+                        lettre_fam = famille_eco[0]
+                        eco_filtres = [item for item in CATALOGUE_ECO if item["eco"].startswith(lettre_fam)]
+
+                    OPT_CUSTOM = "✏️ Code ECO personnalisé..."
+                    labels_eco = [f"{item['eco']} — {item['nom']} ({item['moves']})" for item in eco_filtres]
+                    choix_eco = st.selectbox(
+                        "Code ECO & Ouverture (tapez pour rechercher) :",
+                        options=labels_eco + [OPT_CUSTOM],
+                        key=f"add_eco_sel_{eid_ouv}"
+                    )
+                    choix_hash = hashlib.md5(choix_eco.encode('utf-8')).hexdigest()[:6]
+
+                    if choix_eco == OPT_CUSTOM:
+                        c_cust1, c_cust2 = st.columns([1, 3])
+                        eco_add = c_cust1.text_input("Code ECO (ex: B90) :", max_chars=5, key=f"cust_eco_{eid_ouv}").strip().upper()
+                        nom_add = c_cust2.text_input("Nom de l'ouverture :", key=f"cust_nom_{eid_ouv}").strip()
+                        moves_defaut = ""
+                    else:
+                        idx_sel_eco = labels_eco.index(choix_eco)
+                        item_sel = eco_filtres[idx_sel_eco]
+                        eco_add = item_sel["eco"]
+                        nom_add = item_sel["nom"]
+                        moves_defaut = item_sel["moves"]
+
+                    c_mv_add, c_bd_add = st.columns([2, 1])
+                    with c_mv_add:
+                        moves_add_input = st.text_input(
+                            "Coups PGN (en anglais, modifiables) :",
+                            value=moves_defaut,
+                            key=f"add_mv_{eid_ouv}_{choix_hash}"
+                        )
+                        note_add = st.text_input(
+                            "Note / variante spécifique (optionnel) :",
+                            placeholder="Ex: Variante Najdorf, attaque anglaise...",
+                            key=f"add_nt_{eid_ouv}"
+                        )
+                        if st.button("➕ Ajouter cette ouverture à l'élève", key=f"btn_add_ouv_{eid_ouv}"):
+                            if not re.match(r"^[A-E][0-9]{2}$", eco_add):
+                                st.error("Le code ECO doit comporter 1 lettre (A à E) suivie de 2 chiffres (ex: B20, C50, D02).")
+                            elif not nom_add:
+                                st.error("Veuillez saisir un nom d'ouverture.")
+                            else:
+                                _, moves_clean_add, err_add = _rendre_echiquier_ouv(moves_add_input, coul_add)
+                                if err_add:
+                                    st.error("Coups PGN invalides. Utilisez la notation anglaise (K=Roi, Q=Dame, R=Tour, B=Fou, N=Cavalier, ex: e4 c5 Nf3).")
+                                else:
+                                    ouvs_eleve.append({
+                                        "eco": eco_add,
+                                        "nom": nom_add,
+                                        "couleur": coul_add,
+                                        "moves": moves_clean_add,
+                                        "note": note_add.strip()
+                                    })
+                                    sauvegarder_base_cloud(st.session_state['db'])
+                                    st.session_state['msg_ouv_eleve'] = ("success", f"✅ Ouverture [{eco_add}] {nom_add} ({coul_add}) ajoutée à {eleve_ouv_sel} !")
+                                    st.rerun()
+                    with c_bd_add:
+                        svg_preview, _, err_preview = _rendre_echiquier_ouv(moves_add_input, coul_add, size=185)
+                        if svg_preview:
+                            st.markdown(f"<div>{svg_preview}</div>", unsafe_allow_html=True)
+                        elif err_preview:
+                            st.warning("Coups PGN non reconnus pour l'aperçu.")
+            else:
+                st.info("Aucun élève disponible dans ce créneau.")
+
             st.markdown("---")
-            if st.button(f"💾 Sauvegarder les ouvertures pour {lieu_ouv}"):
-                st.session_state['db']['repertoires_ouvertures'][lieu_ouv] = ouvertures
-                sauvegarder_base_cloud(st.session_state['db'])
-                st.success(f"Répertoire d'ouvertures enregistré pour {lieu_ouv} !")
+            with st.expander("📊 Vue d'ensemble du Club par Code ECO", expanded=False):
+                lignes_club_eco = []
+                for nom_el, liste_o in sorted(st.session_state['db'].get('ouvertures_eleves', {}).items()):
+                    for o in (liste_o or []):
+                        lignes_club_eco.append({
+                            "Élève": nom_el,
+                            "Couleur": "⚪ Blancs" if o.get("couleur") == "Blancs" else "⚫ Noirs",
+                            "Code ECO": o.get("eco", ""),
+                            "Ouverture": o.get("nom", ""),
+                            "Coups": o.get("moves", ""),
+                            "Notes": o.get("note", "")
+                        })
+                if not lignes_club_eco:
+                    st.info("Aucune ouverture assignée aux élèves pour le moment.")
+                else:
+                    df_club_eco = pd.DataFrame(lignes_club_eco)
+                    c_ec1, c_ec2 = st.columns([2, 1])
+                    with c_ec1:
+                        filtre_txt_eco = st.text_input("🔎 Rechercher un code ECO, une ouverture ou un élève :", key="club_eco_search").strip().lower()
+                    with c_ec2:
+                        filtre_coul_eco = st.selectbox("Couleur :", ["Toutes", "⚪ Blancs", "⚫ Noirs"], key="club_eco_coul")
+                    if filtre_txt_eco:
+                        mask_eco = (
+                            df_club_eco["Code ECO"].str.lower().str.contains(filtre_txt_eco, na=False)
+                            | df_club_eco["Ouverture"].str.lower().str.contains(filtre_txt_eco, na=False)
+                            | df_club_eco["Élève"].str.lower().str.contains(filtre_txt_eco, na=False)
+                        )
+                        df_club_eco = df_club_eco[mask_eco]
+                    if filtre_coul_eco != "Toutes":
+                        df_club_eco = df_club_eco[df_club_eco["Couleur"] == filtre_coul_eco]
+                    st.dataframe(df_club_eco, use_container_width=True, hide_index=True)
