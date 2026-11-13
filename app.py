@@ -74,7 +74,8 @@ def initialiser_memoire_vierge():
         "boutique_donnees": {},
         "equipes_interclubs": {},
         "ffe_joueurs": [],
-        "repertoires_ouvertures": {}
+        "repertoires_ouvertures": {},
+        "auto_sync_ffe": True
     }
 
 def charger_base_cloud():
@@ -183,12 +184,12 @@ ELOS_ESTIMES = {799, 999, 1099, 1199, 1299, 1399}
 
 def extract_elo_val(val):
     """Extrait le score et détermine s'il est FIDE ou National."""
-    val_str = str(val).upper().strip()
+    val_str = re.sub(r'(\d)\s+(\d)', r'\1\2', str(val).upper().strip())
     match = re.search(r'(\d{3,4})', val_str)
     if match:
         score = int(match.group(1))
-        is_fide = 'F' in val_str
-        is_nat = 'N' in val_str or 'E' in val_str
+        is_fide = 'FIDE' in val_str or bool(re.search(r'(?:^|\d|\s)F(?:\s|$)', val_str))
+        is_nat = bool(re.search(r'(?:^|\d|\s)[NE](?:\s|$)', val_str))
         # S'il n'y a ni F ni N mais qu'on a un score, on le considère National par défaut (système FFE)
         if not is_fide and not is_nat:
             is_nat = True
@@ -203,7 +204,8 @@ def est_elo_estime(score, chaine_brute=""):
         return True
     if 700 <= score <= 1399 and score % 100 == 99:
         return True
-    if 'E' in str(chaine_brute).upper() and score < 1400:
+    val_str = str(chaine_brute).upper().strip()
+    if re.search(r'(?:^|\d|\s)E(?:\s|$)', val_str) and 'FIDE' not in val_str:
         return True
     return False
 
@@ -465,6 +467,155 @@ def generer_appariements_suisses(joueurs_scores, elos_dict, historique_rencontre
         
     return appariements_finaux, exempt, rencontres_connues
 
+RESULTATS_MATCH_OPTIONS = ["1 - 0 (Blancs)", "0 - 1 (Noirs)", "0.5 - 0.5 (Nulle)"]
+
+def scores_depuis_resultat(res):
+    """Retourne les points (Blancs, Noirs) associés à un résultat saisi."""
+    if res == "1 - 0 (Blancs)":
+        return 1.0, 0.0
+    if res == "0 - 1 (Noirs)":
+        return 0.0, 1.0
+    if res == "0.5 - 0.5 (Nulle)":
+        return 0.5, 0.5
+    return 0.0, 0.0
+
+def reconstruire_rencontres(adversaires_dict):
+    """Reconstruit l'ensemble canonique des rencontres jouées depuis les listes d'adversaires."""
+    rencontres = set()
+    for j, advs in adversaires_dict.items():
+        for adv in advs:
+            rencontres.add((min(j, adv), max(j, adv)))
+    return rencontres
+
+def appliquer_modifications_ronde_passee(ronde_record, nouveaux_resultats, scores_tournoi, elos_crevette):
+    """Met à jour les résultats d'une ronde passée et ajuste scores + Elos Crevette par delta."""
+    modifs_details = []
+    matchs = ronde_record.get('matchs', [])
+    for m_idx, new_res in nouveaux_resultats.items():
+        if m_idx < 0 or m_idx >= len(matchs):
+            continue
+        m = matchs[m_idx]
+        old_res = m.get('resultat')
+        if new_res == old_res or new_res not in RESULTATS_MATCH_OPTIONS:
+            continue
+
+        old_s1, old_s2 = scores_depuis_resultat(old_res)
+        new_s1, new_s2 = scores_depuis_resultat(new_res)
+        j1, j2 = m['blanc'], m['noir']
+
+        scores_tournoi[j1] = round(scores_tournoi.get(j1, 0.0) + (new_s1 - old_s1), 1)
+        scores_tournoi[j2] = round(scores_tournoi.get(j2, 0.0) + (new_s2 - old_s2), 1)
+
+        elo1 = m.get('elo_blanc_avant', 400)
+        elo2 = m.get('elo_noir_avant', 400)
+        new_e1 = calculer_nouveau_elo(elo1, elo2, new_s1)
+        new_e2 = calculer_nouveau_elo(elo2, elo1, new_s2)
+
+        if "Crevette" in m.get('type_blanc', ''):
+            old_d1 = m.get('crevette_delta_blanc', m.get('elo_blanc_apres', elo1) - elo1)
+            new_d1 = new_e1 - elo1
+            elos_crevette[j1] = max(100, elos_crevette.get(j1, 400) + (new_d1 - old_d1))
+            m['elo_blanc_apres'] = new_e1
+            m['crevette_delta_blanc'] = new_d1
+
+        if "Crevette" in m.get('type_noir', ''):
+            old_d2 = m.get('crevette_delta_noir', m.get('elo_noir_apres', elo2) - elo2)
+            new_d2 = new_e2 - elo2
+            elos_crevette[j2] = max(100, elos_crevette.get(j2, 400) + (new_d2 - old_d2))
+            m['elo_noir_apres'] = new_e2
+            m['crevette_delta_noir'] = new_d2
+
+        m['resultat'] = new_res
+        modifs_details.append(f"Échiquier {m_idx + 1} ({j1} vs {j2}) : {old_res} ➔ {new_res}")
+    return modifs_details
+
+def _retirer_dernier_elem(liste, cible):
+    """Retire la dernière occurrence de cible dans une liste."""
+    for idx in range(len(liste) - 1, -1, -1):
+        if liste[idx] == cible:
+            liste.pop(idx)
+            return
+
+def rouvrir_derniere_ronde(historique_rondes, scores_tournoi, adversaires_tournoi, couleurs_tournoi, elos_crevette):
+    """Annule la validation de la dernière ronde enregistrée et rétablit son état actif pour modification."""
+    if not historique_rondes:
+        return None, reconstruire_rencontres(adversaires_tournoi)
+
+    last_round = historique_rondes.pop()
+    for m in last_round.get('matchs', []):
+        j1, j2 = m['blanc'], m['noir']
+        s1, s2 = scores_depuis_resultat(m.get('resultat'))
+        scores_tournoi[j1] = round(scores_tournoi.get(j1, 0.0) - s1, 1)
+        scores_tournoi[j2] = round(scores_tournoi.get(j2, 0.0) - s2, 1)
+
+        if j1 in adversaires_tournoi:
+            _retirer_dernier_elem(adversaires_tournoi[j1], j2)
+        if j2 in adversaires_tournoi:
+            _retirer_dernier_elem(adversaires_tournoi[j2], j1)
+        if j1 in couleurs_tournoi and couleurs_tournoi[j1]:
+            couleurs_tournoi[j1].pop()
+        if j2 in couleurs_tournoi and couleurs_tournoi[j2]:
+            couleurs_tournoi[j2].pop()
+
+        if "Crevette" in m.get('type_blanc', ''):
+            elo1 = m.get('elo_blanc_avant', 400)
+            d1 = m.get('crevette_delta_blanc', m.get('elo_blanc_apres', elo1) - elo1)
+            elos_crevette[j1] = max(100, elos_crevette.get(j1, 400) - d1)
+        if "Crevette" in m.get('type_noir', ''):
+            elo2 = m.get('elo_noir_avant', 400)
+            d2 = m.get('crevette_delta_noir', m.get('elo_noir_apres', elo2) - elo2)
+            elos_crevette[j2] = max(100, elos_crevette.get(j2, 400) - d2)
+
+    ex = last_round.get('exempt')
+    if ex:
+        scores_tournoi[ex] = round(scores_tournoi.get(ex, 0.0) - 1.0, 1)
+
+    return last_round, reconstruire_rencontres(adversaires_tournoi)
+
+def ajuster_points_eleves(scores_tournoi, historique_ajustements, joueurs_cibles, delta, date_str, motif=""):
+    """Ajoute ou retire des points au tournoi pour un ou plusieurs élèves et journalise l'opération."""
+    if not joueurs_cibles or delta == 0:
+        return False
+    for j in joueurs_cibles:
+        scores_tournoi[j] = round(scores_tournoi.get(j, 0.0) + float(delta), 1)
+    historique_ajustements.append({
+        'date': date_str,
+        'joueurs': list(joueurs_cibles),
+        'delta': float(delta),
+        'motif': str(motif).strip() or "Ajustement manuel"
+    })
+    return True
+
+def annuler_ajustement_points(scores_tournoi, historique_ajustements, idx_aj):
+    """Annule un ajustement de points précédemment enregistré."""
+    if idx_aj < 0 or idx_aj >= len(historique_ajustements):
+        return None
+    aj = historique_ajustements.pop(idx_aj)
+    delta = float(aj.get('delta', 0.0))
+    for j in aj.get('joueurs', []):
+        scores_tournoi[j] = round(scores_tournoi.get(j, 0.0) - delta, 1)
+    return aj
+
+def sauvegarder_etat_tournoi(creneau_tournoi):
+    """Persiste l'état complet du tournoi en préservant les listes de joueurs ajoutés/retirés."""
+    if 'etats_tournois' not in st.session_state['db']:
+        st.session_state['db']['etats_tournois'] = {}
+    etat_existant = st.session_state['db']['etats_tournois'].get(creneau_tournoi, {})
+    etat_existant.update({
+        'scores': dict(st.session_state.get('scores_tournoi', {})),
+        'adversaires': {k: list(v) for k, v in st.session_state.get('adversaires_tournoi', {}).items()},
+        'couleurs': {k: list(v) for k, v in st.session_state.get('couleurs_tournoi', {}).items()},
+        'rencontres': [list(p) for p in st.session_state.get('historique_rencontres', set())],
+        'exempts': list(st.session_state.get('exempts_passes', set())),
+        'ronde': st.session_state.get('ronde_actuelle', 1),
+        'appariements': [list(p) for p in st.session_state.get('appariements_ronde', [])],
+        'exempt_ronde': st.session_state.get('exempt_ronde', None),
+        'historique_rondes': list(st.session_state.get('historique_rondes', [])),
+        'historique_ajustements': list(st.session_state.get('historique_ajustements', []))
+    })
+    st.session_state['db']['etats_tournois'][creneau_tournoi] = etat_existant
+    sauvegarder_base_cloud(st.session_state['db'])
+
 # --- MOTEUR DE SCRAPING FFE ---
 @st.cache_data(ttl=3600)
 def fetch_ffe_team_calendar(team_url):
@@ -513,30 +664,132 @@ def fetch_ffe_team_calendar(team_url):
         except: pass
     return rondes
 
-def telecharger_ffe_calanques():
-    """ Télécharge la liste des joueurs du club depuis le site FFE et formate un DataFrame """
+def normaliser_cle_ffe(texte):
+    """Normalise une chaîne pour le croisement FFE (sans accents, espaces ni tirets)."""
+    return re.sub(r'[^a-z0-9]', '', normaliser_nom(texte))
+
+def extraire_code_licence_ffe(val):
+    """Extrait le code licence FFE brut (ex: 'K12345 (A)' -> 'K12345')."""
+    if pd.isna(val):
+        return ""
+    s = str(val).strip().upper()
+    if not s or s in ["NON CROISÉ", "NON CROISE", "NAN", "NONE", "-"]:
+        return ""
+    m = re.match(r'^([A-Z]\d+|\d{4,})', s)
+    return m.group(1) if m else ""
+
+def nettoyer_chaine_elo_ffe(txt):
+    """Nettoie une cellule Elo FFE tout en conservant le marqueur F (FIDE), N (National) ou E (Estimé)."""
+    if pd.isna(txt):
+        return ""
+    s = re.sub(r'\s+', ' ', str(txt).replace('\xa0', ' ')).strip().upper()
+    s = re.sub(r'(\d)\s+(\d)', r'\1\2', s)
+    if not s or s in ['-', 'NC', 'N/A', 'NONE', 'NAN']:
+        return ""
+    return s
+
+def enrichir_cles_ffe(df_ffe):
+    """Ajoute les clés normalisées de correspondance à un DataFrame FFE (idempotent)."""
+    df_out = df_ffe.copy()
+    for col in ['Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE']:
+        if col not in df_out.columns:
+            df_out[col] = ""
+        df_out[col] = df_out[col].fillna("").astype(str).apply(lambda v: "" if v.strip().lower() in ["nan", "none"] else v.strip())
+    for col in ['Elo_Lent', 'Elo_Rapide', 'Elo_Blitz']:
+        df_out[col] = df_out[col].apply(nettoyer_chaine_elo_ffe)
+
+    has_name_cols = ('Nom' in df_out.columns and 'Prénom' in df_out.columns) or ('Nom_Norm' in df_out.columns and 'Prenom_Norm' in df_out.columns)
+    if has_name_cols:
+        if 'Nom_Norm' not in df_out.columns:
+            df_out['Nom_Norm'] = df_out['Nom'].astype(str).apply(normaliser_cle_ffe)
+        else:
+            df_out['Nom_Norm'] = df_out['Nom_Norm'].astype(str).apply(normaliser_cle_ffe)
+        if 'Prenom_Norm' not in df_out.columns:
+            df_out['Prenom_Norm'] = df_out['Prénom'].astype(str).apply(normaliser_cle_ffe)
+        else:
+            df_out['Prenom_Norm'] = df_out['Prenom_Norm'].astype(str).apply(normaliser_cle_ffe)
+
+        if 'Annee_FFE' not in df_out.columns:
+            df_out['Annee_FFE'] = ""
+        df_out['Annee_FFE'] = df_out['Annee_FFE'].fillna("").astype(str).str.strip()
+        df_out['Cle_Forte'] = df_out['Nom_Norm'] + df_out['Prenom_Norm'] + df_out['Annee_FFE']
+        df_out['Cle_Souple'] = df_out['Nom_Norm'] + df_out['Prenom_Norm']
+        df_out['Cle_Inverse'] = df_out['Prenom_Norm'] + df_out['Nom_Norm']
+    else:
+        for col_c in ['Cle_Forte', 'Cle_Souple', 'Cle_Inverse']:
+            if col_c not in df_out.columns:
+                df_out[col_c] = ""
+            else:
+                df_out[col_c] = df_out[col_c].fillna("").astype(str).apply(normaliser_cle_ffe)
+
+    df_out['Code_FFE'] = df_out['Licence_FFE'].apply(extraire_code_licence_ffe)
+    return df_out
+
+def telecharger_ffe_calanques(timeout=12, silencieux=False):
+    """Télécharge la liste des joueurs du club depuis le site FFE et conserve les marqueurs FIDE/National/Estimé."""
     url = 'https://www.echecs.asso.fr/ListeJoueurs.aspx?Action=JOUEURCLUBREF&ClubRef=2705'
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    }
+    html_content = None
+    last_error = None
+
     try:
-        r = requests.get(url, verify=False, timeout=10)
-        soup = BeautifulSoup(r.content, 'html.parser')
+        r = requests.get(url, headers=headers, verify=False, timeout=timeout)
+        if r.status_code == 200 and ('liste_clair' in r.text or 'liste_fonce' in r.text):
+            html_content = r.content
+    except Exception as e:
+        last_error = e
+
+    if html_content is None:
+        try:
+            url_proxy = f"https://api.allorigins.win/get?url={urllib.parse.quote(url)}"
+            r_proxy = requests.get(url_proxy, timeout=max(timeout, 10))
+            if r_proxy.status_code == 200:
+                contents = r_proxy.json().get('contents', '')
+                if contents and ('liste_clair' in contents or 'liste_fonce' in contents):
+                    html_content = contents
+        except Exception as e:
+            last_error = e
+
+    if html_content is None:
+        if not silencieux and last_error:
+            st.sidebar.error(f"Erreur de téléchargement FFE : {last_error}")
+        return pd.DataFrame()
+
+    try:
+        soup = BeautifulSoup(html_content, 'html.parser')
+        idx_elo, idx_rapide, idx_blitz = 4, 5, 6
+        for tr_head in soup.find_all('tr'):
+            head_cells = [re.sub(r'\s+', ' ', c.get_text(' ', strip=True)).lower() for c in tr_head.find_all(['th', 'td'])]
+            if any('nrffe' in h or 'nom' in h for h in head_cells) and any('rapide' in h for h in head_cells):
+                for idx_c, txt_c in enumerate(head_cells):
+                    if txt_c == 'elo' or (txt_c.startswith('elo') and 'rapide' not in txt_c and 'blitz' not in txt_c):
+                        idx_elo = idx_c
+                    elif 'rapide' in txt_c:
+                        idx_rapide = idx_c
+                    elif 'blitz' in txt_c:
+                        idx_blitz = idx_c
+                break
+
         data = []
         for tr in soup.find_all('tr', class_=['liste_clair', 'liste_fonce']):
             tds = tr.find_all('td')
-            if len(tds) >= 7:
-                nr_ffe = tds[0].text.strip()
-                nom_prenom = tds[1].text.strip()
-                af = tds[2].text.strip()
-                elo = tds[4].text.strip().replace('\xa0', ' ').replace('E', '').replace('F', '').replace('N', '').strip()
-                rapide = tds[5].text.strip().replace('\xa0', ' ').replace('E', '').replace('F', '').replace('N', '').strip()
-                blitz = tds[6].text.strip().replace('\xa0', ' ').replace('E', '').replace('F', '').replace('N', '').strip()
-                
+            if len(tds) > max(idx_elo, idx_rapide, idx_blitz, 2):
+                nr_ffe = tds[0].get_text(strip=True)
+                nom_prenom = re.sub(r'\s+', ' ', tds[1].get_text(' ', strip=True)).strip()
+                af = tds[2].get_text(strip=True)
+                elo = nettoyer_chaine_elo_ffe(tds[idx_elo].get_text(' ', strip=True))
+                rapide = nettoyer_chaine_elo_ffe(tds[idx_rapide].get_text(' ', strip=True))
+                blitz = nettoyer_chaine_elo_ffe(tds[idx_blitz].get_text(' ', strip=True))
+
                 mots = nom_prenom.split()
                 nom_parts = [m for m in mots if m.isupper() or ('-' in m and m.replace('-', '').isupper())]
                 prenom_parts = [m for m in mots if m not in nom_parts]
-                
+
                 nom = " ".join(nom_parts) if nom_parts else nom_prenom
                 prenom = " ".join(prenom_parts) if prenom_parts else ""
-                
+
                 data.append({
                     'Nom': nom,
                     'Prénom': prenom,
@@ -547,29 +800,27 @@ def telecharger_ffe_calanques():
                 })
         df_ffe = pd.DataFrame(data)
         if not df_ffe.empty:
-            df_ffe['Nom_Norm'] = df_ffe['Nom'].astype(str).apply(normaliser_nom)
-            df_ffe['Prenom_Norm'] = df_ffe['Prénom'].astype(str).apply(normaliser_nom)
-            df_ffe['Cle_Forte'] = df_ffe['Nom_Norm'].astype(str) + df_ffe['Prenom_Norm'].astype(str)
-            df_ffe['Cle_Souple'] = df_ffe['Nom_Norm'].astype(str) + df_ffe['Prenom_Norm'].astype(str)
-            return df_ffe[['Cle_Forte', 'Cle_Souple', 'Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE']]
+            df_ffe = enrichir_cles_ffe(df_ffe)
+            return df_ffe[['Nom_Norm', 'Prenom_Norm', 'Annee_FFE', 'Cle_Forte', 'Cle_Souple', 'Cle_Inverse', 'Code_FFE', 'Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE']]
     except Exception as e:
-        st.sidebar.error(f"Erreur de téléchargement FFE : {e}")
+        if not silencieux:
+            st.sidebar.error(f"Erreur d'analyse FFE : {e}")
     return pd.DataFrame()
 
 def analyser_fichier_ffe(fichier):
-    """ Analyse le CSV de la FFE et extrait les 3 colonnes d'Elos. """
+    """Analyse le CSV de la FFE et extrait les 3 colonnes d'Elos."""
     try:
         if not isinstance(fichier, str):
             with open("base_ffe_locale_tmp.csv", "wb") as f: f.write(fichier.getbuffer())
             fichier_a_lire = "base_ffe_locale_tmp.csv"
         else: fichier_a_lire = fichier
-            
+
         try: df_ffe = pd.read_csv(fichier_a_lire, sep=None, engine='python', encoding='utf-8')
         except UnicodeDecodeError: df_ffe = pd.read_csv(fichier_a_lire, sep=None, engine='python', encoding='latin1')
-            
+
         col_nom = next((c for c in df_ffe.columns if "nom" in str(c).lower() and "prenom" not in str(c).lower() and "prénom" not in str(c).lower()), None)
         col_prenom = next((c for c in df_ffe.columns if "prenom" in str(c).lower() or "prénom" in str(c).lower()), None)
-        
+
         col_lent = next((c for c in df_ffe.columns if "elo" in str(c).lower() and "rapide" not in str(c).lower() and "blitz" not in str(c).lower()), None)
         col_rapide = next((c for c in df_ffe.columns if "rapide" in str(c).lower()), None)
         col_blitz = next((c for c in df_ffe.columns if "blitz" in str(c).lower()), None)
@@ -577,23 +828,126 @@ def analyser_fichier_ffe(fichier):
         col_dna = next((c for c in df_ffe.columns if any(m in str(c).lower() for m in ["dna", "né", "naissance"])), None)
 
         if col_nom and col_prenom:
-            df_ffe['Nom_Norm'] = df_ffe[col_nom].astype(str).apply(normaliser_nom)
-            df_ffe['Prenom_Norm'] = df_ffe[col_prenom].astype(str).apply(normaliser_nom)
+            df_ffe['Nom'] = df_ffe[col_nom].astype(str)
+            df_ffe['Prénom'] = df_ffe[col_prenom].astype(str)
             if col_dna: df_ffe['Annee_FFE'] = df_ffe[col_dna].astype(str).str.extract(r'(\d{4})')[0].fillna("")
             else: df_ffe['Annee_FFE'] = ""
-            df_ffe['Cle_Forte'] = df_ffe['Nom_Norm'].astype(str) + df_ffe['Prenom_Norm'].astype(str) + df_ffe['Annee_FFE'].astype(str)
-            df_ffe['Cle_Souple'] = df_ffe['Nom_Norm'].astype(str) + df_ffe['Prenom_Norm'].astype(str)
-            
+
             df_ffe['Elo_Lent'] = df_ffe[col_lent].astype(str) if col_lent else ""
             df_ffe['Elo_Rapide'] = df_ffe[col_rapide].astype(str) if col_rapide else ""
             df_ffe['Elo_Blitz'] = df_ffe[col_blitz].astype(str) if col_blitz else ""
             df_ffe['Licence_FFE'] = df_ffe[col_licence].astype(str) if col_licence else "Non croisé"
-            
-            return df_ffe[['Cle_Forte', 'Cle_Souple', 'Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE']]
-    except Exception as e: 
+
+            df_ffe = enrichir_cles_ffe(df_ffe)
+            return df_ffe[['Nom_Norm', 'Prenom_Norm', 'Annee_FFE', 'Cle_Forte', 'Cle_Souple', 'Cle_Inverse', 'Code_FFE', 'Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE']]
+    except Exception as e:
         st.sidebar.error(f"Erreur d'analyse FFE: {e}")
         return pd.DataFrame()
     return pd.DataFrame()
+
+def recroiser_et_maj_ffe(df_base, df_ffe):
+    """Croise une table d'adhérents avec les données FFE et met à jour Elos (FIDE/Nationaux) et licences."""
+    if df_base is None or df_base.empty or df_ffe is None or df_ffe.empty:
+        return df_base, [], 0
+
+    df_res = df_base.copy()
+    for col, defaut in [('Elo_Lent', ''), ('Elo_Rapide', ''), ('Elo_Blitz', ''), ('Licence_FFE', 'Non croisé')]:
+        if col not in df_res.columns:
+            df_res[col] = defaut
+        df_res[col] = df_res[col].fillna(defaut).astype(str).apply(lambda v: defaut if v.strip().lower() in ['nan', 'none', ''] else v.strip())
+
+    df_ffe_norm = enrichir_cles_ffe(df_ffe)
+    by_code, by_forte, by_souple = {}, {}, {}
+    inverse_counts, by_inverse = {}, {}
+
+    for _, f_row in df_ffe_norm.iterrows():
+        rec = {
+            'Elo_Lent': f_row['Elo_Lent'],
+            'Elo_Rapide': f_row['Elo_Rapide'],
+            'Elo_Blitz': f_row['Elo_Blitz'],
+            'Licence_FFE': f_row['Licence_FFE'] or 'Non croisé',
+        }
+        code = f_row.get('Code_FFE', '')
+        if code and code not in by_code:
+            by_code[code] = rec
+        cle_f = f_row.get('Cle_Forte', '')
+        cle_s = f_row.get('Cle_Souple', '')
+        if cle_f and cle_f != cle_s and cle_f not in by_forte:
+            by_forte[cle_f] = rec
+        if cle_s and cle_s not in by_souple:
+            by_souple[cle_s] = rec
+        cle_i = f_row.get('Cle_Inverse', '')
+        if cle_i and cle_i != cle_s:
+            inverse_counts[cle_i] = inverse_counts.get(cle_i, 0) + 1
+            by_inverse[cle_i] = rec
+
+    by_inverse = {k: v for k, v in by_inverse.items() if inverse_counts.get(k, 0) == 1}
+
+    changements = []
+    nb_matches = 0
+
+    for idx, row in df_res.iterrows():
+        if str(row.get('Type', '')).strip().lower() == 'boutique':
+            continue
+
+        code_existant = extraire_code_licence_ffe(row.get('Licence_FFE', ''))
+        nom_n = normaliser_cle_ffe(row.get('Nom', ''))
+        prenom_n = normaliser_cle_ffe(row.get('Prénom', ''))
+        m_an = re.search(r'(\d{4})', str(row.get('Date de naissance', '')))
+        annee_ha = m_an.group(1) if m_an else ""
+
+        cle_forte = nom_n + prenom_n + annee_ha
+        cle_souple = nom_n + prenom_n
+
+        match = None
+        if code_existant and code_existant in by_code:
+            match = by_code[code_existant]
+        elif annee_ha and cle_forte in by_forte:
+            match = by_forte[cle_forte]
+        elif cle_souple and cle_souple in by_souple:
+            match = by_souple[cle_souple]
+        elif cle_souple and cle_souple in by_inverse:
+            match = by_inverse[cle_souple]
+
+        if match:
+            nb_matches += 1
+            diffs_eleve = []
+            for col in ['Elo_Rapide', 'Elo_Lent', 'Elo_Blitz', 'Licence_FFE']:
+                old_v = str(row.get(col, '')).strip()
+                new_v = str(match[col]).strip()
+                if old_v != new_v:
+                    df_res.at[idx, col] = new_v
+                    if col != 'Licence_FFE' or old_v == 'Non croisé':
+                        diffs_eleve.append(f"{col.replace('Elo_', '')}: {old_v or '-'} ➔ {new_v or '-'}")
+            if diffs_eleve:
+                identite = row.get('Identité', f"{row.get('Prénom', '')} {row.get('Nom', '')}".strip())
+                changements.append(f"**{identite}** ({', '.join(diffs_eleve)})")
+
+    return df_res, changements, nb_matches
+
+def actualiser_elos_ffe_automatique(silencieux=False):
+    """Télécharge la liste FFE du club et met à jour automatiquement les Elos FIDE & Nationaux dans la base."""
+    df_ffe_scrap = telecharger_ffe_calanques(timeout=6 if silencieux else 15, silencieux=silencieux)
+    if df_ffe_scrap.empty:
+        return False, [], 0
+
+    st.session_state['df_ffe'] = df_ffe_scrap
+    df_actuel = st.session_state.get('df_adherents', pd.DataFrame())
+    if df_actuel is None or df_actuel.empty:
+        return True, [], 0
+
+    df_maj, changements, nb_matches = recroiser_et_maj_ffe(df_actuel, df_ffe_scrap)
+    if changements:
+        st.session_state['df_adherents'] = df_maj
+        sauvegarder_adherents_cloud(df_maj)
+
+    st.session_state['ffe_last_sync_info'] = {
+        'heure': datetime.now().strftime("%d/%m/%Y à %H:%M"),
+        'nb_ffe': len(df_ffe_scrap),
+        'nb_matches': nb_matches,
+        'changements': changements,
+    }
+    return True, changements, nb_matches
 
 # --- HELLOASSO LOGIC ---
 def affectations_automatiques(row):
@@ -848,6 +1202,13 @@ if 'affectations_creneaux' in st.session_state['db']:
         if "Lundi - Sainte-Trinité (CP)" in aff: del aff["Lundi - Sainte-Trinité (CP)"]
         if "Mardi - Sainte-Trinité (CE1)" in aff: del aff["Mardi - Sainte-Trinité (CE1)"]
 
+# --- ACTUALISATION AUTOMATIQUE FFE AU DÉMARRAGE (1 FOIS PAR SESSION) ---
+if st.session_state['db'].get('auto_sync_ffe', True) and 'ffe_auto_sync_done' not in st.session_state and not st.session_state['df_adherents'].empty:
+    st.session_state['ffe_auto_sync_done'] = True
+    ok_ffe, chang_ffe, nb_m_ffe = actualiser_elos_ffe_automatique(silencieux=True)
+    if ok_ffe and chang_ffe:
+        st.session_state['ffe_auto_toast'] = f"✅ {len(chang_ffe)} élève(s) mis à jour depuis la FFE (Elos FIDE / Nationaux)."
+
 # --- NAVIGATION DES MODULES ---
 df = st.session_state['df_adherents']
 date_jour = datetime.now().strftime("%d/%m/%Y")
@@ -917,19 +1278,44 @@ if st.sidebar.button("🔄 Rafraîchir les données (Cloud)"):
         if db_loaded: st.session_state['db'] = db_loaded
         df_loaded = charger_adherents_cloud()
         if df_loaded is not None and not df_loaded.empty: st.session_state['df_adherents'] = df_loaded
+        st.session_state.pop('tournoi_en_cours', None)
         st.rerun()
 
 st.sidebar.markdown("---")
-st.sidebar.header("1️⃣ Base FFE (Licences)")
+st.sidebar.header("1️⃣ Base FFE (Elos FIDE & Nationaux)")
 
-if st.sidebar.button("⬇️ Télécharger Licences depuis FFE (Calanques)"):
-    with st.spinner("Récupération depuis echecs.asso.fr..."):
-        df_ffe_scrap = telecharger_ffe_calanques()
-        if not df_ffe_scrap.empty:
-            st.session_state['df_ffe'] = df_ffe_scrap
-            st.sidebar.success("✅ Liste du club chargée en mémoire !")
+auto_ffe_pref = st.session_state['db'].get('auto_sync_ffe', True)
+nouvelle_pref_ffe = st.sidebar.checkbox("Actualisation auto au démarrage", value=auto_ffe_pref, key="chk_auto_sync_ffe")
+if nouvelle_pref_ffe != auto_ffe_pref:
+    st.session_state['db']['auto_sync_ffe'] = nouvelle_pref_ffe
+    sauvegarder_base_cloud(st.session_state['db'])
+
+if st.session_state.get('ffe_auto_toast'):
+    st.sidebar.success(st.session_state['ffe_auto_toast'])
+    del st.session_state['ffe_auto_toast']
+
+if st.sidebar.button("🔄 Actualiser les Elos FFE (FIDE & Nationaux)"):
+    with st.spinner("Récupération et mise à jour depuis echecs.asso.fr..."):
+        ok_ffe, chang_ffe, nb_m_ffe = actualiser_elos_ffe_automatique(silencieux=False)
+        if ok_ffe:
+            st.session_state['ffe_manual_report'] = (chang_ffe, nb_m_ffe)
+            st.rerun()
         else:
-            st.sidebar.warning("❌ Impossible de récupérer la liste FFE.")
+            st.sidebar.warning("❌ Impossible de récupérer la liste FFE pour le moment.")
+
+if st.session_state.get('ffe_manual_report'):
+    chang_rep, nb_m_rep = st.session_state.pop('ffe_manual_report')
+    if chang_rep:
+        st.sidebar.success(f"✅ {len(chang_rep)} élève(s) mis à jour ({nb_m_rep} licencié(s) reconnu(s)) !")
+        with st.sidebar.expander("Voir les Elos mis à jour", expanded=True):
+            for c_txt in chang_rep:
+                st.markdown(f"- {c_txt}")
+    else:
+        st.sidebar.info(f"👌 Déjà à jour ({nb_m_rep} licencié(s) FFE vérifié(s)).")
+
+if st.session_state.get('ffe_last_sync_info'):
+    info_sync = st.session_state['ffe_last_sync_info']
+    st.sidebar.caption(f"Dernière synchro FFE : {info_sync['heure']} ({info_sync['nb_matches']} élève(s) relié(s))")
 
 fichier_ffe = st.sidebar.file_uploader("Ou Fichier FFE (Glissez CSV ici)", type=['csv', 'xls', 'xlsx'])
 if fichier_ffe:
@@ -938,41 +1324,15 @@ if fichier_ffe:
         st.session_state['df_ffe'] = df_ffe
         st.sidebar.success("Fichier FFE chargé en mémoire !")
 
-if 'df_ffe' in st.session_state: 
-    st.sidebar.info("✅ FFE en mémoire.")
-    if st.sidebar.button("🔄 Recroiser les Licences FFE"):
+if 'df_ffe' in st.session_state:
+    if st.sidebar.button("🔄 Recroiser avec le fichier FFE en mémoire"):
         if 'df_adherents' in st.session_state and not st.session_state['df_adherents'].empty:
             with st.spinner("Recherche des correspondances dans la base FFE (3 Elos)..."):
-                df_base = st.session_state['df_adherents'].copy()
-                df_base['Nom_Norm'] = df_base['Nom'].astype(str).apply(normaliser_nom)
-                df_base['Prenom_Norm'] = df_base['Prénom'].astype(str).apply(normaliser_nom)
-                df_base['Annee_HA'] = df_base['Date de naissance'].astype(str).str.extract(r'(\d{4})')[0].fillna("")
-                df_base['Cle_Forte'] = df_base['Nom_Norm'].astype(str) + df_base['Prenom_Norm'].astype(str) + df_base['Annee_HA'].astype(str)
-                df_base['Cle_Souple'] = df_base['Nom_Norm'].astype(str) + df_base['Prenom_Norm'].astype(str)
-                
-                df_ffe_strict = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Forte'])
-                df_ffe_souple = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Souple'])
-                
-                colonnes_a_supprimer = ['Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE', 'Elo_FFE']
-                df_base = df_base.drop(columns=[c for c in colonnes_a_supprimer if c in df_base.columns], errors='ignore')
-                
-                df_base = pd.merge(df_base, df_ffe_strict[['Cle_Forte', 'Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE']], on='Cle_Forte', how='left')
-                
-                manquants = df_base['Licence_FFE'].isna() | (df_base['Licence_FFE'] == "Non croisé")
-                if manquants.any():
-                    df_base_m = df_base[manquants].drop(columns=['Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE'], errors='ignore')
-                    df_base_m = pd.merge(df_base_m, df_ffe_souple[['Cle_Souple', 'Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE']], on='Cle_Souple', how='left')
-                    df_base.loc[manquants, 'Elo_Lent'] = df_base_m['Elo_Lent'].values
-                    df_base.loc[manquants, 'Elo_Rapide'] = df_base_m['Elo_Rapide'].values
-                    df_base.loc[manquants, 'Elo_Blitz'] = df_base_m['Elo_Blitz'].values
-                    df_base.loc[manquants, 'Licence_FFE'] = df_base_m['Licence_FFE'].values
-
-                df_base['Licence_FFE'] = df_base['Licence_FFE'].fillna("Non croisé")
-                df_base = df_base.drop(columns=['Cle_Forte', 'Cle_Souple', 'Nom_Norm', 'Prenom_Norm', 'Annee_HA'])
-                
-                st.session_state['df_adherents'] = df_base
-                sauvegarder_adherents_cloud(df_base)
-                st.sidebar.success("✅ Licences et Elos recroisés avec succès !")
+                df_base, chang_csv, nb_m_csv = recroiser_et_maj_ffe(st.session_state['df_adherents'], st.session_state['df_ffe'])
+                if chang_csv:
+                    st.session_state['df_adherents'] = df_base
+                    sauvegarder_adherents_cloud(df_base)
+                st.session_state['ffe_manual_report'] = (chang_csv, nb_m_csv)
                 st.rerun()
 
 st.sidebar.markdown("---")
@@ -1015,30 +1375,7 @@ if st.sidebar.button("⬇️ Lancer la Synchronisation HelloAsso"):
 
                     if not nouveaux.empty:
                         if 'df_ffe' in st.session_state and not st.session_state['df_ffe'].empty:
-                            nouveaux['Nom_Norm'] = nouveaux['Nom'].astype(str).apply(normaliser_nom)
-                            nouveaux['Prenom_Norm'] = nouveaux['Prénom'].astype(str).apply(normaliser_nom)
-                            nouveaux['Annee_HA'] = nouveaux['Date de naissance'].astype(str).str.extract(r'(\d{4})')[0].fillna("")
-                            
-                            nouveaux['Cle_Forte'] = nouveaux['Nom_Norm'].astype(str) + nouveaux['Prenom_Norm'].astype(str) + nouveaux['Annee_HA'].astype(str)
-                            nouveaux['Cle_Souple'] = nouveaux['Nom_Norm'].astype(str) + nouveaux['Prenom_Norm'].astype(str)
-                            
-                            df_ffe_strict = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Forte'])
-                            df_ffe_souple = st.session_state['df_ffe'].drop_duplicates(subset=['Cle_Souple'])
-                            
-                            nouveaux = nouveaux.drop(columns=['Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE', 'Elo_FFE'], errors='ignore')
-                            nouveaux = pd.merge(nouveaux, df_ffe_strict[['Cle_Forte', 'Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE']], on='Cle_Forte', how='left')
-                            
-                            manquants = nouveaux['Licence_FFE'].isna()
-                            if manquants.any():
-                                df_base_m = nouveaux[manquants].drop(columns=['Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE'], errors='ignore')
-                                df_base_m = pd.merge(df_base_m, df_ffe_souple[['Cle_Souple', 'Elo_Lent', 'Elo_Rapide', 'Elo_Blitz', 'Licence_FFE']], on='Cle_Souple', how='left')
-                                nouveaux.loc[manquants, 'Elo_Lent'] = df_base_m['Elo_Lent'].values
-                                nouveaux.loc[manquants, 'Elo_Rapide'] = df_base_m['Elo_Rapide'].values
-                                nouveaux.loc[manquants, 'Elo_Blitz'] = df_base_m['Elo_Blitz'].values
-                                nouveaux.loc[manquants, 'Licence_FFE'] = df_base_m['Licence_FFE'].values
-
-                            nouveaux['Licence_FFE'] = nouveaux['Licence_FFE'].fillna("Non croisé")
-                            nouveaux = nouveaux.drop(columns=['Cle_Forte', 'Cle_Souple', 'Nom_Norm', 'Prenom_Norm', 'Annee_HA'])
+                            nouveaux, _, _ = recroiser_et_maj_ffe(nouveaux, st.session_state['df_ffe'])
                         else:
                             nouveaux['Licence_FFE'] = "Non croisé"
 
@@ -1126,6 +1463,7 @@ else:
                                 st.session_state['db']['validations_promo'][nv_identite] = False
                                 st.session_state['db']['sorties_manuelles'][nv_identite] = "-"
                                 st.session_state['db']['tshirts_donnes'][nv_identite] = False
+                                st.session_state['db']['cartes_membres'][nv_identite] = {"Cassis": False, "Carnoux": False}
                                 sauvegarder_adherents_cloud(st.session_state['df_adherents'])
                                 sauvegarder_base_cloud(st.session_state['db'])
                                 st.success(f"✅ {nv_identite} a été ajouté avec succès !")
@@ -1164,6 +1502,7 @@ else:
                                 if nv_identite not in st.session_state['db']['validations_promo']: st.session_state['db']['validations_promo'][nv_identite] = st.session_state['db']['validations_promo'].get(identite_cible, False)
                                 if nv_identite not in st.session_state['db']['sorties_manuelles']: st.session_state['db']['sorties_manuelles'][nv_identite] = st.session_state['db']['sorties_manuelles'].get(identite_cible, "-")
                                 if nv_identite not in st.session_state['db']['tshirts_donnes']: st.session_state['db']['tshirts_donnes'][nv_identite] = st.session_state['db']['tshirts_donnes'].get(identite_cible, False)
+                                if nv_identite not in st.session_state['db']['cartes_membres']: st.session_state['db']['cartes_membres'][nv_identite] = dict(st.session_state['db']['cartes_membres'].get(identite_cible, {"Cassis": False, "Carnoux": False}))
                                     
                                 row_updated = st.session_state['df_adherents'].loc[idx_cible]
                                 creneaux_autos = affectations_automatiques(row_updated)
@@ -1183,6 +1522,7 @@ else:
                                     st.session_state['db']['validations_promo'].pop(identite_cible, None)
                                     st.session_state['db']['sorties_manuelles'].pop(identite_cible, None)
                                     st.session_state['db']['tshirts_donnes'].pop(identite_cible, None)
+                                    st.session_state['db']['cartes_membres'].pop(identite_cible, None)
 
                                 sauvegarder_base_cloud(st.session_state['db'])
                                 sauvegarder_adherents_cloud(st.session_state['df_adherents'])
@@ -1207,10 +1547,11 @@ else:
                 
                 contact["Promo Validée ✅"] = "Oui" if st.session_state['db']['validations_promo'].get(contact["Identité"], False) else "Non"
                 contact["T-shirt Offert Donné 👕"] = "Oui" if st.session_state['db']['tshirts_donnes'].get(contact["Identité"], False) else "Non"
+                contact["Carte Centre Culturel 🎟️"] = "Oui" if st.session_state['db']['cartes_membres'].get(contact["Identité"], {}).get("Cassis", False) else "Non"
                 
                 st.markdown("---")
                 c_info1, c_info2 = st.columns(2)
-                infos = {k: v for k, v in contact.items() if k not in ["_orig_index", "Identité", "Elo_Lent", "Elo_Rapide", "Elo_Blitz", "Elo_FFE"] and str(v).strip() and str(v) != "nan"}
+                infos = {k: v for k, v in contact.items() if k not in ["_orig_index", "Identité", "Elo_FFE"] and str(v).strip() and str(v) != "nan"}
                 items = list(infos.items())
                 mid = (len(items) + 1) // 2
                 for i, (k, v) in enumerate(items):
@@ -1260,6 +1601,7 @@ else:
             df_admin['Promo Validée ✅'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['validations_promo'].get(x, False))
             df_admin['Sortie Seul'] = df_admin.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Identité'], r['Sortie Seul']), axis=1)
             df_admin['T-shirt donné 👕'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['tshirts_donnes'].get(x, False))
+            df_admin['Carte Centre Culturel 🎟️'] = df_admin['Identité'].apply(lambda x: bool(st.session_state['db']['cartes_membres'].get(x, {}).get('Cassis', False)))
             
             df_admin["_orig_index"] = df_admin.index 
             
@@ -1270,11 +1612,11 @@ else:
             df_admin.insert(0, "👤 Élève (Fige)", index_names)
             df_display = df_admin.set_index("_orig_index")
             
-            colonnes_a_cacher = ["Identité", "Nom payeur", "Prénom payeur", "Email payeur", "ID_Dossier", "_orig_index", "Elo_Lent", "Elo_Rapide", "Elo_Blitz", "Elo_FFE"]
+            colonnes_a_cacher = ["Identité", "Nom payeur", "Prénom payeur", "Email payeur", "ID_Dossier", "_orig_index", "Elo_FFE"]
             colonnes_possibles = [c for c in df_display.columns if c not in colonnes_a_cacher]
-            ordre_prefere = ["👤 Élève (Fige)", "T-shirt donné 👕", "Promo Validée ✅", "Nom", "Prénom", "Licence_FFE", "Type", "Elo Actif ⚡", "Catégorie Elo", "Formule", "Campagne", "Sortie Seul", "N° Portable", "EMail"]
+            ordre_prefere = ["👤 Élève (Fige)", "Carte Centre Culturel 🎟️", "T-shirt donné 👕", "Promo Validée ✅", "Nom", "Prénom", "Licence_FFE", "Type", "Elo Actif ⚡", "Catégorie Elo", "Elo_Rapide", "Elo_Lent", "Elo_Blitz", "Formule", "Campagne", "Sortie Seul", "N° Portable", "EMail"]
             colonnes_possibles = sorted(colonnes_possibles, key=lambda x: ordre_prefere.index(x) if x in ordre_prefere else 999)
-            colonnes_par_defaut = [c for c in ["👤 Élève (Fige)", "T-shirt donné 👕", "Promo Validée ✅", "Licence_FFE", "Type", "Elo Actif ⚡", "Catégorie Elo", "Formule", "Campagne"] if c in colonnes_possibles]
+            colonnes_par_defaut = [c for c in ["👤 Élève (Fige)", "Carte Centre Culturel 🎟️", "T-shirt donné 👕", "Promo Validée ✅", "Licence_FFE", "Type", "Elo Actif ⚡", "Catégorie Elo", "Formule", "Campagne"] if c in colonnes_possibles]
             
             st.markdown("##### ⚙️ Affichage sur mesure")
             colonnes_choisies = st.multiselect("Sélectionnez les colonnes à afficher :", options=[c for c in colonnes_possibles if c != "👤 Élève (Fige)"], default=[c for c in colonnes_par_defaut if c != "👤 Élève (Fige)"])
@@ -1285,11 +1627,15 @@ else:
                 df_display[colonnes_finales], use_container_width=True,
                 column_config={
                     "👤 Élève (Fige)": st.column_config.Column("👤 Élève (Bloqué)", disabled=True),
+                    "Carte Centre Culturel 🎟️": st.column_config.CheckboxColumn("Carte Centre Culturel 🎟️"),
                     "Promo Validée ✅": st.column_config.CheckboxColumn("Promo Validée ✅"),
                     "T-shirt donné 👕": st.column_config.CheckboxColumn("T-shirt donné 👕"),
                     "Sortie Seul": st.column_config.SelectboxColumn("Sortie Seul", options=["✅ OUI", "❌ NON", "N/A (École)", "-"]),
                     "Elo Actif ⚡": st.column_config.Column(disabled=True),
-                    "Catégorie Elo": st.column_config.Column(disabled=True)
+                    "Catégorie Elo": st.column_config.Column(disabled=True),
+                    "Elo_Rapide": st.column_config.Column(disabled=True),
+                    "Elo_Lent": st.column_config.Column(disabled=True),
+                    "Elo_Blitz": st.column_config.Column(disabled=True)
                 }
             )
             
@@ -1313,6 +1659,11 @@ else:
                                 if col == "Promo Validée ✅": st.session_state['db']['validations_promo'][identite_actuelle] = bool(new_val)
                                 elif col == "Sortie Seul": st.session_state['db']['sorties_manuelles'][identite_actuelle] = new_val
                                 elif col == "T-shirt donné 👕": st.session_state['db']['tshirts_donnes'][identite_actuelle] = bool(new_val)
+                                elif col == "Carte Centre Culturel 🎟️":
+                                    if identite_actuelle not in st.session_state['db']['cartes_membres']:
+                                        st.session_state['db']['cartes_membres'][identite_actuelle] = {"Cassis": False, "Carnoux": False}
+                                    st.session_state['db']['cartes_membres'][identite_actuelle]["Cassis"] = bool(new_val)
+                                    st.session_state[f"carte_Cassis_{identite_actuelle}"] = bool(new_val)
                                 elif col in ["N° Portable", "N° Portable 2 (en cas d'urgence)"]: st.session_state['df_adherents'].at[idx_main, col] = format_phone(new_val)
                                 else: st.session_state['df_adherents'].at[idx_main, col] = new_val
                                     
@@ -1856,14 +2207,16 @@ else:
 
                 if 'tournoi_en_cours' not in st.session_state or st.session_state.get('tournoi_en_cours') != creneau_tournoi:
                     if etat_sauve:
-                        st.session_state['scores_tournoi'] = etat_sauve.get('scores', {j: 0.0 for j in joueurs_inscrits})
-                        st.session_state['adversaires_tournoi'] = etat_sauve.get('adversaires', {j: [] for j in joueurs_inscrits})
-                        st.session_state['couleurs_tournoi'] = etat_sauve.get('couleurs', {j: [] for j in joueurs_inscrits})
+                        st.session_state['scores_tournoi'] = dict(etat_sauve.get('scores', {j: 0.0 for j in joueurs_inscrits}))
+                        st.session_state['adversaires_tournoi'] = {k: list(v) for k, v in etat_sauve.get('adversaires', {j: [] for j in joueurs_inscrits}).items()}
+                        st.session_state['couleurs_tournoi'] = {k: list(v) for k, v in etat_sauve.get('couleurs', {j: [] for j in joueurs_inscrits}).items()}
                         st.session_state['historique_rencontres'] = set(tuple(p) for p in etat_sauve.get('rencontres', []))
                         st.session_state['exempts_passes'] = set(etat_sauve.get('exempts', []))
                         st.session_state['ronde_actuelle'] = etat_sauve.get('ronde', 1)
-                        st.session_state['appariements_ronde'] = etat_sauve.get('appariements', [])
+                        st.session_state['appariements_ronde'] = [tuple(p) for p in etat_sauve.get('appariements', [])]
                         st.session_state['exempt_ronde'] = etat_sauve.get('exempt_ronde', None)
+                        st.session_state['historique_rondes'] = list(etat_sauve.get('historique_rondes', []))
+                        st.session_state['historique_ajustements'] = list(etat_sauve.get('historique_ajustements', []))
                         st.session_state['tournoi_en_cours'] = creneau_tournoi
                     else:
                         st.session_state['scores_tournoi'] = {j: 0.0 for j in joueurs_inscrits}
@@ -1874,13 +2227,20 @@ else:
                         st.session_state['ronde_actuelle'] = 1
                         st.session_state['appariements_ronde'] = []
                         st.session_state['exempt_ronde'] = None
+                        st.session_state['historique_rondes'] = []
+                        st.session_state['historique_ajustements'] = []
                         st.session_state['tournoi_en_cours'] = creneau_tournoi
 
                 # Sécurité sur les clés
+                if 'historique_rondes' not in st.session_state: st.session_state['historique_rondes'] = []
+                if 'historique_ajustements' not in st.session_state: st.session_state['historique_ajustements'] = []
                 for j in joueurs_inscrits:
                     if j not in st.session_state['scores_tournoi']: st.session_state['scores_tournoi'][j] = 0.0
                     if j not in st.session_state['adversaires_tournoi']: st.session_state['adversaires_tournoi'][j] = []
                     if j not in st.session_state['couleurs_tournoi']: st.session_state['couleurs_tournoi'][j] = []
+
+                if st.session_state.get('msg_tournoi_action'):
+                    st.success(st.session_state.pop('msg_tournoi_action'))
 
                 # --- 3. GRILLE AMÉRICAINE DU TOURNOI ---
                 with st.expander(f"📊 Voir la Grille Américaine (Classement en direct — Ronde {st.session_state['ronde_actuelle']})"):
@@ -1916,28 +2276,165 @@ else:
                         df_grille.index += 1
                         st.dataframe(df_grille, use_container_width=True)
 
+                # --- 3b. AJOUTER / ENLEVER DES POINTS À UN OU DES ÉLÈVES ---
+                with st.expander("🎯 Ajouter / Enlever des points à un ou des élèves"):
+                    st.caption("Modifiez le total de points du tournoi pour un ou plusieurs élèves (bonus, pénalité ou correction manuelle).")
+                    tous_candidats_pts = sorted(list(set(joueurs_inscrits) | set(st.session_state['scores_tournoi'].keys())))
+                    eleves_pts_cibles = st.multiselect(
+                        "Sélectionner un ou plusieurs élèves :",
+                        options=tous_candidats_pts,
+                        key=f"adj_eleves_{creneau_tournoi}"
+                    )
+                    col_adj1, col_adj2 = st.columns([1, 2])
+                    delta_pts = col_adj1.number_input(
+                        "Points à ajouter (+) ou enlever (-) :",
+                        min_value=-50.0,
+                        max_value=50.0,
+                        value=1.0,
+                        step=0.5,
+                        format="%.1f",
+                        key=f"adj_delta_{creneau_tournoi}"
+                    )
+                    motif_pts = col_adj2.text_input(
+                        "Motif (optionnel) :",
+                        placeholder="Ex : Bonus exercice, Retard, Correction ronde...",
+                        key=f"adj_motif_{creneau_tournoi}"
+                    )
+                    if st.button("💾 Appliquer cet ajustement de points", key=f"btn_adj_pts_{creneau_tournoi}"):
+                        if not eleves_pts_cibles:
+                            st.warning("⚠️ Sélectionnez au moins un élève.")
+                        elif delta_pts == 0.0:
+                            st.warning("⚠️ Indiquez un nombre de points différent de 0.")
+                        else:
+                            ajuster_points_eleves(
+                                st.session_state['scores_tournoi'],
+                                st.session_state['historique_ajustements'],
+                                eleves_pts_cibles,
+                                delta_pts,
+                                date_jour,
+                                motif_pts
+                            )
+                            sauvegarder_etat_tournoi(creneau_tournoi)
+                            signe = "+" if delta_pts > 0 else ""
+                            st.session_state['msg_tournoi_action'] = f"🎯 Ajustement appliqué ({signe}{delta_pts} pt(s)) pour : {', '.join(eleves_pts_cibles)}."
+                            st.rerun()
+
+                    hist_aj = st.session_state.get('historique_ajustements', [])
+                    if hist_aj:
+                        st.markdown("**Historique des ajustements manuels :**")
+                        for idx_aj in range(len(hist_aj) - 1, -1, -1):
+                            aj = hist_aj[idx_aj]
+                            d_aj = aj.get('delta', 0.0)
+                            signe_aj = "+" if d_aj > 0 else ""
+                            c_aj1, c_aj2 = st.columns([4, 1])
+                            c_aj1.write(f"• {aj.get('date', '-')} — **{signe_aj}{d_aj} pt(s)** pour {', '.join(aj.get('joueurs', []))} *({aj.get('motif', 'Ajustement manuel')})*")
+                            if c_aj2.button("↩️ Annuler", key=f"undo_aj_{creneau_tournoi}_{idx_aj}"):
+                                annule = annuler_ajustement_points(st.session_state['scores_tournoi'], st.session_state['historique_ajustements'], idx_aj)
+                                if annule:
+                                    sauvegarder_etat_tournoi(creneau_tournoi)
+                                    st.session_state['msg_tournoi_action'] = f"↩️ Ajustement annulé pour {', '.join(annule.get('joueurs', []))}."
+                                    st.rerun()
+
+                # --- 3c. REVENIR SUR UNE RONDE / JOURNÉE PASSÉE ET MODIFIER UN RÉSULTAT ---
+                with st.expander("🕒 Revenir sur une ronde / journée passée et modifier un résultat"):
+                    hist_rondes = st.session_state.get('historique_rondes', [])
+                    if not hist_rondes:
+                        if st.session_state['ronde_actuelle'] > 1:
+                            st.info("ℹ️ Les rondes validées avant cette mise à jour ne disposent pas du détail match par match. Utilisez l'outil d'ajustement de points ci-dessus si besoin. Toutes les nouvelles rondes validées seront enregistrées ici et modifiables match par match.")
+                        else:
+                            st.info("Aucune ronde n'a encore été validée pour ce tournoi.")
+                    else:
+                        if st.session_state.get('appariements_ronde'):
+                            st.caption("ℹ️ Des appariements sont actuellement générés pour la ronde en cours. Si la modification d'une ronde passée change les scores et doit modifier les appariements en cours, utilisez ensuite « 🔄 Réinitialiser la ronde actuelle » puis régénérez la ronde.")
+
+                        labels_rondes = [
+                            f"Ronde {r.get('ronde', i + 1)} ({r.get('date', '-')}) — {len(r.get('matchs', []))} match(s)"
+                            for i, r in enumerate(hist_rondes)
+                        ]
+                        idx_ronde_sel = st.selectbox(
+                            "Choisir la ronde / journée à consulter ou modifier :",
+                            options=list(range(len(hist_rondes))),
+                            index=len(hist_rondes) - 1,
+                            format_func=lambda idx: labels_rondes[idx],
+                            key=f"sel_hist_ronde_{creneau_tournoi}"
+                        )
+                        ronde_sel = hist_rondes[idx_ronde_sel]
+                        num_ronde_sel = ronde_sel.get('ronde', idx_ronde_sel + 1)
+
+                        st.markdown(f"**Matchs enregistrés — Ronde {num_ronde_sel} ({ronde_sel.get('date', '-')}) :**")
+                        nouveaux_resultats = {}
+                        for m_idx, m in enumerate(ronde_sel.get('matchs', [])):
+                            res_actuel = m.get('resultat', RESULTATS_MATCH_OPTIONS[0])
+                            idx_res = RESULTATS_MATCH_OPTIONS.index(res_actuel) if res_actuel in RESULTATS_MATCH_OPTIONS else 0
+                            c_hm1, c_hm2 = st.columns([3, 2])
+                            c_hm1.markdown(f"**Échiquier {m_idx + 1} :** ⚪ **{m['blanc']}** 🆚 ⚫ **{m['noir']}**")
+                            nouveaux_resultats[m_idx] = c_hm2.selectbox(
+                                f"Résultat échiquier {m_idx + 1}",
+                                options=RESULTATS_MATCH_OPTIONS,
+                                index=idx_res,
+                                key=f"hist_res_{creneau_tournoi}_{num_ronde_sel}_{m_idx}",
+                                label_visibility="collapsed"
+                            )
+
+                        if ronde_sel.get('exempt'):
+                            st.warning(f"👑 **Exempt (+1 pt) :** {ronde_sel['exempt']}")
+                        if ronde_sel.get('forfaits'):
+                            st.caption(f"🚫 **Forfaits (0 pt) :** {', '.join(ronde_sel['forfaits'])}")
+
+                        c_hr_btn1, c_hr_btn2 = st.columns(2)
+                        if c_hr_btn1.button("💾 Enregistrer les modifications de cette ronde", key=f"btn_save_hist_ronde_{creneau_tournoi}"):
+                            modifs = appliquer_modifications_ronde_passee(
+                                ronde_sel,
+                                nouveaux_resultats,
+                                st.session_state['scores_tournoi'],
+                                st.session_state['db']['elos_crevette']
+                            )
+                            if not modifs:
+                                st.info("Aucune modification détectée sur cette ronde.")
+                            else:
+                                sauvegarder_etat_tournoi(creneau_tournoi)
+                                st.session_state['msg_tournoi_action'] = "✅ Ronde mise à jour (scores et Elos Crevette ajustés) : " + " | ".join(modifs)
+                                st.rerun()
+
+                        if idx_ronde_sel == len(hist_rondes) - 1 and not st.session_state.get('appariements_ronde'):
+                            if c_hr_btn2.button("↩️ Rouvrir cette dernière ronde", key=f"btn_reopen_ronde_{creneau_tournoi}"):
+                                reopened, nouvelles_rencontres = rouvrir_derniere_ronde(
+                                    st.session_state['historique_rondes'],
+                                    st.session_state['scores_tournoi'],
+                                    st.session_state['adversaires_tournoi'],
+                                    st.session_state['couleurs_tournoi'],
+                                    st.session_state['db']['elos_crevette']
+                                )
+                                if reopened:
+                                    r_num = reopened.get('ronde', max(1, st.session_state['ronde_actuelle'] - 1))
+                                    st.session_state['historique_rencontres'] = nouvelles_rencontres
+                                    st.session_state['ronde_actuelle'] = r_num
+                                    st.session_state['appariements_ronde'] = [(m['blanc'], m['noir']) for m in reopened.get('matchs', [])]
+                                    st.session_state['exempt_ronde'] = reopened.get('exempt')
+                                    for i_m, m in enumerate(reopened.get('matchs', []), 1):
+                                        st.session_state[f"res_{creneau_tournoi}_{r_num}_{i_m}"] = m.get('resultat', "Sélectionner...")
+                                        st.session_state.pop(f"hist_res_{creneau_tournoi}_{r_num}_{i_m - 1}", None)
+                                    sauvegarder_etat_tournoi(creneau_tournoi)
+                                    st.session_state['msg_tournoi_action'] = f"↩️ Ronde {r_num} rouverte : vous pouvez corriger ses résultats ou la réinitialiser pour ré-apparier."
+                                    st.rerun()
+
                 st.markdown("---")
                 col_t1, col_t2 = st.columns(2)
                 with col_t1:
                     st.metric("Ronde actuelle", st.session_state['ronde_actuelle'])
                 with col_t2:
                     if st.button("🔄 Réinitialiser la ronde actuelle"):
+                        for i_clr in range(1, len(st.session_state.get('appariements_ronde', [])) + 1):
+                            st.session_state.pop(f"res_{creneau_tournoi}_{st.session_state['ronde_actuelle']}_{i_clr}", None)
                         st.session_state['appariements_ronde'] = []
                         if st.session_state.get('exempt_ronde') and st.session_state['exempt_ronde'] in st.session_state['exempts_passes']:
                             st.session_state['exempts_passes'].remove(st.session_state['exempt_ronde'])
                         st.session_state['exempt_ronde'] = None
                         
-                        st.session_state['historique_rencontres'] = set()
-                        for j, advs in st.session_state['adversaires_tournoi'].items():
-                            for adv in advs:
-                                st.session_state['historique_rencontres'].add((min(j, adv), max(j, adv)))
+                        st.session_state['historique_rencontres'] = reconstruire_rencontres(st.session_state['adversaires_tournoi'])
                                 
                         if 'etats_tournois' in st.session_state['db'] and creneau_tournoi in st.session_state['db']['etats_tournois']:
-                            st.session_state['db']['etats_tournois'][creneau_tournoi]['appariements'] = []
-                            st.session_state['db']['etats_tournois'][creneau_tournoi]['exempt_ronde'] = None
-                            st.session_state['db']['etats_tournois'][creneau_tournoi]['exempts'] = list(st.session_state['exempts_passes'])
-                            st.session_state['db']['etats_tournois'][creneau_tournoi]['rencontres'] = [list(p) for p in st.session_state['historique_rencontres']]
-                            sauvegarder_base_cloud(st.session_state['db'])
+                            sauvegarder_etat_tournoi(creneau_tournoi)
                         st.success("Ronde actuelle annulée !")
                         st.rerun()
 
@@ -1964,17 +2461,7 @@ else:
                             st.session_state['exempts_passes'].add(exempt)
 
                         # Enregistrer l'état dans la base Cloud
-                        st.session_state['db']['etats_tournois'][creneau_tournoi] = {
-                            'scores': st.session_state['scores_tournoi'],
-                            'adversaires': st.session_state['adversaires_tournoi'],
-                            'couleurs': st.session_state['couleurs_tournoi'],
-                            'rencontres': [list(p) for p in st.session_state['historique_rencontres']],
-                            'exempts': list(st.session_state['exempts_passes']),
-                            'ronde': st.session_state['ronde_actuelle'],
-                            'appariements': st.session_state['appariements_ronde'],
-                            'exempt_ronde': st.session_state['exempt_ronde']
-                        }
-                        sauvegarder_base_cloud(st.session_state['db'])
+                        sauvegarder_etat_tournoi(creneau_tournoi)
                         st.rerun()
 
                 # --- 5. SAISIE DES RÉSULTATS ET MISE À JOUR DE L'ÉLO CREVETTE ---
@@ -1996,7 +2483,7 @@ else:
                         pts2 = st.session_state['scores_tournoi'].get(j2, 0.0)
                         c_ech, c_res = st.columns([3, 2])
                         c_ech.markdown(f"**Échiquier {i} :** ⚪ **{j1}** [{pts1} pts] ({elos_actifs[j1]} {sym1})  🆚  ⚫ **{j2}** [{pts2} pts] ({elos_actifs[j2]} {sym2})")
-                        res = c_res.selectbox(f"Résultat", ["Sélectionner...", "1 - 0 (Blancs)", "0 - 1 (Noirs)", "0.5 - 0.5 (Nulle)"], key=f"res_{creneau_tournoi}_{st.session_state['ronde_actuelle']}_{i}", label_visibility="collapsed")
+                        res = c_res.selectbox(f"Résultat", ["Sélectionner..."] + RESULTATS_MATCH_OPTIONS, key=f"res_{creneau_tournoi}_{st.session_state['ronde_actuelle']}_{i}", label_visibility="collapsed")
                         resultats_saisis.append((j1, j2, res))
                         
                     if st.session_state.get('exempt_ronde'):
@@ -2011,7 +2498,10 @@ else:
                             st.error("⚠️ Veuillez renseigner le résultat de tous les échiquiers avant de valider.")
                         else:
                             variations_crevette = []
-                            for j1, j2, res in resultats_saisis:
+                            matchs_historique = []
+                            ronde_validee = st.session_state['ronde_actuelle']
+
+                            for m_idx, (j1, j2, res) in enumerate(resultats_saisis):
                                 st.session_state['adversaires_tournoi'][j1].append(j2)
                                 st.session_state['adversaires_tournoi'][j2].append(j1)
                                 st.session_state['couleurs_tournoi'][j1].append('B')
@@ -2019,20 +2509,15 @@ else:
                                 
                                 elo1, elo2 = elos_actifs[j1], elos_actifs[j2]
                                 type1, type2 = types_elos[j1], types_elos[j2]
-                                
-                                if res == "1 - 0 (Blancs)":
-                                    st.session_state['scores_tournoi'][j1] += 1.0
-                                    s1, s2 = 1.0, 0.0
-                                elif res == "0 - 1 (Noirs)":
-                                    st.session_state['scores_tournoi'][j2] += 1.0
-                                    s1, s2 = 0.0, 1.0
-                                else:
-                                    st.session_state['scores_tournoi'][j1] += 0.5
-                                    st.session_state['scores_tournoi'][j2] += 0.5
-                                    s1, s2 = 0.5, 0.5
+                                s1, s2 = scores_depuis_resultat(res)
+
+                                st.session_state['scores_tournoi'][j1] = round(st.session_state['scores_tournoi'].get(j1, 0.0) + s1, 1)
+                                st.session_state['scores_tournoi'][j2] = round(st.session_state['scores_tournoi'].get(j2, 0.0) + s2, 1)
                                     
                                 new_e1 = calculer_nouveau_elo(elo1, elo2, s1)
                                 new_e2 = calculer_nouveau_elo(elo2, elo1, s2)
+                                diff1 = 0
+                                diff2 = 0
                                 
                                 # Mise à jour de l'Élo Crevette pour les joueurs concernés (estimé ou crevette)
                                 if "Crevette" in type1:
@@ -2044,25 +2529,39 @@ else:
                                     diff2 = new_e2 - elo2
                                     variations_crevette.append(f"🦐 **{j2}** : {elo2} ➔ **{new_e2}** ({'+' if diff2 >= 0 else ''}{diff2})")
 
-                            if st.session_state.get('exempt_ronde'):
-                                st.session_state['scores_tournoi'][st.session_state['exempt_ronde']] += 1.0
+                                matchs_historique.append({
+                                    'blanc': j1,
+                                    'noir': j2,
+                                    'resultat': res,
+                                    'elo_blanc_avant': elo1,
+                                    'elo_noir_avant': elo2,
+                                    'type_blanc': type1,
+                                    'type_noir': type2,
+                                    'elo_blanc_apres': new_e1 if "Crevette" in type1 else elo1,
+                                    'elo_noir_apres': new_e2 if "Crevette" in type2 else elo2,
+                                    'crevette_delta_blanc': diff1,
+                                    'crevette_delta_noir': diff2,
+                                })
+                                st.session_state.pop(f"hist_res_{creneau_tournoi}_{ronde_validee}_{m_idx}", None)
 
-                            # Sauvegarde dans le Cloud Google Sheets
-                            st.session_state['db']['etats_tournois'][creneau_tournoi] = {
-                                'scores': st.session_state['scores_tournoi'],
-                                'adversaires': st.session_state['adversaires_tournoi'],
-                                'couleurs': st.session_state['couleurs_tournoi'],
-                                'rencontres': [list(p) for p in st.session_state['historique_rencontres']],
-                                'exempts': list(st.session_state['exempts_passes']),
-                                'ronde': st.session_state['ronde_actuelle'] + 1,
-                                'appariements': [],
-                                'exempt_ronde': None
-                            }
-                            sauvegarder_base_cloud(st.session_state['db'])
+                            exempt_valide = st.session_state.get('exempt_ronde')
+                            if exempt_valide:
+                                st.session_state['scores_tournoi'][exempt_valide] = round(st.session_state['scores_tournoi'].get(exempt_valide, 0.0) + 1.0, 1)
 
-                            st.session_state['ronde_actuelle'] += 1
+                            st.session_state['historique_rondes'].append({
+                                'ronde': ronde_validee,
+                                'date': date_jour,
+                                'matchs': matchs_historique,
+                                'exempt': exempt_valide,
+                                'forfaits': list(joueurs_forfaits),
+                            })
+
+                            st.session_state['ronde_actuelle'] = ronde_validee + 1
                             st.session_state['appariements_ronde'] = []
                             st.session_state['exempt_ronde'] = None
+
+                            # Sauvegarde dans le Cloud Google Sheets
+                            sauvegarder_etat_tournoi(creneau_tournoi)
                             
                             if variations_crevette:
                                 st.session_state['msg_variations_crevette'] = " | ".join(variations_crevette)
@@ -2074,7 +2573,24 @@ else:
                     del st.session_state['msg_variations_crevette']
 
         with tab_classement:
-            st.markdown("### 🏆 Classement Général (FIDE & Crevette)")
+            c_cl1, c_cl2 = st.columns([3, 1])
+            c_cl1.markdown("### 🏆 Classement Général (FIDE, National & Crevette)")
+            if c_cl2.button("🔄 Actualiser Elos FFE", key="btn_sync_ffe_classement", use_container_width=True):
+                with st.spinner("Actualisation depuis echecs.asso.fr..."):
+                    ok_ffe, chang_ffe, nb_m_ffe = actualiser_elos_ffe_automatique(silencieux=False)
+                    if ok_ffe:
+                        st.session_state['ffe_classement_report'] = (chang_ffe, nb_m_ffe)
+                        st.rerun()
+                    else:
+                        st.warning("❌ Impossible de contacter echecs.asso.fr pour le moment.")
+
+            if st.session_state.get('ffe_classement_report'):
+                chang_cl, nb_m_cl = st.session_state.pop('ffe_classement_report')
+                if chang_cl:
+                    st.success(f"✅ {len(chang_cl)} élève(s) mis à jour depuis la FFE ({nb_m_cl} licencié(s) vérifié(s)) : " + " | ".join(chang_cl))
+                else:
+                    st.info(f"👌 Les Elos FIDE & Nationaux sont déjà à jour ({nb_m_cl} licencié(s) FFE vérifié(s)).")
+
             creneaux_remplis_classement = [k for k, v in st.session_state['db']['affectations_creneaux'].items() if len(v) > 0]
             filtre_c = st.selectbox("Filtrer par liste / créneau :", ["Tous les élèves"] + sorted(creneaux_remplis_classement))
             joueurs_a_afficher = list(df["Identité"].unique()) if filtre_c == "Tous les élèves" else list(set(st.session_state['db']['affectations_creneaux'][filtre_c]))
