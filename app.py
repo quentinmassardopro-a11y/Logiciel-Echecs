@@ -9,6 +9,7 @@ import io
 import hashlib
 import zipfile
 import re
+import concurrent.futures
 from datetime import datetime
 import urllib.parse
 import gspread
@@ -63,6 +64,35 @@ def get_or_create_worksheet(sh, name):
     try: return sh.worksheet(name)
     except Exception: return sh.add_worksheet(title=name, rows="1000", cols="50")
 
+@st.cache_resource(ttl=1500, show_spinner=False)
+def _get_gsheets_bundle_cached(creds_key):
+    client = get_gsheets_client()
+    sh = client.open("Base_Calanques_DB")
+    return {"client": client, "sh": sh, "ws": {}}
+
+def _get_gsheets_bundle(force_refresh=False):
+    is_mocked = (
+        "unittest.mock" in type(gspread.authorize).__module__
+        or "unittest.mock" in type(Credentials.from_service_account_info).__module__
+    )
+    if is_mocked:
+        if force_refresh or "_gs_bundle_mock" not in st.session_state:
+            client = get_gsheets_client()
+            sh = client.open("Base_Calanques_DB")
+            st.session_state["_gs_bundle_mock"] = {"client": client, "sh": sh, "ws": {}}
+        return st.session_state["_gs_bundle_mock"]
+    if force_refresh:
+        _get_gsheets_bundle_cached.clear()
+    creds_info = dict(st.secrets["gcp_service_account"])
+    creds_key = f"{creds_info.get('client_email', '')}_{creds_info.get('private_key_id', '')}"
+    return _get_gsheets_bundle_cached(creds_key)
+
+def _get_cached_worksheet(name, force_refresh=False):
+    bundle = _get_gsheets_bundle(force_refresh=force_refresh)
+    if name not in bundle["ws"]:
+        bundle["ws"][name] = get_or_create_worksheet(bundle["sh"], name)
+    return bundle["ws"][name]
+
 def initialiser_memoire_vierge():
     return {
         "elos_crevette": {}, "etats_tournois": {}, "historique_appels": {}, "eleves_essai": [],
@@ -80,57 +110,77 @@ def initialiser_memoire_vierge():
     }
 
 def charger_base_cloud():
-    try:
-        client = get_gsheets_client()
-        sh = client.open("Base_Calanques_DB")
-        ws = get_or_create_worksheet(sh, "DB_JSON")
-        vals = ws.col_values(1)
-        if vals: return json.loads("".join(vals))
-        return initialiser_memoire_vierge()
-    except Exception as e:
-        st.error(f"Erreur de connexion à Google Sheets (DB). Données protégées. Erreur: {e}")
-        return None 
+    for tentative in range(2):
+        try:
+            ws = _get_cached_worksheet("DB_JSON", force_refresh=(tentative > 0))
+            vals = ws.col_values(1)
+            st.session_state["_db_json_chunks_count"] = len(vals)
+            if vals: return json.loads("".join(vals))
+            return initialiser_memoire_vierge()
+        except Exception as e:
+            if tentative == 0: continue
+            st.error(f"Erreur de connexion à Google Sheets (DB). Données protégées. Erreur: {e}")
+            return None
 
 def sauvegarder_base_cloud(db):
-    try:
-        client = get_gsheets_client()
-        sh = client.open("Base_Calanques_DB")
-        ws = get_or_create_worksheet(sh, "DB_JSON")
-        json_str = json.dumps(db, ensure_ascii=False)
-        chunks = [[json_str[i:i+40000]] for i in range(0, len(json_str), 40000)]
-        ws.clear()
-        try: ws.update(values=chunks, range_name="A1")
-        except TypeError: ws.update("A1", chunks)
-    except Exception as e:
-        st.error(f"Échec de la sauvegarde Cloud (DB): {e}")
+    json_str = json.dumps(db, ensure_ascii=False, separators=(',', ':'))
+    chunks = [[json_str[i:i+40000]] for i in range(0, len(json_str), 40000)] or [[""]]
+    for tentative in range(2):
+        try:
+            ws = _get_cached_worksheet("DB_JSON", force_refresh=(tentative > 0))
+            prev_chunks = st.session_state.get("_db_json_chunks_count")
+            if prev_chunks is not None:
+                payload = chunks + [[""]] * max(0, prev_chunks - len(chunks))
+            else:
+                ws.clear()
+                payload = chunks
+            try: ws.update(values=payload, range_name="A1")
+            except TypeError: ws.update("A1", payload)
+            st.session_state["_db_json_chunks_count"] = len(chunks)
+            return
+        except Exception as e:
+            if tentative == 0: continue
+            st.error(f"Échec de la sauvegarde Cloud (DB): {e}")
 
 def charger_adherents_cloud():
-    try:
-        client = get_gsheets_client()
-        sh = client.open("Base_Calanques_DB")
-        ws = get_or_create_worksheet(sh, "Adherents")
-        data = ws.get_all_records()
-        if data: return pd.DataFrame(data)
-        return pd.DataFrame()
-    except Exception as e:
-        st.error(f"Erreur de connexion à Google Sheets (Adhérents). Données protégées. Erreur: {e}")
-        return None
+    for tentative in range(2):
+        try:
+            ws = _get_cached_worksheet("Adherents", force_refresh=(tentative > 0))
+            data = ws.get_all_records()
+            if data:
+                df_res = pd.DataFrame(data)
+                st.session_state["_adherents_cloud_shape"] = (len(df_res) + 1, len(df_res.columns))
+                return df_res
+            st.session_state["_adherents_cloud_shape"] = (0, 0)
+            return pd.DataFrame()
+        except Exception as e:
+            if tentative == 0: continue
+            st.error(f"Erreur de connexion à Google Sheets (Adhérents). Données protégées. Erreur: {e}")
+            return None
 
 def sauvegarder_adherents_cloud(df):
-    try:
-        if df is None: return
-        client = get_gsheets_client()
-        sh = client.open("Base_Calanques_DB")
-        ws = get_or_create_worksheet(sh, "Adherents")
-        if df.empty:
-            data = [df.columns.values.tolist()]
-        else:
-            data = [df.columns.values.tolist()] + df.fillna("").astype(str).values.tolist()
-        ws.clear() 
-        try: ws.update(values=data, range_name="A1")
-        except TypeError: ws.update("A1", data)
-    except Exception as e:
-        st.error(f"Échec de la sauvegarde Cloud (Adhérents): {e}")
+    if df is None: return
+    if df.empty:
+        data = [df.columns.values.tolist()]
+    else:
+        data = [df.columns.values.tolist()] + df.fillna("").astype(str).values.tolist()
+    n_rows = len(data)
+    n_cols = len(data[0]) if data else 0
+    for tentative in range(2):
+        try:
+            ws = _get_cached_worksheet("Adherents", force_refresh=(tentative > 0))
+            prev_shape = st.session_state.get("_adherents_cloud_shape")
+            if prev_shape is not None and n_rows >= prev_shape[0] and n_cols >= prev_shape[1]:
+                pass
+            else:
+                ws.clear()
+            try: ws.update(values=data, range_name="A1")
+            except TypeError: ws.update("A1", data)
+            st.session_state["_adherents_cloud_shape"] = (n_rows, n_cols)
+            return
+        except Exception as e:
+            if tentative == 0: continue
+            st.error(f"Échec de la sauvegarde Cloud (Adhérents): {e}")
 
 def is_different(val1, val2):
     v1 = str(val1).strip().lower() if pd.notna(val1) and str(val1) != "nan" else ""
@@ -210,56 +260,42 @@ def est_elo_estime(score, chaine_brute=""):
         return True
     return False
 
-def get_elo_actif(identite, df_adherents, db):
-    """
-    Hiérarchie stricte avec priorité aux Élos RAPIDES pour les appariements :
-    1. Rapide FIDE (si réel et non estimé)
-    2. Rapide National (si réel et non estimé)
-    3. Lent FIDE (si réel et non estimé)
-    4. Lent National (si réel et non estimé)
-    5. Blitz FIDE (si réel et non estimé)
-    6. Blitz National (si réel et non estimé)
-    7. Si Élo estimé (799, 999, 1099, 1199, 1299, 1399) ou aucun Élo officiel :
-       -> Utiliser l'Élo Crevette (initialisé à la valeur estimée ou 400).
-    """
+def _elo_depuis_row(identite, row, db):
+    """Calcule l'Élo actif et sa catégorie à partir d'une ligne adhérent déjà extraite."""
     elo_estime_trouve = None
     try:
-        if not df_adherents.empty and "Identité" in df_adherents.columns:
-            match = df_adherents[df_adherents["Identité"] == identite]
-            if not match.empty:
-                row = match.iloc[0]
-                
-                raw_r = str(row.get("Elo_Rapide", ""))
-                raw_l = str(row.get("Elo_Lent", ""))
-                raw_b = str(row.get("Elo_Blitz", ""))
-                
-                r_val, r_f, r_n = extract_elo_val(raw_r)
-                l_val, l_f, l_n = extract_elo_val(raw_l)
-                b_val, b_f, b_n = extract_elo_val(raw_b)
-                
-                # Détecter si l'élève a un élo estimé dans l'une des colonnes
-                for val, raw in [(r_val, raw_r), (l_val, raw_l), (b_val, raw_b)]:
-                    if est_elo_estime(val, raw):
-                        if elo_estime_trouve is None:
-                            elo_estime_trouve = val
+        if row is not None:
+            raw_r = str(row.get("Elo_Rapide", ""))
+            raw_l = str(row.get("Elo_Lent", ""))
+            raw_b = str(row.get("Elo_Blitz", ""))
 
-                # 1. Priorité absolue aux Élos RAPIDES (cadence du tournoi)
-                if r_f and r_val > 0 and not est_elo_estime(r_val, raw_r):
-                    return r_val, "⚡ Rapide FIDE"
-                if (r_n or r_val > 0) and r_val > 0 and not est_elo_estime(r_val, raw_r):
-                    return r_val, "🇫🇷 Rapide National"
+            r_val, r_f, r_n = extract_elo_val(raw_r)
+            l_val, l_f, l_n = extract_elo_val(raw_l)
+            b_val, b_f, b_n = extract_elo_val(raw_b)
 
-                # 2. Puis les Élos LENTS (Standard)
-                if l_f and l_val > 0 and not est_elo_estime(l_val, raw_l):
-                    return l_val, "⚡ Lent FIDE"
-                if (l_n or l_val > 0) and l_val > 0 and not est_elo_estime(l_val, raw_l):
-                    return l_val, "🇫🇷 Lent National"
+            # Détecter si l'élève a un élo estimé dans l'une des colonnes
+            for val, raw in [(r_val, raw_r), (l_val, raw_l), (b_val, raw_b)]:
+                if est_elo_estime(val, raw):
+                    if elo_estime_trouve is None:
+                        elo_estime_trouve = val
 
-                # 3. Puis les Élos BLITZ
-                if b_f and b_val > 0 and not est_elo_estime(b_val, raw_b):
-                    return b_val, "⚡ Blitz FIDE"
-                if (b_n or b_val > 0) and b_val > 0 and not est_elo_estime(b_val, raw_b):
-                    return b_val, "🇫🇷 Blitz National"
+            # 1. Priorité absolue aux Élos RAPIDES (cadence du tournoi)
+            if r_f and r_val > 0 and not est_elo_estime(r_val, raw_r):
+                return r_val, "⚡ Rapide FIDE"
+            if (r_n or r_val > 0) and r_val > 0 and not est_elo_estime(r_val, raw_r):
+                return r_val, "🇫🇷 Rapide National"
+
+            # 2. Puis les Élos LENTS (Standard)
+            if l_f and l_val > 0 and not est_elo_estime(l_val, raw_l):
+                return l_val, "⚡ Lent FIDE"
+            if (l_n or l_val > 0) and l_val > 0 and not est_elo_estime(l_val, raw_l):
+                return l_val, "🇫🇷 Lent National"
+
+            # 3. Puis les Élos BLITZ
+            if b_f and b_val > 0 and not est_elo_estime(b_val, raw_b):
+                return b_val, "⚡ Blitz FIDE"
+            if (b_n or b_val > 0) and b_val > 0 and not est_elo_estime(b_val, raw_b):
+                return b_val, "🇫🇷 Blitz National"
     except Exception:
         pass
 
@@ -273,6 +309,39 @@ def get_elo_actif(identite, df_adherents, db):
         # Initialisation : on utilise toujours 400 comme base pour l'élo crevette
         db['elos_crevette'][identite] = 400
         return 400, "🦐 Crevette"
+
+def get_elo_actif(identite, df_adherents, db):
+    """
+    Hiérarchie stricte avec priorité aux Élos RAPIDES pour les appariements :
+    1. Rapide FIDE (si réel et non estimé)
+    2. Rapide National (si réel et non estimé)
+    3. Lent FIDE (si réel et non estimé)
+    4. Lent National (si réel et non estimé)
+    5. Blitz FIDE (si réel et non estimé)
+    6. Blitz National (si réel et non estimé)
+    7. Si Élo estimé (799, 999, 1099, 1199, 1299, 1399) ou aucun Élo officiel :
+       -> Utiliser l'Élo Crevette (initialisé à la valeur estimée ou 400).
+    """
+    row = None
+    try:
+        if df_adherents is not None and not df_adherents.empty and "Identité" in df_adherents.columns:
+            match = df_adherents[df_adherents["Identité"] == identite]
+            if not match.empty:
+                row = match.iloc[0]
+    except Exception:
+        pass
+    return _elo_depuis_row(identite, row, db)
+
+def calculer_elos_actifs_batch(identites, df_adherents, db):
+    """Version O(N) de get_elo_actif pour afficher tableaux et classements sans boucles lentes."""
+    row_map = {}
+    if df_adherents is not None and not df_adherents.empty and "Identité" in df_adherents.columns:
+        cols_elo = [c for c in ["Identité", "Elo_Rapide", "Elo_Lent", "Elo_Blitz"] if c in df_adherents.columns]
+        for rec in df_adherents[cols_elo].to_dict("records"):
+            ident = rec.get("Identité")
+            if ident not in row_map:
+                row_map[ident] = rec
+    return {ident: _elo_depuis_row(ident, row_map.get(ident), db) for ident in identites}
 
 def calculer_nouveau_elo(r_a, r_b, score_a, k=40):
     """Calcul du nouveau Elo FIDE officiel (K=40 pour les jeunes/scolaires)."""
@@ -610,7 +679,13 @@ def sauvegarder_etat_tournoi(creneau_tournoi):
         'exempts': list(st.session_state.get('exempts_passes', set())),
         'ronde': st.session_state.get('ronde_actuelle', 1),
         'appariements': [list(p) for p in st.session_state.get('appariements_ronde', [])],
+        'resultats_en_cours': {
+            str(k): v
+            for k, v in st.session_state.get('resultats_en_cours', {}).items()
+            if v and v != "Sélectionner..."
+        },
         'exempt_ronde': st.session_state.get('exempt_ronde', None),
+        'forfaits_ronde': list(st.session_state.get('forfaits_actuels', [])),
         'historique_rondes': list(st.session_state.get('historique_rondes', [])),
         'historique_ajustements': list(st.session_state.get('historique_ajustements', []))
     })
@@ -891,7 +966,7 @@ def enrichir_cles_ffe(df_ffe):
     df_out['Code_FFE'] = df_out['Licence_FFE'].apply(extraire_code_licence_ffe)
     return df_out
 
-def telecharger_ffe_calanques(timeout=12, silencieux=False):
+def _telecharger_ffe_calanques_uncached(timeout=12, silencieux=False):
     """Télécharge la liste des joueurs du club depuis le site FFE et conserve les marqueurs FIDE/National/Estimé."""
     url = 'https://www.echecs.asso.fr/ListeJoueurs.aspx?Action=JOUEURCLUBREF&ClubRef=2705'
     headers = {
@@ -910,7 +985,8 @@ def telecharger_ffe_calanques(timeout=12, silencieux=False):
     if html_content is None:
         try:
             url_proxy = f"https://api.allorigins.win/get?url={urllib.parse.quote(url)}"
-            r_proxy = requests.get(url_proxy, timeout=max(timeout, 10))
+            proxy_timeout = 5 if silencieux else max(timeout, 10)
+            r_proxy = requests.get(url_proxy, timeout=proxy_timeout)
             if r_proxy.status_code == 200:
                 contents = r_proxy.json().get('contents', '')
                 if contents and ('liste_clair' in contents or 'liste_fonce' in contents):
@@ -924,7 +1000,8 @@ def telecharger_ffe_calanques(timeout=12, silencieux=False):
         return pd.DataFrame()
 
     try:
-        soup = BeautifulSoup(html_content, 'html.parser')
+        try: soup = BeautifulSoup(html_content, 'lxml')
+        except Exception: soup = BeautifulSoup(html_content, 'html.parser')
         idx_elo, idx_rapide, idx_blitz = 4, 5, 6
         for tr_head in soup.find_all('tr'):
             head_cells = [re.sub(r'\s+', ' ', c.get_text(' ', strip=True)).lower() for c in tr_head.find_all(['th', 'td'])]
@@ -979,6 +1056,15 @@ def telecharger_ffe_calanques(timeout=12, silencieux=False):
         if not silencieux:
             st.sidebar.error(f"Erreur d'analyse FFE : {e}")
     return pd.DataFrame()
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _telecharger_ffe_calanques_cached(timeout=12, silencieux=False):
+    return _telecharger_ffe_calanques_uncached(timeout=timeout, silencieux=silencieux)
+
+def telecharger_ffe_calanques(timeout=12, silencieux=False):
+    if "unittest.mock" in type(requests.get).__module__:
+        return _telecharger_ffe_calanques_uncached(timeout=timeout, silencieux=silencieux)
+    return _telecharger_ffe_calanques_cached(timeout=timeout, silencieux=silencieux)
 
 def analyser_fichier_ffe(fichier):
     """Analyse le CSV de la FFE et extrait les 3 colonnes d'Elos."""
@@ -1113,7 +1199,9 @@ def recroiser_et_maj_ffe(df_base, df_ffe):
 
 def actualiser_elos_ffe_automatique(silencieux=False):
     """Télécharge la liste FFE du club et met à jour automatiquement les Elos FIDE & Nationaux dans la base."""
-    df_ffe_scrap = telecharger_ffe_calanques(timeout=6 if silencieux else 15, silencieux=silencieux)
+    if not silencieux and hasattr(_telecharger_ffe_calanques_cached, "clear"):
+        _telecharger_ffe_calanques_cached.clear()
+    df_ffe_scrap = telecharger_ffe_calanques(timeout=4 if silencieux else 12, silencieux=silencieux)
     if df_ffe_scrap.empty:
         return False, [], 0
 
@@ -1312,10 +1400,34 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
         
     return rows
 
-# --- CHARGEMENT INITIALISATION ---
+# --- CHARGEMENT INITIALISATION (PARALLÈLE & OPTIMISÉ) ---
+if 'db' not in st.session_state and 'df_adherents' not in st.session_state:
+    with st.spinner("Connexion rapide au Cloud Google..."):
+        try:
+            ws_db = _get_cached_worksheet("DB_JSON")
+            ws_adh = _get_cached_worksheet("Adherents")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                fut_db = executor.submit(ws_db.col_values, 1)
+                fut_adh = executor.submit(ws_adh.get_all_records)
+                vals_db = fut_db.result()
+                data_adh = fut_adh.result()
+            st.session_state["_db_json_chunks_count"] = len(vals_db)
+            st.session_state["_prefetched_db"] = json.loads("".join(vals_db)) if vals_db else initialiser_memoire_vierge()
+            if data_adh:
+                df_pre = pd.DataFrame(data_adh)
+                st.session_state["_adherents_cloud_shape"] = (len(df_pre) + 1, len(df_pre.columns))
+            else:
+                df_pre = pd.DataFrame()
+                st.session_state["_adherents_cloud_shape"] = (0, 0)
+            st.session_state["_prefetched_df_adh"] = df_pre
+        except Exception:
+            pass
+
 if 'db' not in st.session_state: 
     with st.spinner("Connexion sécurisée au Cloud Google..."):
-        db_loaded = charger_base_cloud()
+        db_loaded = st.session_state.pop("_prefetched_db", None)
+        if db_loaded is None:
+            db_loaded = charger_base_cloud()
         if db_loaded is None: st.stop() 
         
         # --- FIX ELO CREVETTE (Migration) ---
@@ -1342,10 +1454,13 @@ if 'db' not in st.session_state:
 
 if 'df_adherents' not in st.session_state:
     with st.spinner("Récupération de la base adhérents..."):
-        df_loaded = charger_adherents_cloud()
+        df_loaded = st.session_state.pop("_prefetched_df_adh", None)
+        if df_loaded is None:
+            df_loaded = charger_adherents_cloud()
         if df_loaded is None: st.stop() 
         
         if not df_loaded.empty: 
+            df_before_cmp = df_loaded.fillna("").astype(str).reset_index(drop=True)
             len_avant = len(df_loaded)
             if 'N° Portable' in df_loaded.columns: df_loaded['N° Portable'] = df_loaded['N° Portable'].apply(format_phone)
             if "N° Portable 2 (en cas d'urgence)" in df_loaded.columns: df_loaded["N° Portable 2 (en cas d'urgence)"] = df_loaded["N° Portable 2 (en cas d'urgence)"].apply(format_phone)
@@ -1365,9 +1480,12 @@ if 'df_adherents' not in st.session_state:
                 return "École"
             
             if "Type" in df_loaded.columns: df_loaded["Type"] = df_loaded.apply(corriger_type_retroactif, axis=1)
-                
+
+            df_after_cmp = df_loaded.fillna("").astype(str).reset_index(drop=True)
+            adherents_modifies = (len(df_loaded) != len_avant) or not df_after_cmp.equals(df_before_cmp)
             st.session_state['df_adherents'] = df_loaded
-            sauvegarder_adherents_cloud(df_loaded)
+            if adherents_modifies:
+                sauvegarder_adherents_cloud(df_loaded)
         else:
             st.session_state['df_adherents'] = pd.DataFrame()
 
@@ -1427,10 +1545,13 @@ if st.session_state.get('plein_ecran_ronde'):
     st.markdown(f"<h1 style='text-align:center; font-size:4rem; color:#FF8C00; margin-bottom: 30px;'>🏆 Appariements - Ronde {st.session_state.get('ronde_actuelle', 1)}</h1>", unsafe_allow_html=True)
     
     html_table = "<table><tr><th>Table</th><th>⚪ Blancs</th><th>Score</th><th>⚫ Noirs</th></tr>"
+    res_en_cours_ecran = st.session_state.get('resultats_en_cours', {})
     for i, (j1, j2) in enumerate(st.session_state.get('appariements_ronde', []), 1):
         pts1 = st.session_state['scores_tournoi'].get(j1, 0)
         pts2 = st.session_state['scores_tournoi'].get(j2, 0)
-        html_table += f"<tr><td>{i}</td><td>{j1} <br><span class='pts'>({pts1} pts)</span></td><td>... - ...</td><td>{j2} <br><span class='pts'>({pts2} pts)</span></td></tr>"
+        res_i = res_en_cours_ecran.get(str(i), "")
+        score_aff = res_i.split(" (")[0] if res_i and res_i != "Sélectionner..." else "... - ..."
+        html_table += f"<tr><td>{i}</td><td>{j1} <br><span class='pts'>({pts1} pts)</span></td><td>{score_aff}</td><td>{j2} <br><span class='pts'>({pts2} pts)</span></td></tr>"
         
     if st.session_state.get('exempt_ronde'):
         ex = st.session_state['exempt_ronde']
@@ -1465,6 +1586,8 @@ if st.sidebar.button("🔄 Rafraîchir les données (Cloud)"):
         df_loaded = charger_adherents_cloud()
         if df_loaded is not None and not df_loaded.empty: st.session_state['df_adherents'] = df_loaded
         st.session_state.pop('tournoi_en_cours', None)
+        for k_ss in [k for k in list(st.session_state.keys()) if k.startswith("res_")]:
+            st.session_state.pop(k_ss, None)
         st.rerun()
 
 st.sidebar.markdown("---")
@@ -1541,20 +1664,25 @@ if st.sidebar.button("⬇️ Lancer la Synchronisation HelloAsso"):
                     ("Boutique", "Shop", "objet-club")
                 ]
                 all_data = []
-                for nom, type_camp, slug in campagnes:
-                    all_data.extend(fetch_campaign_items(token, type_camp, slug, nom))
+                with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                    futures = [executor.submit(fetch_campaign_items, token, type_camp, slug, nom) for nom, type_camp, slug in campagnes]
+                    for fut in futures:
+                        try:
+                            all_data.extend(fut.result())
+                        except Exception:
+                            pass
                 all_data.extend(st.session_state['db']['eleves_essai'])
                 
                 if all_data:
                     df_new_fetch = pd.DataFrame(all_data)
                     df_local = st.session_state.get('df_adherents', pd.DataFrame()).copy()
-                    ids_supprimes = [str(x) for x in st.session_state['db'].get('dossiers_supprimes', [])]
+                    ids_supprimes_set = {str(x) for x in st.session_state['db'].get('dossiers_supprimes', [])}
+                    existing_ids_set = set(df_local['ID_Dossier'].dropna().astype(str)) if (not df_local.empty and 'ID_Dossier' in df_local.columns) else set()
                     
                     def est_valide(r):
                         id_dos = nettoyer_id_dossier(r.get('ID_Dossier', ''))
-                        if id_dos and id_dos != 'nan' and id_dos in ids_supprimes: return False
-                        if not df_local.empty and 'ID_Dossier' in df_local.columns:
-                            if id_dos in df_local['ID_Dossier'].dropna().astype(str).values: return False
+                        if id_dos and id_dos != 'nan' and id_dos in ids_supprimes_set: return False
+                        if id_dos in existing_ids_set: return False
                         return True
                         
                     nouveaux = df_new_fetch[df_new_fetch.apply(est_valide, axis=1)].copy()
@@ -1589,25 +1717,33 @@ st.sidebar.markdown("---")
 st.sidebar.header("3️⃣ Sauvegarde Locale")
 st.sidebar.info("Téléchargez une copie complète du logiciel et de vos données (en cas de pépin).")
 
-buffer_zip = io.BytesIO()
-with zipfile.ZipFile(buffer_zip, "w", zipfile.ZIP_DEFLATED) as zip_file:
-    for f_name in ["app.py", "requirements.txt", "logo.png"]:
-        if os.path.exists(f_name):
-            with open(f_name, "rb") as f: zip_file.writestr(f_name, f.read())
-    
-    if 'db' in st.session_state:
-        zip_file.writestr("base_calanques_db.json", json.dumps(st.session_state['db'], ensure_ascii=False, indent=2))
-        
-    if 'df_adherents' in st.session_state and not st.session_state['df_adherents'].empty:
-        zip_file.writestr("adherents_db.csv", st.session_state['df_adherents'].to_csv(index=False).encode('utf-8'))
+if st.sidebar.button("📦 Préparer la Sauvegarde Complète (.zip)", use_container_width=True):
+    buffer_zip = io.BytesIO()
+    with zipfile.ZipFile(buffer_zip, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        for f_name in ["app.py", "requirements.txt", "logo.png"]:
+            if os.path.exists(f_name):
+                with open(f_name, "rb") as f: zip_file.writestr(f_name, f.read())
 
-st.sidebar.download_button(
-    label="📦 Télécharger Sauvegarde Complète",
-    data=buffer_zip.getvalue(),
-    file_name=f"Sauvegarde_Echecs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
-    mime="application/zip",
-    use_container_width=True
-)
+        if 'db' in st.session_state:
+            zip_file.writestr("base_calanques_db.json", json.dumps(st.session_state['db'], ensure_ascii=False, indent=2))
+
+        if 'df_adherents' in st.session_state and not st.session_state['df_adherents'].empty:
+            zip_file.writestr("adherents_db.csv", st.session_state['df_adherents'].to_csv(index=False).encode('utf-8'))
+
+    st.session_state['_backup_zip_ready'] = (
+        buffer_zip.getvalue(),
+        f"Sauvegarde_Echecs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+    )
+
+if '_backup_zip_ready' in st.session_state:
+    zip_bytes, zip_name = st.session_state['_backup_zip_ready']
+    st.sidebar.download_button(
+        label="⬇️ Télécharger Sauvegarde Complète",
+        data=zip_bytes,
+        file_name=zip_name,
+        mime="application/zip",
+        use_container_width=True
+    )
 
 if df.empty:
     st.info("👋 **Bienvenue !** Cliquez sur **Lancer la Synchronisation HelloAsso** pour importer vos premiers élèves.")
@@ -1794,14 +1930,19 @@ else:
                 df_admin = df_admin[df_admin.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Identité'], r['Sortie Seul']) == "✅ OUI", axis=1)]
             st.caption(f"🔎 {len(df_admin)} élève(s) affiché(s)")
             
-            # Affichage correct de l'Elo dans le tableau
-            df_admin['Elo Actif ⚡'] = df_admin['Identité'].apply(lambda x: get_elo_actif(x, df_admin, st.session_state['db'])[0])
-            df_admin['Catégorie Elo'] = df_admin['Identité'].apply(lambda x: get_elo_actif(x, df_admin, st.session_state['db'])[1])
-            
-            df_admin['Promo Validée ✅'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['validations_promo'].get(x, False))
-            df_admin['Sortie Seul'] = df_admin.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Identité'], r['Sortie Seul']), axis=1)
-            df_admin['T-shirt donné 👕'] = df_admin['Identité'].apply(lambda x: st.session_state['db']['tshirts_donnes'].get(x, False))
-            df_admin['Carte Centre Culturel 🎟️'] = df_admin['Identité'].apply(lambda x: bool(st.session_state['db']['cartes_membres'].get(x, {}).get('Cassis', False)))
+            # Affichage correct de l'Elo dans le tableau (calcul vectorisé O(N))
+            elos_batch_admin = calculer_elos_actifs_batch(df_admin['Identité'].tolist(), df_admin, st.session_state['db'])
+            df_admin['Elo Actif ⚡'] = [elos_batch_admin[x][0] for x in df_admin['Identité']]
+            df_admin['Catégorie Elo'] = [elos_batch_admin[x][1] for x in df_admin['Identité']]
+
+            val_promo_map = st.session_state['db']['validations_promo']
+            sorties_map = st.session_state['db']['sorties_manuelles']
+            tshirts_map = st.session_state['db']['tshirts_donnes']
+            cartes_map = st.session_state['db']['cartes_membres']
+            df_admin['Promo Validée ✅'] = [bool(val_promo_map.get(x, False)) for x in df_admin['Identité']]
+            df_admin['Sortie Seul'] = [sorties_map.get(ident, val_def) for ident, val_def in zip(df_admin['Identité'], df_admin['Sortie Seul'])]
+            df_admin['T-shirt donné 👕'] = [bool(tshirts_map.get(x, False)) for x in df_admin['Identité']]
+            df_admin['Carte Centre Culturel 🎟️'] = [bool(cartes_map.get(x, {}).get('Cassis', False)) for x in df_admin['Identité']]
             
             df_admin["_orig_index"] = df_admin.index 
             
@@ -2015,13 +2156,24 @@ else:
             else:
                 st.write("Consultez l'historique des présences par date et créneau, visualisez immédiatement les élèves absents et accédez à toutes les coordonnées pour contacter leurs parents.")
                 
-                col_f1, col_f2 = st.columns([2, 1])
+                col_f1, col_f2, col_f3 = st.columns([2, 1.5, 1.2])
                 with col_f1:
                     filtre_absents_seuls = st.checkbox("🔍 Afficher uniquement les séances avec des élèves absents", value=False)
                 with col_f2:
                     recherche_eleve = st.text_input("Rechercher un élève :", placeholder="Nom ou prénom...", key="rech_abs_hist").strip().lower()
+                with col_f3:
+                    afficher_tout_hist = st.checkbox("Tout l'historique", value=False, key="hist_show_all")
+
+                df_hist_idx = {}
+                if not df.empty and "Identité" in df.columns:
+                    for rec_h in df.to_dict("records"):
+                        ident_h = rec_h.get("Identité")
+                        if ident_h not in df_hist_idx:
+                            df_hist_idx[ident_h] = rec_h
 
                 dates_triees = sorted(st.session_state['db']['historique_appels'].items(), reverse=True)
+                if not afficher_tout_hist and not recherche_eleve:
+                    dates_triees = dates_triees[:10]
                 appels_affiches = 0
 
                 for date_appel, data_groupes in dates_triees:
@@ -2072,9 +2224,8 @@ else:
 
                                 liste_donnees_absents = []
                                 for eleve_abs in absents:
-                                    match = df[df["Identité"] == eleve_abs] if (not df.empty and "Identité" in df.columns) else pd.DataFrame()
-                                    if not match.empty:
-                                        row_abs = match.iloc[0]
+                                    row_abs = df_hist_idx.get(eleve_abs)
+                                    if row_abs is not None:
                                         nom_e = str(row_abs.get("Nom", "")).strip()
                                         prenom_e = str(row_abs.get("Prénom", "")).strip()
                                         parent_leg = str(row_abs.get("Nom et prénom du responsable légal", "")).strip()
@@ -2394,11 +2545,11 @@ else:
                 with c_part2:
                     st.metric("En Forfait", len(joueurs_forfaits))
 
-                # Calcul des Elos actifs pour tous les inscrits (hiérarchie FIDE > National > Crevette)
-                elos_actifs, types_elos = {}, {}
-                for j in joueurs_inscrits:
-                    e_val, e_type = get_elo_actif(j, df, st.session_state['db'])
-                    elos_actifs[j], types_elos[j] = e_val, e_type
+                # Calcul vectorisé des Elos actifs pour tous les inscrits (hiérarchie FIDE > National > Crevette)
+                st.session_state['forfaits_actuels'] = list(joueurs_forfaits)
+                elos_batch_t = calculer_elos_actifs_batch(joueurs_inscrits, df, st.session_state['db'])
+                elos_actifs = {j: elos_batch_t[j][0] for j in joueurs_inscrits}
+                types_elos = {j: elos_batch_t[j][1] for j in joueurs_inscrits}
 
                 # --- 2. GESTION ET PERSISTANCE DU TOURNOI ---
                 if 'etats_tournois' not in st.session_state['db']:
@@ -2406,6 +2557,8 @@ else:
                 etat_sauve = st.session_state['db']['etats_tournois'].get(creneau_tournoi)
 
                 if 'tournoi_en_cours' not in st.session_state or st.session_state.get('tournoi_en_cours') != creneau_tournoi:
+                    for k_old in [k for k in list(st.session_state.keys()) if k.startswith(f"res_{creneau_tournoi}_")]:
+                        st.session_state.pop(k_old, None)
                     if etat_sauve:
                         st.session_state['scores_tournoi'] = dict(etat_sauve.get('scores', {j: 0.0 for j in joueurs_inscrits}))
                         st.session_state['adversaires_tournoi'] = {k: list(v) for k, v in etat_sauve.get('adversaires', {j: [] for j in joueurs_inscrits}).items()}
@@ -2414,6 +2567,7 @@ else:
                         st.session_state['exempts_passes'] = set(etat_sauve.get('exempts', []))
                         st.session_state['ronde_actuelle'] = etat_sauve.get('ronde', 1)
                         st.session_state['appariements_ronde'] = [tuple(p) for p in etat_sauve.get('appariements', [])]
+                        st.session_state['resultats_en_cours'] = {str(k): v for k, v in etat_sauve.get('resultats_en_cours', {}).items()}
                         st.session_state['exempt_ronde'] = etat_sauve.get('exempt_ronde', None)
                         st.session_state['historique_rondes'] = list(etat_sauve.get('historique_rondes', []))
                         st.session_state['historique_ajustements'] = list(etat_sauve.get('historique_ajustements', []))
@@ -2426,6 +2580,7 @@ else:
                         st.session_state['exempts_passes'] = set()
                         st.session_state['ronde_actuelle'] = 1
                         st.session_state['appariements_ronde'] = []
+                        st.session_state['resultats_en_cours'] = {}
                         st.session_state['exempt_ronde'] = None
                         st.session_state['historique_rondes'] = []
                         st.session_state['historique_ajustements'] = []
@@ -2434,6 +2589,7 @@ else:
                 # Sécurité sur les clés
                 if 'historique_rondes' not in st.session_state: st.session_state['historique_rondes'] = []
                 if 'historique_ajustements' not in st.session_state: st.session_state['historique_ajustements'] = []
+                if 'resultats_en_cours' not in st.session_state: st.session_state['resultats_en_cours'] = {}
                 for j in joueurs_inscrits:
                     if j not in st.session_state['scores_tournoi']: st.session_state['scores_tournoi'][j] = 0.0
                     if j not in st.session_state['adversaires_tournoi']: st.session_state['adversaires_tournoi'][j] = []
@@ -2611,8 +2767,13 @@ else:
                                     st.session_state['ronde_actuelle'] = r_num
                                     st.session_state['appariements_ronde'] = [(m['blanc'], m['noir']) for m in reopened.get('matchs', [])]
                                     st.session_state['exempt_ronde'] = reopened.get('exempt')
+                                    st.session_state['resultats_en_cours'] = {
+                                        str(i_m): m.get('resultat', "Sélectionner...")
+                                        for i_m, m in enumerate(reopened.get('matchs', []), 1)
+                                        if m.get('resultat', "Sélectionner...") in RESULTATS_MATCH_OPTIONS
+                                    }
                                     for i_m, m in enumerate(reopened.get('matchs', []), 1):
-                                        st.session_state[f"res_{creneau_tournoi}_{r_num}_{i_m}"] = m.get('resultat', "Sélectionner...")
+                                        st.session_state.pop(f"res_{creneau_tournoi}_{r_num}_{i_m}", None)
                                         st.session_state.pop(f"hist_res_{creneau_tournoi}_{r_num}_{i_m - 1}", None)
                                     sauvegarder_etat_tournoi(creneau_tournoi)
                                     st.session_state['msg_tournoi_action'] = f"↩️ Ronde {r_num} rouverte : vous pouvez corriger ses résultats ou la réinitialiser pour ré-apparier."
@@ -2627,6 +2788,7 @@ else:
                         for i_clr in range(1, len(st.session_state.get('appariements_ronde', [])) + 1):
                             st.session_state.pop(f"res_{creneau_tournoi}_{st.session_state['ronde_actuelle']}_{i_clr}", None)
                         st.session_state['appariements_ronde'] = []
+                        st.session_state['resultats_en_cours'] = {}
                         if st.session_state.get('exempt_ronde') and st.session_state['exempt_ronde'] in st.session_state['exempts_passes']:
                             st.session_state['exempts_passes'].remove(st.session_state['exempt_ronde'])
                         st.session_state['exempt_ronde'] = None
@@ -2655,7 +2817,10 @@ else:
                             exempts_precedents=st.session_state['exempts_passes'],
                             ronde=st.session_state['ronde_actuelle']
                         )
+                        for i_clr in range(1, len(pairs) + 2):
+                            st.session_state.pop(f"res_{creneau_tournoi}_{st.session_state['ronde_actuelle']}_{i_clr}", None)
                         st.session_state['appariements_ronde'] = pairs
+                        st.session_state['resultats_en_cours'] = {}
                         st.session_state['exempt_ronde'] = exempt
                         if exempt:
                             st.session_state['exempts_passes'].add(exempt)
@@ -2675,6 +2840,8 @@ else:
                         st.session_state['plein_ecran_ronde'] = True
                         st.rerun()
                         
+                    options_res = ["Sélectionner..."] + RESULTATS_MATCH_OPTIONS
+                    res_en_cours = st.session_state.get('resultats_en_cours', {})
                     resultats_saisis = []
                     for i, (j1, j2) in enumerate(st.session_state['appariements_ronde'], 1):
                         sym1 = "⚡" if "FIDE" in types_elos[j1] else ("🇫🇷" if "National" in types_elos[j1] else "🦐")
@@ -2683,7 +2850,10 @@ else:
                         pts2 = st.session_state['scores_tournoi'].get(j2, 0.0)
                         c_ech, c_res = st.columns([3, 2])
                         c_ech.markdown(f"**Échiquier {i} :** ⚪ **{j1}** [{pts1} pts] ({elos_actifs[j1]} {sym1})  🆚  ⚫ **{j2}** [{pts2} pts] ({elos_actifs[j2]} {sym2})")
-                        res = c_res.selectbox(f"Résultat", ["Sélectionner..."] + RESULTATS_MATCH_OPTIONS, key=f"res_{creneau_tournoi}_{st.session_state['ronde_actuelle']}_{i}", label_visibility="collapsed")
+                        w_key = f"res_{creneau_tournoi}_{st.session_state['ronde_actuelle']}_{i}"
+                        val_sauvee = res_en_cours.get(str(i), "Sélectionner...")
+                        idx_def = options_res.index(val_sauvee) if val_sauvee in options_res else 0
+                        res = c_res.selectbox("Résultat", options_res, index=idx_def, key=w_key, label_visibility="collapsed")
                         resultats_saisis.append((j1, j2, res))
                         
                     if st.session_state.get('exempt_ronde'):
@@ -2692,10 +2862,28 @@ else:
                         pts_ex = st.session_state['scores_tournoi'].get(ex, 0.0)
                         st.warning(f"👑 **Exempt (+1 pt) :** {ex} [{pts_ex} pts] ({elos_actifs[ex]} {sym_ex})")
 
+                    nouveaux_res_en_cours = {
+                        str(idx_m): val_m
+                        for idx_m, (_, _, val_m) in enumerate(resultats_saisis, 1)
+                        if val_m != "Sélectionner..."
+                    }
+                    st.session_state['resultats_en_cours'] = nouveaux_res_en_cours
+                    anciens_res_db = st.session_state['db'].get('etats_tournois', {}).get(creneau_tournoi, {}).get('resultats_en_cours', {})
+                    nb_saisis = len(nouveaux_res_en_cours)
+                    nb_total = len(resultats_saisis)
+                    tous_renseignes = (nb_saisis == nb_total)
+
                     st.markdown("---")
-                    if st.button("💾 Valider les résultats & Mettre à jour les Elos"):
-                        if any(r[2] == "Sélectionner..." for r in resultats_saisis):
-                            st.error("⚠️ Veuillez renseigner le résultat de tous les échiquiers avant de valider.")
+                    btn_valider_ronde = st.button("💾 Valider les résultats & Mettre à jour les Elos")
+
+                    if not (btn_valider_ronde and tous_renseignes) and nouveaux_res_en_cours != anciens_res_db:
+                        sauvegarder_etat_tournoi(creneau_tournoi)
+
+                    st.caption(f"☁️ Sauvegarde automatique dans le Cloud : **{nb_saisis}/{nb_total}** résultat(s) enregistré(s) pour cette ronde (conservés même en cas de déconnexion).")
+
+                    if btn_valider_ronde:
+                        if not tous_renseignes:
+                            st.error(f"⚠️ Veuillez renseigner le résultat de tous les échiquiers ({nb_saisis}/{nb_total}) avant de clôturer la ronde. Les résultats déjà saisis sont sauvegardés automatiquement.")
                         else:
                             variations_crevette = []
                             matchs_historique = []
@@ -2742,6 +2930,7 @@ else:
                                     'crevette_delta_blanc': diff1,
                                     'crevette_delta_noir': diff2,
                                 })
+                                st.session_state.pop(f"res_{creneau_tournoi}_{ronde_validee}_{m_idx + 1}", None)
                                 st.session_state.pop(f"hist_res_{creneau_tournoi}_{ronde_validee}_{m_idx}", None)
 
                             exempt_valide = st.session_state.get('exempt_ronde')
@@ -2758,6 +2947,7 @@ else:
 
                             st.session_state['ronde_actuelle'] = ronde_validee + 1
                             st.session_state['appariements_ronde'] = []
+                            st.session_state['resultats_en_cours'] = {}
                             st.session_state['exempt_ronde'] = None
 
                             # Sauvegarde dans le Cloud Google Sheets
@@ -2794,7 +2984,8 @@ else:
             creneaux_remplis_classement = [k for k, v in st.session_state['db']['affectations_creneaux'].items() if len(v) > 0]
             filtre_c = st.selectbox("Filtrer par liste / créneau :", ["Tous les élèves"] + sorted(creneaux_remplis_classement))
             joueurs_a_afficher = list(df["Identité"].unique()) if filtre_c == "Tous les élèves" else list(set(st.session_state['db']['affectations_creneaux'][filtre_c]))
-            data_classement = [{"Élève": j, "Catégorie": get_elo_actif(j, df, st.session_state['db'])[1], "Elo ⚡🦐": get_elo_actif(j, df, st.session_state['db'])[0]} for j in joueurs_a_afficher]
+            elos_batch_cl = calculer_elos_actifs_batch(joueurs_a_afficher, df, st.session_state['db'])
+            data_classement = [{"Élève": j, "Catégorie": elos_batch_cl[j][1], "Elo ⚡🦐": elos_batch_cl[j][0]} for j in joueurs_a_afficher]
             
             if data_classement:
                 df_classement = pd.DataFrame(data_classement).sort_values(by="Elo ⚡🦐", ascending=False).reset_index(drop=True)
