@@ -2182,12 +2182,12 @@ else:
                     tot_absents_jour = 0
 
                     for groupe, infos in data_groupes.items():
-                        presents = infos.get('presents', [])
+                        presents = list(dict.fromkeys(infos.get('presents', [])))
                         if 'absents' in infos and infos['absents'] is not None:
-                            absents = infos['absents']
+                            absents = list(dict.fromkeys(infos['absents']))
                         else:
                             inscrits = st.session_state['db'].get('affectations_creneaux', {}).get(groupe, [])
-                            absents = [e for e in inscrits if e not in presents]
+                            absents = list(dict.fromkeys(e for e in inscrits if e not in presents))
 
                         if filtre_absents_seuls and len(absents) == 0:
                             continue
@@ -2267,7 +2267,7 @@ else:
                                         "row": row_valide
                                     })
 
-                                for info_abs in liste_donnees_absents:
+                                for idx_abs, info_abs in enumerate(liste_donnees_absents):
                                     with st.container(border=True):
                                         col_a, col_b, col_c, col_d = st.columns([3, 3, 3, 2])
                                         with col_a:
@@ -2299,7 +2299,7 @@ else:
                                                     data=vcard_b,
                                                     file_name=f"Parent_{info_abs['Identité']}.vcf".replace(" ", "_"),
                                                     mime="text/vcard",
-                                                    key=f"vcf_{date_appel}_{groupe}_{info_abs['Identité']}",
+                                                    key=f"vcf_{date_appel}_{groupe}_{idx_abs}_{info_abs['Identité']}",
                                                     use_container_width=True
                                                 )
 
@@ -2444,8 +2444,8 @@ else:
                 note_seance = st.text_area("📝 Note de séance (comportement, travail réalisé, etc.) :", "")
 
                 if st.button(f"💾 Enregistrer l'appel pour {lieu_appel}"):
-                    liste_presents = [df_groupe.loc[idx_app, 'Identité'] for idx_app, row_ed in edited_df.iterrows() if row_ed["Présent ✅"]]
-                    liste_absents = [df_groupe.loc[idx_app, 'Identité'] for idx_app, row_ed in edited_df.iterrows() if not row_ed["Présent ✅"]]
+                    liste_presents = list(dict.fromkeys(df_groupe.loc[idx_app, 'Identité'] for idx_app, row_ed in edited_df.iterrows() if row_ed["Présent ✅"]))
+                    liste_absents = list(dict.fromkeys(df_groupe.loc[idx_app, 'Identité'] for idx_app, row_ed in edited_df.iterrows() if not row_ed["Présent ✅"]))
                     if date_jour not in st.session_state['db']['historique_appels']: st.session_state['db']['historique_appels'][date_jour] = {}
                     st.session_state['db']['historique_appels'][date_jour][lieu_appel] = {
                         "entraineur": entraineur_appel,
