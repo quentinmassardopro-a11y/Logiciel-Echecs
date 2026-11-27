@@ -3,11 +3,7 @@ pandas
 requests
 gspread>=6.0.0
 google-auth
-openpyxl
 xlsxwriter
-PyPDF2
-reportlab
 lxml
-html5lib
 beautifulsoup4
 chess

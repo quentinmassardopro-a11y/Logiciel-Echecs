@@ -58,13 +58,17 @@ def get_gsheets_client():
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     creds_dict = dict(st.secrets["gcp_service_account"])
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-    return gspread.authorize(creds)
+    client = gspread.authorize(creds)
+    if hasattr(client, "set_timeout"):
+        try: client.set_timeout(12)
+        except Exception: pass
+    return client
 
 def get_or_create_worksheet(sh, name):
     try: return sh.worksheet(name)
     except Exception: return sh.add_worksheet(title=name, rows="1000", cols="50")
 
-@st.cache_resource(ttl=1500, show_spinner=False)
+@st.cache_resource(ttl=900, show_spinner=False)
 def _get_gsheets_bundle_cached(creds_key):
     client = get_gsheets_client()
     sh = client.open("Base_Calanques_DB")
@@ -976,17 +980,17 @@ def _telecharger_ffe_calanques_uncached(timeout=12, silencieux=False):
     last_error = None
 
     try:
-        r = requests.get(url, headers=headers, verify=False, timeout=timeout)
+        req_timeout = (2.5, 4.0) if silencieux else (4.0, timeout)
+        r = requests.get(url, headers=headers, verify=False, timeout=req_timeout)
         if r.status_code == 200 and ('liste_clair' in r.text or 'liste_fonce' in r.text):
             html_content = r.content
     except Exception as e:
         last_error = e
 
-    if html_content is None:
+    if html_content is None and not silencieux:
         try:
             url_proxy = f"https://api.allorigins.win/get?url={urllib.parse.quote(url)}"
-            proxy_timeout = 5 if silencieux else max(timeout, 10)
-            r_proxy = requests.get(url_proxy, timeout=proxy_timeout)
+            r_proxy = requests.get(url_proxy, timeout=(4.0, max(timeout, 10)))
             if r_proxy.status_code == 200:
                 contents = r_proxy.json().get('contents', '')
                 if contents and ('liste_clair' in contents or 'liste_fonce' in contents):
@@ -1057,7 +1061,7 @@ def _telecharger_ffe_calanques_uncached(timeout=12, silencieux=False):
             st.sidebar.error(f"Erreur d'analyse FFE : {e}")
     return pd.DataFrame()
 
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=14400, show_spinner=False)
 def _telecharger_ffe_calanques_cached(timeout=12, silencieux=False):
     return _telecharger_ffe_calanques_uncached(timeout=timeout, silencieux=silencieux)
 
@@ -1400,34 +1404,10 @@ def fetch_campaign_items(token, form_type, form_slug, nom_campagne):
         
     return rows
 
-# --- CHARGEMENT INITIALISATION (PARALLÈLE & OPTIMISÉ) ---
-if 'db' not in st.session_state and 'df_adherents' not in st.session_state:
-    with st.spinner("Connexion rapide au Cloud Google..."):
-        try:
-            ws_db = _get_cached_worksheet("DB_JSON")
-            ws_adh = _get_cached_worksheet("Adherents")
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-                fut_db = executor.submit(ws_db.col_values, 1)
-                fut_adh = executor.submit(ws_adh.get_all_records)
-                vals_db = fut_db.result()
-                data_adh = fut_adh.result()
-            st.session_state["_db_json_chunks_count"] = len(vals_db)
-            st.session_state["_prefetched_db"] = json.loads("".join(vals_db)) if vals_db else initialiser_memoire_vierge()
-            if data_adh:
-                df_pre = pd.DataFrame(data_adh)
-                st.session_state["_adherents_cloud_shape"] = (len(df_pre) + 1, len(df_pre.columns))
-            else:
-                df_pre = pd.DataFrame()
-                st.session_state["_adherents_cloud_shape"] = (0, 0)
-            st.session_state["_prefetched_df_adh"] = df_pre
-        except Exception:
-            pass
-
+# --- CHARGEMENT INITIALISATION (CONNEXION UNIQUE EN CACHE & OPTIMISÉE) ---
 if 'db' not in st.session_state: 
-    with st.spinner("Connexion sécurisée au Cloud Google..."):
-        db_loaded = st.session_state.pop("_prefetched_db", None)
-        if db_loaded is None:
-            db_loaded = charger_base_cloud()
+    with st.spinner("Connexion rapide au Cloud Google..."):
+        db_loaded = charger_base_cloud()
         if db_loaded is None: st.stop() 
         
         # --- FIX ELO CREVETTE (Migration) ---
@@ -1454,9 +1434,7 @@ if 'db' not in st.session_state:
 
 if 'df_adherents' not in st.session_state:
     with st.spinner("Récupération de la base adhérents..."):
-        df_loaded = st.session_state.pop("_prefetched_df_adh", None)
-        if df_loaded is None:
-            df_loaded = charger_adherents_cloud()
+        df_loaded = charger_adherents_cloud()
         if df_loaded is None: st.stop() 
         
         if not df_loaded.empty: 
@@ -1472,14 +1450,13 @@ if 'df_adherents' not in st.session_state:
                 df_invalid = df_loaded[~mask_valid_id]
                 df_loaded = pd.concat([df_valid, df_invalid]).reset_index(drop=True)
 
-            def corriger_type_retroactif(row):
-                camp = str(row.get("Campagne", "")).lower()
-                form = str(row.get("Formule", "")).lower()
-                if "boutique" in camp: return "Boutique"
-                if "club" in camp or "club" in form: return "Club"
-                return "École"
-            
-            if "Type" in df_loaded.columns: df_loaded["Type"] = df_loaded.apply(corriger_type_retroactif, axis=1)
+            if "Type" in df_loaded.columns:
+                camps_low = df_loaded.get("Campagne", pd.Series("", index=df_loaded.index)).fillna("").astype(str).str.lower()
+                forms_low = df_loaded.get("Formule", pd.Series("", index=df_loaded.index)).fillna("").astype(str).str.lower()
+                df_loaded["Type"] = [
+                    "Boutique" if "boutique" in c else ("Club" if ("club" in c or "club" in f) else "École")
+                    for c, f in zip(camps_low, forms_low)
+                ]
 
             df_after_cmp = df_loaded.fillna("").astype(str).reset_index(drop=True)
             adherents_modifies = (len(df_loaded) != len_avant) or not df_after_cmp.equals(df_before_cmp)
@@ -1750,9 +1727,16 @@ if df.empty:
 else:
     if module_choisi == "🛠️ Module Administration":
         st.subheader("🛠️ Espace Administration du Club")
-        tab_admin, tab_ecoles, tab_cartes, tab_historique = st.tabs(["📊 Base Adhérents", "🏫 Écoles", "🎟️ Cartes de Centres", "📅 Historique Appels"])
-        
-        with tab_admin:
+        onglet_admin = st.radio(
+            "Rubrique Administration",
+            ["📊 Base Adhérents", "🏫 Écoles", "🎟️ Cartes de Centres", "📅 Historique Appels"],
+            horizontal=True,
+            key="nav_admin_tab",
+            label_visibility="collapsed"
+        )
+        st.markdown("---")
+
+        if onglet_admin == "📊 Base Adhérents":
             c_tools1, c_tools2 = st.columns(2)
             
             with c_tools1:
@@ -2023,69 +2007,78 @@ else:
             st.markdown("---")
             with st.expander("🗑️ Zone de Danger : Suppressions"):
                 st.warning("Les transactions supprimées n'apparaîtront plus. L'identifiant de paiement est mis sur Liste Noire.")
-                options_suppr = []
-                mapping_suppr = {}
-                for idx, row in df.iterrows():
-                    id_dos = nettoyer_id_dossier(row.get('ID_Dossier', 'Sans ID'))
-                    texte = f"👤 {row['Nom']} {row['Prénom']} | 📋 {row.get('Campagne', '-')} | 💰 {row.get('Montant Payé', '-')} (Dossier: {id_dos})"
-                    options_suppr.append(texte)
-                    mapping_suppr[texte] = idx
-                    
-                eleve_a_supprimer = st.selectbox("Sélectionner la transaction à mettre sur Liste Noire :", [""] + sorted(options_suppr))
-                if eleve_a_supprimer and st.button(f"🚨 Supprimer définitivement cette ligne"):
-                    idx_to_delete = mapping_suppr[eleve_a_supprimer]
-                    row_to_delete = df.loc[idx_to_delete]
-                    id_doss = nettoyer_id_dossier(row_to_delete.get('ID_Dossier'))
-                    if id_doss and str(id_doss) != "nan":
-                        db_remote = charger_base_cloud()
-                        if db_remote and 'dossiers_supprimes' in db_remote:
-                            remote_suppr = db_remote['dossiers_supprimes']
-                            if str(id_doss) not in remote_suppr:
-                                remote_suppr.append(str(id_doss))
-                            st.session_state['db']['dossiers_supprimes'] = remote_suppr
-                        else:
-                            if str(id_doss) not in st.session_state['db']['dossiers_supprimes']: 
-                                st.session_state['db']['dossiers_supprimes'].append(str(id_doss))
-                            
-                    identite = row_to_delete['Identité']
-                    st.session_state['df_adherents'] = df.drop(idx_to_delete).reset_index(drop=True)
-                    if identite not in st.session_state['df_adherents']['Identité'].values:
-                        for c in st.session_state['db']['affectations_creneaux']:
-                            if identite in st.session_state['db']['affectations_creneaux'][c]: st.session_state['db']['affectations_creneaux'][c].remove(identite)
-                        if identite in st.session_state['db'].get('eleves_deja_affectes', []): st.session_state['db']['eleves_deja_affectes'].remove(identite)
-                            
-                    sauvegarder_base_cloud(st.session_state['db'])
-                    sauvegarder_adherents_cloud(st.session_state['df_adherents'])
-                    st.success("✅ Transaction supprimée !")
-                    st.rerun()
+                if st.checkbox("🔓 Déverrouiller la suppression de dossiers", key="unlock_danger_admin"):
+                    options_suppr = []
+                    mapping_suppr = {}
+                    for idx, nom_s, pren_s, camp_s, mont_s, id_raw_s in zip(
+                        df.index,
+                        df.get("Nom", ""),
+                        df.get("Prénom", ""),
+                        df.get("Campagne", "-"),
+                        df.get("Montant Payé", "-"),
+                        df.get("ID_Dossier", "Sans ID")
+                    ):
+                        id_dos = nettoyer_id_dossier(id_raw_s if pd.notna(id_raw_s) else "Sans ID")
+                        texte = f"👤 {nom_s} {pren_s} | 📋 {camp_s} | 💰 {mont_s} (Dossier: {id_dos})"
+                        options_suppr.append(texte)
+                        mapping_suppr[texte] = idx
+                        
+                    eleve_a_supprimer = st.selectbox("Sélectionner la transaction à mettre sur Liste Noire :", [""] + sorted(options_suppr))
+                    if eleve_a_supprimer and st.button(f"🚨 Supprimer définitivement cette ligne"):
+                        idx_to_delete = mapping_suppr[eleve_a_supprimer]
+                        row_to_delete = df.loc[idx_to_delete]
+                        id_doss = nettoyer_id_dossier(row_to_delete.get('ID_Dossier'))
+                        if id_doss and str(id_doss) != "nan":
+                            db_remote = charger_base_cloud()
+                            if db_remote and 'dossiers_supprimes' in db_remote:
+                                remote_suppr = db_remote['dossiers_supprimes']
+                                if str(id_doss) not in remote_suppr:
+                                    remote_suppr.append(str(id_doss))
+                                st.session_state['db']['dossiers_supprimes'] = remote_suppr
+                            else:
+                                if str(id_doss) not in st.session_state['db']['dossiers_supprimes']: 
+                                    st.session_state['db']['dossiers_supprimes'].append(str(id_doss))
+                                
+                        identite = row_to_delete['Identité']
+                        st.session_state['df_adherents'] = df.drop(idx_to_delete).reset_index(drop=True)
+                        if identite not in st.session_state['df_adherents']['Identité'].values:
+                            for c in st.session_state['db']['affectations_creneaux']:
+                                if identite in st.session_state['db']['affectations_creneaux'][c]: st.session_state['db']['affectations_creneaux'][c].remove(identite)
+                            if identite in st.session_state['db'].get('eleves_deja_affectes', []): st.session_state['db']['eleves_deja_affectes'].remove(identite)
+                                
+                        sauvegarder_base_cloud(st.session_state['db'])
+                        sauvegarder_adherents_cloud(st.session_state['df_adherents'])
+                        st.success("✅ Transaction supprimée !")
+                        st.rerun()
 
             st.markdown("---")
             st.markdown("#### 📥 Exports & Licences FFE")
-            col_ex1, col_ex2, col_ex3 = st.columns(3)
-            nom_fich_admin = f"Administration_Club_{date_jour.replace('/', '-')}"
-            csv_data_admin = df_display[colonnes_finales].to_csv(index=True).encode('utf-8')
-            col_ex1.download_button("📄 Export Tableau (CSV)", data=csv_data_admin, file_name=f"{nom_fich_admin}.csv", mime="text/csv")
-            try:
-                buffer_admin = io.BytesIO()
-                with pd.ExcelWriter(buffer_admin, engine='xlsxwriter') as writer: df_display[colonnes_finales].to_excel(writer, index=True, sheet_name='Base')
-                col_ex2.download_button("📊 Export Tableau (Excel)", data=buffer_admin.getvalue(), file_name=f"{nom_fich_admin}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-            except: pass
+            if st.checkbox("📥 Préparer les exports (CSV / Excel / Licence FFE)", key="prep_exports_admin"):
+                col_ex1, col_ex2, col_ex3 = st.columns(3)
+                nom_fich_admin = f"Administration_Club_{date_jour.replace('/', '-')}"
+                csv_data_admin = df_display[colonnes_finales].to_csv(index=True).encode('utf-8')
+                col_ex1.download_button("📄 Export Tableau (CSV)", data=csv_data_admin, file_name=f"{nom_fich_admin}.csv", mime="text/csv")
+                try:
+                    buffer_admin = io.BytesIO()
+                    with pd.ExcelWriter(buffer_admin, engine='xlsxwriter') as writer: df_display[colonnes_finales].to_excel(writer, index=True, sheet_name='Base')
+                    col_ex2.download_button("📊 Export Tableau (Excel)", data=buffer_admin.getvalue(), file_name=f"{nom_fich_admin}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                except: pass
 
-            df_ffe_export = pd.DataFrame()
-            df_ffe_export['FFE Identifiant'] = ""
-            df_ffe_export['Nom'], df_ffe_export['Prénom'] = df_admin['Nom'], df_admin['Prénom']
-            df_ffe_export['Date de Naissance (AAAA-MM-JJ)'] = df_admin['Date de naissance']
-            df_ffe_export['Sexe (M ou F)'] = df_admin['Prénom'].apply(estimer_sexe)
-            df_ffe_export['Email'] = df_admin['EMail']
-            df_ffe_export['Pays (ISO 3, FRA pour France)'] = "FRA"
-            col_qs = 'e confirme avoir renseigné le questionnaire de santé "Sport" (mineurs) https://www.echecs.asso.fr/Actus/14098/questionnaire_mineur.pdf'
-            if col_qs in df_admin.columns: df_ffe_export['Attestation Médicale (Oui/Non)'] = df_admin[col_qs].apply(lambda x: "Oui" if str(x).lower() in ['true', 'oui', 'yes', 'vrai', 'on', '1'] else "Non")
-            else: df_ffe_export['Attestation Médicale (Oui/Non)'] = "Non"
-            df_ffe_export['Licence (A ou B)'] = "B" 
-            csv_ffe = df_ffe_export.to_csv(index=False, sep=";").encode('utf-8-sig')
-            col_ex3.download_button("♟️ Fichier Prise de Licence FFE", data=csv_ffe, file_name=f"import_ffe_{date_jour.replace('/', '-')}.csv", mime="text/csv")
+                df_ffe_export = pd.DataFrame()
+                df_ffe_export['FFE Identifiant'] = ""
+                df_ffe_export['Nom'], df_ffe_export['Prénom'] = df_admin['Nom'], df_admin['Prénom']
+                df_ffe_export['Date de Naissance (AAAA-MM-JJ)'] = df_admin['Date de naissance']
+                df_ffe_export['Sexe (M ou F)'] = df_admin['Prénom'].apply(estimer_sexe)
+                df_ffe_export['Email'] = df_admin['EMail']
+                df_ffe_export['Pays (ISO 3, FRA pour France)'] = "FRA"
+                col_qs = 'e confirme avoir renseigné le questionnaire de santé "Sport" (mineurs) https://www.echecs.asso.fr/Actus/14098/questionnaire_mineur.pdf'
+                if col_qs in df_admin.columns: df_ffe_export['Attestation Médicale (Oui/Non)'] = df_admin[col_qs].apply(lambda x: "Oui" if str(x).lower() in ['true', 'oui', 'yes', 'vrai', 'on', '1'] else "Non")
+                else: df_ffe_export['Attestation Médicale (Oui/Non)'] = "Non"
+                df_ffe_export['Licence (A ou B)'] = "B" 
+                csv_ffe = df_ffe_export.to_csv(index=False, sep=";").encode('utf-8-sig')
+                col_ex3.download_button("♟️ Fichier Prise de Licence FFE", data=csv_ffe, file_name=f"import_ffe_{date_jour.replace('/', '-')}.csv", mime="text/csv")
             
-        with tab_ecoles:
+        elif onglet_admin == "🏫 Écoles":
             st.markdown("### 🏫 Pilotage des Établissements Scolaires")
             ecoles_dispos = [c for c in df["Campagne"].unique() if "club" not in c.lower() and "adhésion" not in c.lower() and "adhesion" not in c.lower() and "boutique" not in c.lower()]
             if ecoles_dispos:
@@ -2131,7 +2124,7 @@ else:
                     csv_wa = df_wa.to_csv(index=False).encode('utf-8-sig')
                     st.download_button(f"📥 Télécharger Contacts ({len(df_wa)} numéros valides)", data=csv_wa, file_name=f"{nom_fich_wa}.csv", mime="text/csv")
 
-        with tab_cartes:
+        elif onglet_admin == "🎟️ Cartes de Centres":
             st.markdown("### 🎟️ Suivi des Cartes de Centres (Cassis & Carnoux)")
             ville_carte = st.radio("Sélectionner la commune à vérifier :", ["Cassis (Carte Centre Culturel)", "Carnoux (Carte du Coq)"])
             ville_cle = "Cassis" if "Cassis" in ville_carte else "Carnoux"
@@ -2149,20 +2142,22 @@ else:
                     sauvegarder_base_cloud(st.session_state['db'])
                     st.success("Sauvegardé dans le Cloud !")
 
-        with tab_historique:
+        elif onglet_admin == "📅 Historique Appels":
             st.markdown("### 📅 Registre des présences & Suivi des absents")
             if not st.session_state['db']['historique_appels']:
                 st.info("Aucun appel n'a été enregistré.")
             else:
                 st.write("Consultez l'historique des présences par date et créneau, visualisez immédiatement les élèves absents et accédez à toutes les coordonnées pour contacter leurs parents.")
                 
-                col_f1, col_f2, col_f3 = st.columns([2, 1.5, 1.2])
+                col_f1, col_f2, col_f3, col_f4 = st.columns([2, 1.4, 1, 1.2])
                 with col_f1:
-                    filtre_absents_seuls = st.checkbox("🔍 Afficher uniquement les séances avec des élèves absents", value=False)
+                    filtre_absents_seuls = st.checkbox("🔍 Séances avec absents", value=False)
                 with col_f2:
                     recherche_eleve = st.text_input("Rechercher un élève :", placeholder="Nom ou prénom...", key="rech_abs_hist").strip().lower()
                 with col_f3:
                     afficher_tout_hist = st.checkbox("Tout l'historique", value=False, key="hist_show_all")
+                with col_f4:
+                    afficher_vcards = st.checkbox("📇 Boutons vCard", value=False, key="hist_show_vcards")
 
                 df_hist_idx = {}
                 if not df.empty and "Identité" in df.columns:
@@ -2173,7 +2168,7 @@ else:
 
                 dates_triees = sorted(st.session_state['db']['historique_appels'].items(), reverse=True)
                 if not afficher_tout_hist and not recherche_eleve:
-                    dates_triees = dates_triees[:10]
+                    dates_triees = dates_triees[:5]
                 appels_affiches = 0
 
                 for date_appel, data_groupes in dates_triees:
@@ -2292,7 +2287,7 @@ else:
                                             if not info_abs['Portable'] and not info_abs['Urgence']:
                                                 st.caption("Aucun numéro renseigné")
                                         with col_d:
-                                            if info_abs['row'] is not None:
+                                            if afficher_vcards and info_abs['row'] is not None:
                                                 vcard_b = generer_vcard(info_abs['row'])
                                                 st.download_button(
                                                     label="📇 vCard Parent",
@@ -2373,9 +2368,16 @@ else:
 
     elif module_choisi == "♟️ Module Entraîneur":
         st.subheader("♟️ Espace Entraîneur")
-        tab_appel, tab_tournoi, tab_classement, tab_affectations, tab_ouvertures = st.tabs(["📋 Faire l'Appel", "⚔️ Tournoi & Elo", "🏆 Classement", "⚙️ Affecter Élèves", "📖 Ouvertures"])
+        onglet_ent = st.radio(
+            "Rubrique Entraîneur",
+            ["📋 Faire l'Appel", "⚔️ Tournoi & Elo", "🏆 Classement", "⚙️ Affecter Élèves", "📖 Ouvertures"],
+            horizontal=True,
+            key="nav_ent_tab",
+            label_visibility="collapsed"
+        )
+        st.markdown("---")
 
-        with tab_affectations:
+        if onglet_ent == "⚙️ Affecter Élèves":
             st.markdown("### ⚙️ Création Manuelle des listes de Créneaux")
             c_jour, c_lieu = st.columns(2)
             with c_jour: jour_aff = st.selectbox("Jour :", options=list(structure_creneaux.keys()), key="jour_aff")
@@ -2392,7 +2394,7 @@ else:
                 sauvegarder_base_cloud(st.session_state['db'])
                 st.success(f"Liste de {lieu_aff} mise à jour dans le Cloud !")
 
-        with tab_appel:
+        elif onglet_ent == "📋 Faire l'Appel":
             st.markdown(f"### 📋 Appel du jour : **{date_jour}**")
             entraineur_appel = st.selectbox("Entraîneur responsable :", ["Quentin Massardo", "Alexandre Merenciano"])
             c_jour_ap, c_lieu_ap = st.columns(2)
@@ -2457,19 +2459,20 @@ else:
                     st.success("Appel enregistré dans le Cloud !")
                 st.markdown("---")
                 st.markdown("#### 📥 Exporter la liste d'appel")
-                col_ap1, col_ap2 = st.columns(2)
-                nom_fich_ap = f"Appel_{lieu_appel}".replace(" ", "_").replace("/", "-")
-                df_appel_export = df_groupe[["Nom", "Prénom", "N° Portable", "N° Portable 2 (en cas d'urgence)", "Campagne"]].copy()
-                df_appel_export['Sortie Seul'] = df_appel_export.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Nom']+" "+r['Prénom'], "-"), axis=1)
-                
-                col_ap1.download_button("📄 Exporter en CSV", data=df_appel_export.to_csv(index=False).encode('utf-8'), file_name=f"{nom_fich_ap}.csv", mime="text/csv")
-                try:
-                    buffer_ap = io.BytesIO()
-                    with pd.ExcelWriter(buffer_ap, engine='xlsxwriter') as writer: df_appel_export.to_excel(writer, index=False, sheet_name='Appel')
-                    col_ap2.download_button("📊 Exporter en Excel", data=buffer_ap.getvalue(), file_name=f"{nom_fich_ap}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-                except: pass
+                if st.checkbox("📥 Préparer les exports CSV / Excel", key="prep_exports_appel"):
+                    col_ap1, col_ap2 = st.columns(2)
+                    nom_fich_ap = f"Appel_{lieu_appel}".replace(" ", "_").replace("/", "-")
+                    df_appel_export = df_groupe[["Nom", "Prénom", "N° Portable", "N° Portable 2 (en cas d'urgence)", "Campagne"]].copy()
+                    df_appel_export['Sortie Seul'] = df_appel_export.apply(lambda r: st.session_state['db']['sorties_manuelles'].get(r['Nom']+" "+r['Prénom'], "-"), axis=1)
+                    
+                    col_ap1.download_button("📄 Exporter en CSV", data=df_appel_export.to_csv(index=False).encode('utf-8'), file_name=f"{nom_fich_ap}.csv", mime="text/csv")
+                    try:
+                        buffer_ap = io.BytesIO()
+                        with pd.ExcelWriter(buffer_ap, engine='xlsxwriter') as writer: df_appel_export.to_excel(writer, index=False, sheet_name='Appel')
+                        col_ap2.download_button("📊 Exporter en Excel", data=buffer_ap.getvalue(), file_name=f"{nom_fich_ap}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                    except: pass
 
-        with tab_tournoi:
+        elif onglet_ent == "⚔️ Tournoi & Elo":
             st.markdown("### ⚔️ Tournoi Suisse & Elos")
             creneaux_remplis = [k for k, v in st.session_state['db']['affectations_creneaux'].items() if len(v) > 0]
             if not creneaux_remplis:
@@ -2962,7 +2965,7 @@ else:
                     st.info(f"📈 **Mise à jour des Elos Crevette de la ronde précédente :** {st.session_state['msg_variations_crevette']}")
                     del st.session_state['msg_variations_crevette']
 
-        with tab_classement:
+        elif onglet_ent == "🏆 Classement":
             c_cl1, c_cl2 = st.columns([3, 1])
             c_cl1.markdown("### 🏆 Classement Général (FIDE, National & Crevette)")
             if c_cl2.button("🔄 Actualiser Elos FFE", key="btn_sync_ffe_classement", use_container_width=True):
@@ -2994,7 +2997,7 @@ else:
                 st.dataframe(df_classement, use_container_width=True, column_config={"Elo ⚡🦐": st.column_config.ProgressColumn("Niveau de puissance", format="%d", min_value=100, max_value=int(max_elo))})
             else: st.info("Aucun élève à afficher.")
 
-        with tab_ouvertures:
+        elif onglet_ent == "📖 Ouvertures":
             st.markdown("### 📖 Ouvertures des Élèves (Codes ECO)")
             st.info("Sélectionnez un élève et attribuez-lui les ouvertures qu'il joue avec les Blancs et les Noirs selon la classification officielle ECO.")
 
